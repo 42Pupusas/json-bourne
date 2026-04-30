@@ -47,11 +47,11 @@ struct UserSerde<'a> {
 }
 
 impl<'input> FromJson<'input> for UserBourne<'input> {
-    fn from_json<S: EventSource<'input>>(source: &mut S) -> Result<Self, Error> {
-        let first = source
-            .next_event()?
-            .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-        if !matches!(first, Event::StartObject) {
+    fn from_event<S: EventSource<'input>>(
+        source: &mut S,
+        start: Event<'input>,
+    ) -> Result<Self, Error> {
+        if !matches!(start, Event::StartObject) {
             return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
         }
         let mut id: Option<u64> = None;
@@ -72,13 +72,16 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
             let key_str = key
                 .as_str()
                 .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, source.position()))?;
+            let val_ev = source
+                .next_event()?
+                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
             match key_str {
-                "id" => id = Some(u64::from_json(source)?),
-                "name" => name = Some(<&str>::from_json(source)?),
-                "verified" => verified = Some(bool::from_json(source)?),
-                "followers" => followers = Some(u32::from_json(source)?),
-                "bio" => bio = Option::<&str>::from_json(source)?,
-                "links" => links = Some(Vec::<&str>::from_json(source)?),
+                "id" => id = Some(u64::from_event(source, val_ev)?),
+                "name" => name = Some(<&str>::from_event(source, val_ev)?),
+                "verified" => verified = Some(bool::from_event(source, val_ev)?),
+                "followers" => followers = Some(u32::from_event(source, val_ev)?),
+                "bio" => bio = Option::<&str>::from_event(source, val_ev)?,
+                "links" => links = Some(Vec::<&str>::from_event(source, val_ev)?),
                 _ => return Err(Error::new(ErrorKind::UnknownField, source.position())),
             }
         }

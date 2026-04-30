@@ -18,7 +18,7 @@ extern crate alloc;
 mod de;
 
 pub use bourne_core::{Error, ErrorKind, Event, JsonNum, JsonStr, Parser, Position};
-pub use de::{EventSource, FromJson, PeekableParser, parse, parse_str};
+pub use de::{EventSource, FromJson, parse, parse_str};
 
 #[cfg(test)]
 mod tests {
@@ -38,11 +38,11 @@ mod tests {
     }
 
     impl<'input> FromJson<'input> for User<'input> {
-        fn from_json<S: EventSource<'input>>(source: &mut S) -> Result<Self, Error> {
-            let first = source
-                .next_event()?
-                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-            if !matches!(first, Event::StartObject) {
+        fn from_event<S: EventSource<'input>>(
+            source: &mut S,
+            start: Event<'input>,
+        ) -> Result<Self, Error> {
+            if !matches!(start, Event::StartObject) {
                 return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
             }
 
@@ -66,30 +66,37 @@ mod tests {
                     Error::new(ErrorKind::InvalidEscape, source.position())
                 })?;
 
+                // Pull the value's first event up front; each branch then
+                // dispatches via T::from_event without going back to the
+                // source for it.
+                let val_ev = source.next_event()?.ok_or_else(|| {
+                    Error::new(ErrorKind::UnexpectedEof, source.position())
+                })?;
+
                 match key_str {
                     "id" => {
                         if id.is_some() {
                             return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
                         }
-                        id = Some(u64::from_json(source)?);
+                        id = Some(u64::from_event(source, val_ev)?);
                     }
                     "name" => {
                         if name.is_some() {
                             return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
                         }
-                        name = Some(<&str>::from_json(source)?);
+                        name = Some(<&str>::from_event(source, val_ev)?);
                     }
                     "active" => {
                         if active.is_some() {
                             return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
                         }
-                        active = Some(bool::from_json(source)?);
+                        active = Some(bool::from_event(source, val_ev)?);
                     }
                     "nickname" => {
                         if nickname.is_some() {
                             return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
                         }
-                        nickname = Option::<&str>::from_json(source)?;
+                        nickname = Option::<&str>::from_event(source, val_ev)?;
                     }
                     _ => {
                         return Err(Error::new(ErrorKind::UnknownField, source.position()));

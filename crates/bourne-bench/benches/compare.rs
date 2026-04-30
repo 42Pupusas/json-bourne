@@ -1,10 +1,10 @@
-//! Head-to-head: bourne vs serde_json.
+//! Head-to-head: bourne vs `serde_json`.
 //!
 //! Each criterion group contains one `bourne` and one `serde_json` function
 //! over the same input, so the report shows the two bars side by side.
 //!
 //! Categories:
-//!   1. `stream_vs_dom` — bourne's streaming parser vs serde_json's DOM
+//!   1. `stream_vs_dom` — bourne's streaming parser vs `serde_json`'s DOM
 //!      parse of the same bytes. Not apples-to-apples (different output
 //!      types) but the only honest framing for a streaming-first lib: the
 //!      question is "what does the user actually pay to get from bytes to
@@ -57,11 +57,11 @@ struct UserSerde<'a> {
 }
 
 impl<'input> FromJson<'input> for UserBourne<'input> {
-    fn from_json<S: EventSource<'input>>(source: &mut S) -> Result<Self, Error> {
-        let first = source
-            .next_event()?
-            .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-        if !matches!(first, Event::StartObject) {
+    fn from_event<S: EventSource<'input>>(
+        source: &mut S,
+        start: Event<'input>,
+    ) -> Result<Self, Error> {
+        if !matches!(start, Event::StartObject) {
             return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
         }
 
@@ -85,13 +85,17 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
                 .as_str()
                 .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, source.position()))?;
 
+            let val_ev = source
+                .next_event()?
+                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
+
             match key_str {
-                "id" => id = Some(u64::from_json(source)?),
-                "name" => name = Some(<&str>::from_json(source)?),
-                "verified" => verified = Some(bool::from_json(source)?),
-                "followers" => followers = Some(u32::from_json(source)?),
-                "bio" => bio = Option::<&str>::from_json(source)?,
-                "links" => links = Some(Vec::<&str>::from_json(source)?),
+                "id" => id = Some(u64::from_event(source, val_ev)?),
+                "name" => name = Some(<&str>::from_event(source, val_ev)?),
+                "verified" => verified = Some(bool::from_event(source, val_ev)?),
+                "followers" => followers = Some(u32::from_event(source, val_ev)?),
+                "bio" => bio = Option::<&str>::from_event(source, val_ev)?,
+                "links" => links = Some(Vec::<&str>::from_event(source, val_ev)?),
                 _ => return Err(Error::new(ErrorKind::UnknownField, source.position())),
             }
         }

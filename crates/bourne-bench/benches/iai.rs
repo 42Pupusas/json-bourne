@@ -19,7 +19,7 @@ use std::sync::OnceLock;
 // Inputs are built once and held in a static. iai measures only the body of
 // the bench function; pre-building the input keeps construction cost out of
 // the count.
-fn small_object() -> &'static [u8] {
+const fn small_object() -> &'static [u8] {
     SMALL_OBJECT.as_bytes()
 }
 
