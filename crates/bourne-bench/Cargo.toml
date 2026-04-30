@@ -11,20 +11,33 @@ publish = false
 [dependencies]
 bourne-core = { path = "../bourne-core" }
 bourne = { path = "../bourne" }
+bourne-alloctest = { path = "../bourne-alloctest", optional = true }
 dhat = { version = "0.3", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [features]
 default = []
 # Enables the heap-profiling example. Build/run with:
 #   cargo run --release --features dhat-heap --example profile_heap
 dhat-heap = ["dep:dhat"]
+# Enables the memory-comparison binary that puts bourne and serde_json
+# through a counting allocator and prints a side-by-side report. Build/run:
+#   cargo run --release --features compare-mem --bin compare_mem
+compare-mem = ["dep:bourne-alloctest", "dep:serde", "dep:serde_json"]
 
 [[example]]
 name = "profile_heap"
 required-features = ["dhat-heap"]
+
+[[bin]]
+name = "compare_mem"
+required-features = ["compare-mem"]
 
 [[bench]]
 name = "stream"
@@ -36,6 +49,10 @@ harness = false
 
 [[bench]]
 name = "shapes"
+harness = false
+
+[[bench]]
+name = "compare"
 harness = false
 
 [lints]
