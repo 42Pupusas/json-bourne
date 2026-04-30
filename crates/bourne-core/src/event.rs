@@ -118,22 +118,24 @@ impl fmt::Debug for JsonNum<'_> {
 }
 
 fn parse_u64(raw: &[u8]) -> Option<u64> {
-    // Reject anything with a fractional or exponent part — those are not u64.
-    if raw.iter().any(|b| matches!(*b, b'.' | b'e' | b'E' | b'-')) {
+    if raw.is_empty() {
         return None;
     }
     let mut acc: u64 = 0;
     for &b in raw {
-        let d = (b as char).to_digit(10)?;
+        // ASCII-digit fast path: `b.wrapping_sub(b'0')` lands in 0..=9 only
+        // for `b'0'..=b'9'`. Any other byte (including `.`, `e`, `E`, `-`)
+        // gives a value >= 10 and aborts. One pass instead of two.
+        let d = b.wrapping_sub(b'0');
+        if d >= 10 {
+            return None;
+        }
         acc = acc.checked_mul(10)?.checked_add(u64::from(d))?;
     }
     Some(acc)
 }
 
 fn parse_i64(raw: &[u8]) -> Option<i64> {
-    if raw.iter().any(|b| matches!(*b, b'.' | b'e' | b'E')) {
-        return None;
-    }
     let (negative, digits) = match raw.split_first() {
         Some((&b'-', rest)) => (true, rest),
         _ => (false, raw),
@@ -141,15 +143,26 @@ fn parse_i64(raw: &[u8]) -> Option<i64> {
     if digits.is_empty() {
         return None;
     }
+    // Two specialized loops keeps each iteration branch-free aside from the
+    // overflow checks. Rustc usually hoists the `negative` test on its own,
+    // but spelling it out leaves nothing to chance and reads as the intent.
     let mut acc: i64 = 0;
-    for &b in digits {
-        let d = i64::from((b as char).to_digit(10)?);
-        acc = acc.checked_mul(10)?;
-        acc = if negative {
-            acc.checked_sub(d)?
-        } else {
-            acc.checked_add(d)?
-        };
+    if negative {
+        for &b in digits {
+            let d = b.wrapping_sub(b'0');
+            if d >= 10 {
+                return None;
+            }
+            acc = acc.checked_mul(10)?.checked_sub(i64::from(d))?;
+        }
+    } else {
+        for &b in digits {
+            let d = b.wrapping_sub(b'0');
+            if d >= 10 {
+                return None;
+            }
+            acc = acc.checked_mul(10)?.checked_add(i64::from(d))?;
+        }
     }
     Some(acc)
 }
