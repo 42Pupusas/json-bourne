@@ -32,6 +32,7 @@ pub struct PeekableParser<'input> {
 }
 
 impl<'input> PeekableParser<'input> {
+    #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
         Self { inner: Parser::new(input), peeked: None }
     }

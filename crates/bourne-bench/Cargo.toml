@@ -1,0 +1,42 @@
+[package]
+name = "bourne-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Benchmarks and profiling harness for bourne. Not published."
+publish = false
+
+[dependencies]
+bourne-core = { path = "../bourne-core" }
+bourne = { path = "../bourne" }
+dhat = { version = "0.3", optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[features]
+default = []
+# Enables the heap-profiling example. Build/run with:
+#   cargo run --release --features dhat-heap --example profile_heap
+dhat-heap = ["dep:dhat"]
+
+[[example]]
+name = "profile_heap"
+required-features = ["dhat-heap"]
+
+[[bench]]
+name = "stream"
+harness = false
+
+[[bench]]
+name = "typed"
+harness = false
+
+[[bench]]
+name = "shapes"
+harness = false
+
+[lints]
+workspace = true

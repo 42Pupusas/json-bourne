@@ -18,16 +18,19 @@ impl<'input> JsonStr<'input> {
     }
 
     /// The raw bytes between (but not including) the surrounding quotes.
+    #[must_use]
     pub const fn as_raw_bytes(&self) -> &'input [u8] {
         self.raw
     }
 
+    #[must_use]
     pub const fn has_escapes(&self) -> bool {
         self.has_escapes
     }
 
     /// Returns the string as `&str` when it contains no escapes.
     /// When escapes are present, the caller must decode into a buffer.
+    #[must_use]
     pub fn as_str(&self) -> Option<&'input str> {
         if self.has_escapes {
             None
@@ -71,21 +74,25 @@ impl<'input> JsonNum<'input> {
         Self { raw, position }
     }
 
+    #[must_use]
     pub const fn as_raw_bytes(&self) -> &'input [u8] {
         self.raw
     }
 
     /// The raw number text. Always ASCII (lexer guarantees this).
+    #[must_use]
     pub fn as_str(&self) -> &'input str {
         // Lexer only accepts the ASCII subset RFC 8259 allows for numbers.
         core::str::from_utf8(self.raw).unwrap_or("")
     }
 
+    #[must_use]
     pub const fn position(&self) -> Position {
         self.position
     }
 
     /// True if the literal contains `.`, `e`, or `E` — i.e. is not an integer.
+    #[must_use]
     pub fn is_float(&self) -> bool {
         self.raw.iter().any(|b| matches!(*b, b'.' | b'e' | b'E'))
     }

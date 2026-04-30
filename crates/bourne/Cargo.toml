@@ -15,5 +15,8 @@ alloc = []
 [dependencies]
 bourne-core = { path = "../bourne-core", version = "0.0.0" }
 
+[dev-dependencies]
+proptest = "1"
+
 [lints]
 workspace = true

@@ -102,6 +102,7 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
 }
 
 impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
+    #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
         Self {
             input,
@@ -111,10 +112,14 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         }
     }
 
+    #[must_use]
     pub const fn position(&self) -> Position {
         self.pos
     }
 
+    // The state machine is intrinsically large — splitting it would scatter
+    // dispatch across one private fn per state and obscure the grammar walk.
+    #[allow(clippy::too_many_lines)]
     pub fn next_event(&mut self) -> Result<Option<Event<'input>>, Error> {
         loop {
             self.skip_whitespace();
@@ -305,17 +310,17 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                 b'"' => {
                     let raw = &self.input[start..self.pos.offset];
                     self.bump(); // closing quote
-                    if !has_escapes {
-                        // Borrowed path: bytes must be valid UTF-8.
-                        if core::str::from_utf8(raw).is_err() {
-                            return Err(self.err(ErrorKind::InvalidUtf8));
-                        }
-                    } else {
+                    if has_escapes {
                         // Validate escape syntax now; full decode is the
                         // consumer's job (into a caller-provided buffer,
                         // which the streaming layer doesn't own).
                         validate_escapes(raw)
                             .map_err(|kind| Error::new(kind, self.pos))?;
+                    } else {
+                        // Borrowed path: bytes must be valid UTF-8.
+                        if core::str::from_utf8(raw).is_err() {
+                            return Err(self.err(ErrorKind::InvalidUtf8));
+                        }
                     }
                     return Ok(JsonStr::new(raw, has_escapes));
                 }

@@ -89,6 +89,7 @@ pub struct Error {
 }
 
 impl Error {
+    #[must_use]
     pub const fn new(kind: ErrorKind, position: Position) -> Self {
         Self { kind, position }
     }

@@ -1,0 +1,30 @@
+[package]
+name = "bourne-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+bourne-core = { path = "../crates/bourne-core" }
+bourne = { path = "../crates/bourne" }
+
+[[bin]]
+name = "stream"
+path = "fuzz_targets/stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typed"
+path = "fuzz_targets/typed.rs"
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unsafe_code = "allow" # libfuzzer entry point uses unsafe

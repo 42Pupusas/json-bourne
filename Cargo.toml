@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/bourne-core", "crates/bourne"]
+members = ["crates/bourne-core", "crates/bourne", "crates/bourne-bench", "crates/bourne-alloctest"]
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"
@@ -10,7 +11,10 @@ repository = "https://github.com/illuminodes/bourne"
 rust-version = "1.85"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# `deny` (overridable), not `forbid`. The bourne-alloctest harness needs
+# to implement GlobalAlloc, which is fundamentally unsafe; that crate
+# `#![allow(unsafe_code)]` at its crate root. Every other crate stays clean.
+unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
 [workspace.lints.clippy]
@@ -18,12 +22,18 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
-# Practical exemptions — these fire on intentional choices.
+
+# Module-name repetition is intentional: `bourne::FromJson`, `JsonStr`,
+# `JsonNum` are correct names. The alternative ("From", "Str", "Num") would
+# clash with core types or be uselessly generic.
 module_name_repetitions = "allow"
+
+# Every FromJson::from_json impl returns Result. A blanket "errors when parse
+# fails" doc on each one is noise; the Error type itself documents its
+# variants via ErrorKind.
 missing_errors_doc = "allow"
-missing_panics_doc = "allow"
-must_use_candidate = "allow"
-return_self_not_must_use = "allow"
+
+# `match { None => …, Some(_) => … }` is often clearer as a match than as
+# `if let … else …`, especially when surrounding code is also matching on
+# the same value.
 single_match_else = "allow"
-too_many_lines = "allow"
-if_not_else = "allow"
