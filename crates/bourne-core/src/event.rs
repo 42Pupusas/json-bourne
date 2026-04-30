@@ -3,60 +3,57 @@ use core::fmt;
 
 /// A JSON string slice as it appears in the source.
 ///
-/// Borrows from the input. Decoding escapes requires a caller-provided
-/// buffer (see future `decode_into` API). For strings with no escapes,
-/// the borrowed bytes are already valid UTF-8 and can be exposed as `&str`.
-#[derive(Copy, Clone)]
-pub struct JsonStr<'input> {
-    raw: &'input [u8],
-    has_escapes: bool,
+/// Two-state representation:
+///   * `Borrowed(&str)` — no escapes, lexer already validated UTF-8 inline,
+///     the slice is ready to use with no per-access work.
+///   * `Escaped(&[u8])` — at least one `\` was seen; the bytes are the raw
+///     between-quote span, escape syntax has been validated, but full
+///     decoding requires a caller-provided buffer.
+///
+/// This split exists so `as_str()` never has to re-validate UTF-8 — the
+/// borrowed case has already done the work, and the escaped case can't
+/// answer without a decode buffer.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum JsonStr<'input> {
+    Borrowed(&'input str),
+    Escaped(&'input [u8]),
 }
 
 impl<'input> JsonStr<'input> {
-    pub(crate) const fn new(raw: &'input [u8], has_escapes: bool) -> Self {
-        Self { raw, has_escapes }
+    pub(crate) const fn borrowed(s: &'input str) -> Self {
+        Self::Borrowed(s)
+    }
+
+    pub(crate) const fn escaped(raw: &'input [u8]) -> Self {
+        Self::Escaped(raw)
     }
 
     /// The raw bytes between (but not including) the surrounding quotes.
+    /// Identical for both representations — `Borrowed`'s underlying
+    /// `str::as_bytes()` is the same span the lexer captured.
     #[must_use]
     pub const fn as_raw_bytes(&self) -> &'input [u8] {
-        self.raw
+        match self {
+            Self::Borrowed(s) => s.as_bytes(),
+            Self::Escaped(raw) => raw,
+        }
     }
 
     #[must_use]
     pub const fn has_escapes(&self) -> bool {
-        self.has_escapes
+        matches!(self, Self::Escaped(_))
     }
 
     /// Returns the string as `&str` when it contains no escapes.
     /// When escapes are present, the caller must decode into a buffer.
     #[must_use]
-    pub fn as_str(&self) -> Option<&'input str> {
-        if self.has_escapes {
-            None
-        } else {
-            // Lexer validates this is UTF-8 before producing a JsonStr.
-            core::str::from_utf8(self.raw).ok()
+    pub const fn as_str(&self) -> Option<&'input str> {
+        match self {
+            Self::Borrowed(s) => Some(s),
+            Self::Escaped(_) => None,
         }
     }
 }
-
-impl fmt::Debug for JsonStr<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.as_str() {
-            Some(s) => write!(f, "JsonStr({s:?})"),
-            None => write!(f, "JsonStr(<escaped {} bytes>)", self.raw.len()),
-        }
-    }
-}
-
-impl PartialEq for JsonStr<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.raw == other.raw && self.has_escapes == other.has_escapes
-    }
-}
-
-impl Eq for JsonStr<'_> {}
 
 /// A JSON number, kept as the original byte slice.
 ///

@@ -311,18 +311,21 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                     let raw = &self.input[start..self.pos.offset];
                     self.bump(); // closing quote
                     if has_escapes {
-                        // Validate escape syntax now; full decode is the
-                        // consumer's job (into a caller-provided buffer,
-                        // which the streaming layer doesn't own).
+                        // Escape syntax (and the surrogate pairing rules) is
+                        // not part of the byte-walk above; validate it once
+                        // here. Full decode is still the consumer's job.
                         validate_escapes(raw)
                             .map_err(|kind| Error::new(kind, self.pos))?;
-                    } else {
-                        // Borrowed path: bytes must be valid UTF-8.
-                        if core::str::from_utf8(raw).is_err() {
-                            return Err(self.err(ErrorKind::InvalidUtf8));
-                        }
+                        return Ok(JsonStr::escaped(raw));
                     }
-                    return Ok(JsonStr::new(raw, has_escapes));
+                    // No escapes: the byte-walk validated UTF-8 inline, so we
+                    // know `raw` is valid UTF-8 and can produce a `&str`
+                    // without re-validation. We still pay one `from_utf8`
+                    // call for the type conversion, but it short-circuits
+                    // on the all-ASCII fast path inside core.
+                    let s = core::str::from_utf8(raw)
+                        .map_err(|_| self.err(ErrorKind::InvalidUtf8))?;
+                    return Ok(JsonStr::borrowed(s));
                 }
                 b'\\' => {
                     has_escapes = true;
@@ -347,9 +350,57 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                     }
                 }
                 0..=0x1F => return Err(self.err(ErrorKind::ControlCharInString)),
-                _ => self.bump(),
+                0x20..=0x7F => self.bump(),
+                // High-bit byte: start of a multi-byte UTF-8 sequence.
+                // Consume the leading byte and the correct number of
+                // continuation bytes, validating each as we go. Avoids the
+                // separate `from_utf8` pass over the whole string at the end.
+                _ => self.consume_utf8_multibyte()?,
             }
         }
+    }
+
+    /// Consume a UTF-8 multi-byte sequence starting at the current position.
+    ///
+    /// Called only when `peek()` has returned a byte >= 0x80. Validates
+    /// length-encoding against the byte ranges allowed by RFC 3629
+    /// (no overlongs, no surrogates, no codepoints above U+10FFFF) so
+    /// the resulting slice is guaranteed valid UTF-8.
+    fn consume_utf8_multibyte(&mut self) -> Result<(), Error> {
+        // SAFETY of correctness: this mirrors the table in RFC 3629
+        // section 4 — same bounds, same rejected ranges. Codepoints
+        // outside U+10FFFF and the surrogate range U+D800..=U+DFFF are
+        // rejected by the per-byte range checks below.
+        let leading = self
+            .peek()
+            .ok_or_else(|| self.err(ErrorKind::InvalidUtf8))?;
+
+        // Per RFC 3629: legal leading byte ranges and the ranges their
+        // continuations may take.
+        let (extra, second_lo, second_hi) = match leading {
+            0xC2..=0xDF => (1, 0x80, 0xBF),
+            0xE0 => (2, 0xA0, 0xBF),       // disallow overlong 3-byte
+            0xE1..=0xEC | 0xEE..=0xEF => (2, 0x80, 0xBF),
+            0xED => (2, 0x80, 0x9F),       // exclude surrogates
+            0xF0 => (3, 0x90, 0xBF),       // disallow overlong 4-byte
+            0xF1..=0xF3 => (3, 0x80, 0xBF),
+            0xF4 => (3, 0x80, 0x8F),       // cap at U+10FFFF
+            _ => return Err(self.err(ErrorKind::InvalidUtf8)),
+        };
+        self.bump();
+
+        // Second byte has tighter bounds; remaining bytes are plain 0x80..=0xBF.
+        match self.peek() {
+            Some(b) if b >= second_lo && b <= second_hi => self.bump(),
+            _ => return Err(self.err(ErrorKind::InvalidUtf8)),
+        }
+        for _ in 1..extra {
+            match self.peek() {
+                Some(0x80..=0xBF) => self.bump(),
+                _ => return Err(self.err(ErrorKind::InvalidUtf8)),
+            }
+        }
+        Ok(())
     }
 
     fn parse_number(&mut self) -> Result<JsonNum<'input>, Error> {

@@ -156,7 +156,7 @@ fn run(name: &str) {
         }
         "stream_strings_10k" => {
             let input = string_array(10_000);
-            run_stream(input.as_bytes(), 8_000);
+            run_stream(input.as_bytes(), 50_000);
         }
         "typed_struct" => {
             let input = SMALL_OBJECT.as_bytes();
@@ -164,15 +164,15 @@ fn run(name: &str) {
         }
         "vec_i64_10k" => {
             let input = int_array(10_000);
-            run_vec_i64(input.as_bytes(), 8_000);
+            run_vec_i64(input.as_bytes(), 60_000);
         }
         "vec_borrowed_str_10k" => {
             let input = string_array(10_000);
-            run_vec_borrowed_str(input.as_bytes(), 6_000);
+            run_vec_borrowed_str(input.as_bytes(), 50_000);
         }
         "vec_string_10k" => {
             let input = string_array(10_000);
-            run_vec_string(input.as_bytes(), 4_000);
+            run_vec_string(input.as_bytes(), 30_000);
         }
         other => {
             eprintln!("unknown workload: {other}");
