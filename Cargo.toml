@@ -17,6 +17,17 @@ rust-version = "1.85"
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 
+# Custom profile inheriting from release. Used by the perf-driven `profile`
+# binary in bourne-bench. Keeps debug symbols and frame pointers on so
+# `perf record -g` and flamegraphs name actual functions instead of addresses,
+# without polluting the standard `release` profile downstream users get.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = false
+# Frame pointers can't currently be set per-profile in stable Cargo — set
+# them via RUSTFLAGS in the runbook (see PROFILING.md).
+
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
