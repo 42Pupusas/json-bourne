@@ -9,16 +9,6 @@ pub struct Position {
 
 impl Position {
     pub const START: Self = Self { offset: 0, line: 1, column: 1 };
-
-    pub(crate) const fn advance(&mut self, byte: u8) {
-        self.offset += 1;
-        if byte == b'\n' {
-            self.line += 1;
-            self.column = 1;
-        } else {
-            self.column += 1;
-        }
-    }
 }
 
 impl fmt::Display for Position {

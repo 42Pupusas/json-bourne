@@ -47,7 +47,11 @@ enum State {
 #[derive(Debug)]
 pub struct Parser<'input, const MAX_DEPTH: usize = DEFAULT_MAX_DEPTH> {
     input: &'input [u8],
-    pos: Position,
+    /// Byte offset of the next-to-read byte. Line and column are reconstructed
+    /// lazily from `input[..offset]` whenever a `Position` is needed (errors,
+    /// public `position()` calls). The hot path never touches them, which is
+    /// what lets `bump()` compile to a single increment.
+    offset: usize,
     state: State,
     stack: Stack<MAX_DEPTH>,
 }
@@ -70,9 +74,9 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
         }
     }
 
-    const fn push(&mut self, frame: Frame, pos: Position) -> Result<(), Error> {
+    const fn push(&mut self, frame: Frame) -> Result<(), ()> {
         if self.len >= MAX_DEPTH {
-            return Err(Error::new(ErrorKind::DepthLimitExceeded, pos));
+            return Err(());
         }
         self.frames[self.len] = frame;
         self.len += 1;
@@ -106,15 +110,15 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     pub const fn new(input: &'input [u8]) -> Self {
         Self {
             input,
-            pos: Position::START,
+            offset: 0,
             state: State::Start,
             stack: Stack::new(),
         }
     }
 
     #[must_use]
-    pub const fn position(&self) -> Position {
-        self.pos
+    pub fn position(&self) -> Position {
+        compute_position(self.input, self.offset)
     }
 
     // The state machine is intrinsically large — splitting it would scatter
@@ -264,18 +268,19 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         })
     }
 
+    #[inline]
     fn parse_value(&mut self) -> Result<Event<'input>, Error> {
         let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
         match b {
             b'{' => {
                 self.bump();
-                self.stack.push(Frame::Object, self.pos)?;
+                self.push_frame(Frame::Object)?;
                 self.state = State::ObjectKeyOrEnd;
                 Ok(Event::StartObject)
             }
             b'[' => {
                 self.bump();
-                self.stack.push(Frame::Array, self.pos)?;
+                self.push_frame(Frame::Array)?;
                 self.state = State::ArrayValueOrEnd;
                 Ok(Event::StartArray)
             }
@@ -286,6 +291,12 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
             b'-' | b'0'..=b'9' => self.parse_number().map(Event::Number),
             other => Err(self.err(ErrorKind::UnexpectedByte(other))),
         }
+    }
+
+    fn push_frame(&mut self, frame: Frame) -> Result<(), Error> {
+        self.stack
+            .push(frame)
+            .map_err(|()| self.err(ErrorKind::DepthLimitExceeded))
     }
 
     fn parse_keyword(&mut self, kw: &[u8], event: Event<'input>) -> Result<Event<'input>, Error> {
@@ -302,29 +313,31 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     fn parse_string(&mut self) -> Result<JsonStr<'input>, Error> {
         debug_assert_eq!(self.peek(), Some(b'"'));
         self.bump(); // opening quote
-        let start = self.pos.offset;
+        let start = self.offset;
         let mut has_escapes = false;
         loop {
             let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
             match b {
                 b'"' => {
-                    let raw = &self.input[start..self.pos.offset];
+                    let raw = &self.input[start..self.offset];
                     self.bump(); // closing quote
                     if has_escapes {
                         // Escape syntax (and the surrogate pairing rules) is
                         // not part of the byte-walk above; validate it once
                         // here. Full decode is still the consumer's job.
                         validate_escapes(raw)
-                            .map_err(|kind| Error::new(kind, self.pos))?;
+                            .map_err(|kind| self.err(kind))?;
                         return Ok(JsonStr::escaped(raw));
                     }
-                    // No escapes: the byte-walk validated UTF-8 inline, so we
-                    // know `raw` is valid UTF-8 and can produce a `&str`
-                    // without re-validation. We still pay one `from_utf8`
-                    // call for the type conversion, but it short-circuits
-                    // on the all-ASCII fast path inside core.
-                    let s = core::str::from_utf8(raw)
-                        .map_err(|_| self.err(ErrorKind::InvalidUtf8))?;
+                    // SAFETY: every byte in `raw` was checked as we scanned:
+                    // the ASCII fast arm only accepts 0x20..=0x7F minus `"`
+                    // and `\\`, and `consume_utf8_multibyte` enforces the
+                    // RFC 3629 byte ranges (no overlongs, no surrogates,
+                    // capped at U+10FFFF). The slice is therefore valid
+                    // UTF-8 and `from_utf8_unchecked` is sound. The safe
+                    // `from_utf8` re-walks every byte and was ~48% of
+                    // `vec_borrowed_str` runtime in profiling.
+                    let s = unsafe { core::str::from_utf8_unchecked(raw) };
                     return Ok(JsonStr::borrowed(s));
                 }
                 b'\\' => {
@@ -350,7 +363,12 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                     }
                 }
                 0..=0x1F => return Err(self.err(ErrorKind::ControlCharInString)),
-                0x20..=0x7F => self.bump(),
+                0x20..=0x7F => {
+                    // Plain ASCII inside the string — scan the run all at once
+                    // so the inner loop is just a memchr-style "find next
+                    // interesting byte" rather than per-byte bump/peek.
+                    self.scan_ascii_string_run();
+                }
                 // High-bit byte: start of a multi-byte UTF-8 sequence.
                 // Consume the leading byte and the correct number of
                 // continuation bytes, validating each as we go. Avoids the
@@ -358,6 +376,30 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                 _ => self.consume_utf8_multibyte()?,
             }
         }
+    }
+
+    /// Advance past a run of plain ASCII bytes (0x20..=0x7F minus `"` and `\`).
+    ///
+    /// Stops when the next byte is `"`, `\`, a control char (<0x20), or a
+    /// high-bit byte. The caller's outer loop then dispatches on what we left.
+    fn scan_ascii_string_run(&mut self) {
+        // Stop conditions: `"` (0x22), `\` (0x5C), control char (<0x20),
+        // or high-bit byte (>=0x80). Frame this as "subtract 0x20, then
+        // any byte that lands outside 0x00..=0x5F (i.e. in 0x60..) is
+        // either a high-bit byte or a control char (which wrapped through
+        // 0). Combined with the two specific-byte checks, the per-byte
+        // test compiles to two compares + one mask, no table lookup."
+        let bytes = self.input;
+        let mut i = self.offset;
+        let end = bytes.len();
+        while i < end {
+            let b = bytes[i];
+            if b == b'"' || b == b'\\' || !(0x20..0x80).contains(&b) {
+                break;
+            }
+            i += 1;
+        }
+        self.offset = i;
     }
 
     /// Consume a UTF-8 multi-byte sequence starting at the current position.
@@ -403,9 +445,9 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         Ok(())
     }
 
+    #[inline]
     fn parse_number(&mut self) -> Result<JsonNum<'input>, Error> {
-        let start = self.pos.offset;
-        let start_pos = self.pos;
+        let start = self.offset;
 
         if self.peek() == Some(b'-') {
             self.bump();
@@ -418,9 +460,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
             }
             Some(b'1'..=b'9') => {
                 self.bump();
-                while let Some(b'0'..=b'9') = self.peek() {
-                    self.bump();
-                }
+                self.scan_digit_run();
             }
             Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
             None => return Err(self.err(ErrorKind::UnexpectedEof)),
@@ -429,11 +469,9 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         // optional fraction
         if self.peek() == Some(b'.') {
             self.bump();
-            let frac_start = self.pos.offset;
-            while let Some(b'0'..=b'9') = self.peek() {
-                self.bump();
-            }
-            if self.pos.offset == frac_start {
+            let frac_start = self.offset;
+            self.scan_digit_run();
+            if self.offset == frac_start {
                 return Err(self.err(ErrorKind::InvalidNumber));
             }
         }
@@ -444,41 +482,97 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
             if matches!(self.peek(), Some(b'+' | b'-')) {
                 self.bump();
             }
-            let exp_start = self.pos.offset;
-            while let Some(b'0'..=b'9') = self.peek() {
-                self.bump();
-            }
-            if self.pos.offset == exp_start {
+            let exp_start = self.offset;
+            self.scan_digit_run();
+            if self.offset == exp_start {
                 return Err(self.err(ErrorKind::InvalidNumber));
             }
         }
 
-        let raw = &self.input[start..self.pos.offset];
-        Ok(JsonNum::new(raw, start_pos))
+        let raw = &self.input[start..self.offset];
+        Ok(JsonNum::new(raw, start))
+    }
+
+    /// Advance over a run of ASCII digits without per-byte position tracking.
+    ///
+    /// This is the inner loop of integer-array parsing. By scanning a slice
+    /// directly and writing `self.offset` once at the end, the per-byte
+    /// store-pos.offset / store-pos.column traffic that dominated the old
+    /// `peek/bump` version is eliminated.
+    fn scan_digit_run(&mut self) {
+        let bytes = self.input;
+        let mut i = self.offset;
+        let end = bytes.len();
+        while i < end {
+            let b = bytes[i];
+            // ASCII-digit fast path: `b - b'0' < 10` only for digits.
+            if b.wrapping_sub(b'0') >= 10 {
+                break;
+            }
+            i += 1;
+        }
+        self.offset = i;
     }
 
     fn skip_whitespace(&mut self) {
-        while let Some(b) = self.peek() {
-            match b {
-                b' ' | b'\t' | b'\n' | b'\r' => self.bump(),
-                _ => break,
+        let bytes = self.input;
+        let mut i = self.offset;
+        let end = bytes.len();
+        while i < end {
+            let b = bytes[i];
+            if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
+                i += 1;
+            } else {
+                break;
             }
         }
+        self.offset = i;
     }
 
     fn peek(&self) -> Option<u8> {
-        self.input.get(self.pos.offset).copied()
+        self.input.get(self.offset).copied()
     }
 
+    /// Advance one byte. Caller must have verified there is one (e.g. via a
+    /// prior `peek()` returning `Some`). The hot path only ever calls this
+    /// after a successful peek, so the bounds check is redundant — keep it
+    /// as a debug assertion to catch any future caller mistakes without
+    /// paying for it in release.
     fn bump(&mut self) {
-        if let Some(b) = self.peek() {
-            self.pos.advance(b);
-        }
+        debug_assert!(self.offset < self.input.len());
+        self.offset += 1;
     }
 
-    const fn err(&self, kind: ErrorKind) -> Error {
-        Error::new(kind, self.pos)
+    fn err(&self, kind: ErrorKind) -> Error {
+        Error::new(kind, compute_position(self.input, self.offset))
     }
+}
+
+/// Reconstruct a `Position` for a given byte offset by scanning the input.
+///
+/// O(offset) but only ever called on errors and on the public `position()`
+/// API — never inside the hot per-byte loop. Storing `offset` alone instead
+/// of all three components lets the parser keep the cursor in a register
+/// across the inner loops.
+fn compute_position(input: &[u8], offset: usize) -> Position {
+    let upto = core::cmp::min(offset, input.len());
+    let mut line: u32 = 1;
+    let mut last_newline: usize = 0;
+    let mut had_newline = false;
+    let mut i = 0;
+    while i < upto {
+        if input[i] == b'\n' {
+            line += 1;
+            last_newline = i + 1;
+            had_newline = true;
+        }
+        i += 1;
+    }
+    let column_start = if had_newline { last_newline } else { 0 };
+    // column is 1-based; with no newlines yet, the very first byte sits at
+    // column 1 (offset 0).
+    let column = u32::try_from(upto - column_start + 1).unwrap_or(u32::MAX);
+    Position { offset, line, column }
 }
 
 /// Validate that all `\` escapes inside `raw` are well-formed.

@@ -63,12 +63,17 @@ impl<'input> JsonStr<'input> {
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct JsonNum<'input> {
     raw: &'input [u8],
-    position: Position,
+    /// Byte offset where this number started in the original input. Line and
+    /// column are not stored — they would require an O(offset) scan per
+    /// number, which dominates integer-array parsing. Errors raised by
+    /// `as_i64`/`as_u64`/`as_f64` carry this offset; if a caller needs the
+    /// line/column they can compute it from their own copy of the input.
+    start_offset: usize,
 }
 
 impl<'input> JsonNum<'input> {
-    pub(crate) const fn new(raw: &'input [u8], position: Position) -> Self {
-        Self { raw, position }
+    pub(crate) const fn new(raw: &'input [u8], start_offset: usize) -> Self {
+        Self { raw, start_offset }
     }
 
     #[must_use]
@@ -83,9 +88,20 @@ impl<'input> JsonNum<'input> {
         core::str::from_utf8(self.raw).unwrap_or("")
     }
 
+    /// Position of the number's first byte in the input.
+    ///
+    /// `line` and `column` are not tracked on `JsonNum` (computing them would
+    /// require an O(offset) scan per number, which is prohibitive for
+    /// integer-heavy workloads). They are returned as `0` to signal
+    /// "not computed"; consumers who need them can recompute from their own
+    /// copy of the input.
     #[must_use]
     pub const fn position(&self) -> Position {
-        self.position
+        Position {
+            offset: self.start_offset,
+            line: 0,
+            column: 0,
+        }
     }
 
     /// True if the literal contains `.`, `e`, or `E` — i.e. is not an integer.
@@ -95,11 +111,11 @@ impl<'input> JsonNum<'input> {
     }
 
     pub fn as_i64(&self) -> Result<i64, Error> {
-        parse_i64(self.raw).ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, self.position))
+        parse_i64(self.raw).ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, self.position()))
     }
 
     pub fn as_u64(&self) -> Result<u64, Error> {
-        parse_u64(self.raw).ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, self.position))
+        parse_u64(self.raw).ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, self.position()))
     }
 
     pub fn as_f64(&self) -> Result<f64, Error> {
@@ -107,7 +123,7 @@ impl<'input> JsonNum<'input> {
         // dtoa-grade decoder later. Correctness now, performance later.
         self.as_str()
             .parse::<f64>()
-            .map_err(|_| Error::new(ErrorKind::InvalidNumber, self.position))
+            .map_err(|_| Error::new(ErrorKind::InvalidNumber, self.position()))
     }
 }
 

@@ -1,4 +1,11 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+// One targeted use of `unsafe`: skipping `core::str::from_utf8` after the
+// lexer has already validated every byte against the RFC 3629 byte ranges
+// inline (`Parser::consume_utf8_multibyte` + the ASCII fast path). The
+// safe alternative re-walks the entire string per call and was 48% of
+// `vec_borrowed_str` runtime in profiling. Workspace lint is `deny` (not
+// `forbid`) for exactly this kind of localized exception.
+#![allow(unsafe_code)]
 
 mod error;
 mod event;
