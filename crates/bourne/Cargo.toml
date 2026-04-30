@@ -1,0 +1,19 @@
+[package]
+name = "bourne"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Type-driven JSON parser. no_std-first. Zero-dep."
+
+[features]
+default = ["std"]
+std = ["alloc", "bourne-core/std"]
+alloc = []
+
+[dependencies]
+bourne-core = { path = "../bourne-core", version = "0.0.0" }
+
+[lints]
+workspace = true
