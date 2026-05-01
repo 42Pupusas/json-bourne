@@ -157,10 +157,11 @@ mod tests {
 
     #[test]
     fn position_tracks_lines() {
-        let mut p: Parser<'_> = Parser::new(b"\n\n  null");
+        let input = b"\n\n  null";
+        let mut p: Parser<'_> = Parser::new(input);
         let _ = p.next_event().unwrap();
         let pos = p.position();
-        assert_eq!(pos.line, 3);
+        assert_eq!(pos.resolve(input).line, 3);
     }
 
     extern crate alloc;

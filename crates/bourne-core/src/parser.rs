@@ -127,7 +127,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     }
 
     #[must_use]
-    pub fn position(&self) -> Position {
+    pub const fn position(&self) -> Position {
         compute_position(self.input, self.offset)
     }
 
@@ -562,36 +562,20 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         self.offset += 1;
     }
 
-    fn err(&self, kind: ErrorKind) -> Error {
+    const fn err(&self, kind: ErrorKind) -> Error {
         Error::new(kind, compute_position(self.input, self.offset))
     }
 }
 
-/// Reconstruct a `Position` for a given byte offset by scanning the input.
+/// Build a `Position` for a given byte offset.
 ///
-/// O(offset) but only ever called on errors and on the public `position()`
-/// API — never inside the hot per-byte loop. Storing `offset` alone instead
-/// of all three components lets the parser keep the cursor in a register
-/// across the inner loops.
-fn compute_position(input: &[u8], offset: usize) -> Position {
-    let upto = core::cmp::min(offset, input.len());
-    let mut line: u32 = 1;
-    let mut last_newline: usize = 0;
-    let mut had_newline = false;
-    let mut i = 0;
-    while i < upto {
-        if input[i] == b'\n' {
-            line += 1;
-            last_newline = i + 1;
-            had_newline = true;
-        }
-        i += 1;
-    }
-    let column_start = if had_newline { last_newline } else { 0 };
-    // column is 1-based; with no newlines yet, the very first byte sits at
-    // column 1 (offset 0).
-    let column = u32::try_from(upto - column_start + 1).unwrap_or(u32::MAX);
-    Position { offset, line, column }
+/// Trivial now — the position is just the offset. Line/column are
+/// reconstructed lazily via `Position::resolve(input)` only when an error
+/// is actually rendered or the consumer explicitly asks. Capping input
+/// length at `Parser::new` means the `as u32` is lossless.
+#[allow(clippy::cast_possible_truncation)]
+const fn compute_position(_input: &[u8], offset: usize) -> Position {
+    Position::new(offset as u32)
 }
 
 /// Validate that all `\` escapes inside `raw` are well-formed.

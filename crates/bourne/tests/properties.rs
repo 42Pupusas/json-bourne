@@ -62,7 +62,7 @@ proptest! {
                 Ok(None) => break,
                 Err(e) => {
                     prop_assert!(
-                        e.position.offset <= bytes.len(),
+                        (e.position.offset as usize) <= bytes.len(),
                         "error position {} out of bounds for input of {} bytes",
                         e.position.offset, bytes.len(),
                     );
