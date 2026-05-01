@@ -13,6 +13,7 @@
 //! See `PROFILING.md` for the full runbook and notes on flamegraphs.
 
 use bourne::{FromJson, parse};
+use bourne_bench::realistic::unicode_string_array;
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use std::hint::black_box;
@@ -115,6 +116,13 @@ fn run_vec_string(input: &[u8], iters: u64) {
     }
 }
 
+fn run_vec_borrowed_unicode(input: &[u8], iters: u64) {
+    for _ in 0..iters {
+        let v: Vec<&str> = parse(black_box(input)).unwrap();
+        black_box(v);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workload registry
 // ---------------------------------------------------------------------------
@@ -128,6 +136,7 @@ fn workloads() -> &'static [&'static str] {
         "vec_i64_10k",
         "vec_borrowed_str_10k",
         "vec_string_10k",
+        "vec_borrowed_unicode_10k",
     ]
 }
 
@@ -163,6 +172,10 @@ fn run(name: &str) {
         "vec_string_10k" => {
             let input = string_array(10_000);
             run_vec_string(input.as_bytes(), 30_000);
+        }
+        "vec_borrowed_unicode_10k" => {
+            let input = unicode_string_array(10_000);
+            run_vec_borrowed_unicode(input.as_bytes(), 50_000);
         }
         other => {
             eprintln!("unknown workload: {other}");

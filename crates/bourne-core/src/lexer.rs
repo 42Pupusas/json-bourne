@@ -696,6 +696,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         self.scan_ascii_string_run_scalar();
     }
 
+    #[inline]
     fn consume_utf8_multibyte(&mut self) -> Result<(), Error> {
         let leading = self
             .peek()
