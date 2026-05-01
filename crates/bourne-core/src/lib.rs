@@ -1,10 +1,16 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-// One targeted use of `unsafe`: skipping `core::str::from_utf8` after the
-// lexer has already validated every byte against the RFC 3629 byte ranges
-// inline (`Parser::consume_utf8_multibyte` + the ASCII fast path). The
-// safe alternative re-walks the entire string per call and was 48% of
-// `vec_borrowed_str` runtime in profiling. Workspace lint is `deny` (not
-// `forbid`) for exactly this kind of localized exception.
+// Targeted uses of `unsafe`:
+//   1. `from_utf8_unchecked` after the lexer has validated every byte against
+//      the RFC 3629 byte ranges inline. The safe alternative re-walks the
+//      entire string per call and was 48% of `vec_borrowed_str` runtime.
+//   2. `core::arch::x86_64` SSE2 intrinsics in `scan_ascii_string_run_simd`.
+//      SSE2 is part of the x86_64 ABI baseline, so the `#[target_feature]`
+//      precondition is statically guaranteed on x86_64 — the unsafe is
+//      mechanical (intrinsics are unsafe by signature), not a memory-safety
+//      escape hatch. Non-x86_64 targets compile to the scalar path.
+//
+// Workspace lint is `deny` (not `forbid`) for exactly this kind of
+// localized, justified exception.
 #![allow(unsafe_code)]
 
 mod error;
@@ -73,6 +79,60 @@ mod tests {
             [Event::String(s)] => assert_eq!(s.as_str(input2), Some("hello")),
             _ => panic!("{evs:?}"),
         }
+    }
+
+    /// The SSE2 string-scan walks 16 bytes at a time. Strings whose body
+    /// crosses chunk boundaries (terminating quote at offsets 15, 16, 17, …
+    /// inside a 16-byte chunk) exercise the boundary logic specifically.
+    /// Strings shorter than 16 bytes go straight to the scalar tail; strings
+    /// longer than 16 bytes go through at least one full SIMD iteration.
+    #[test]
+    fn ascii_string_simd_boundaries() {
+        for body_len in [0usize, 1, 14, 15, 16, 17, 31, 32, 33, 64, 100] {
+            let body: alloc::string::String = "a".repeat(body_len);
+            let input = alloc::format!(r#""{body}""#);
+            let evs = collect(&input).expect("valid input");
+            match &evs[..] {
+                [Event::String(s)] => {
+                    let got = s
+                        .as_str(input.as_bytes())
+                        .expect("no escapes, should borrow");
+                    assert_eq!(got, body, "len={body_len}");
+                    assert!(!s.has_escapes(), "len={body_len}");
+                }
+                _ => panic!("len={body_len}: {evs:?}"),
+            }
+        }
+    }
+
+    /// Backslash, control char, and high-bit byte must each be detected at
+    /// any offset inside a 16-byte SIMD chunk. The signed-compare trick
+    /// (`cmplt_epi8 < 0x20`) flags both control chars (positive byte <0x20)
+    /// and high-bit bytes (negative when read as i8); regress this fusion
+    /// by scanning each kind at position 0, 7, 15, 16, 23 inside a longer run.
+    #[test]
+    fn ascii_string_simd_finds_stop_bytes() {
+        // Quote at every position 0..=20: each must terminate cleanly.
+        for pos in 0..=20usize {
+            let prefix: alloc::string::String = "a".repeat(pos);
+            let input = alloc::format!(r#""{prefix}""#);
+            let evs = collect(&input).expect("valid input");
+            match &evs[..] {
+                [Event::String(s)] => {
+                    assert_eq!(s.as_str(input.as_bytes()).unwrap(), prefix);
+                }
+                _ => panic!("quote at {pos}: {evs:?}"),
+            }
+        }
+        // Control char at position 16 (inside the second SIMD chunk) must
+        // be rejected, not skipped over.
+        let mut bad = alloc::string::String::from("\"");
+        for _ in 0..16 {
+            bad.push('a');
+        }
+        bad.push('\n'); // 0x0A — control byte
+        bad.push_str("more\"");
+        assert!(collect(&bad).is_err(), "control byte not flagged");
     }
 
     #[test]

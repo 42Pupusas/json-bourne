@@ -576,7 +576,26 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     // byte-level helpers
     // -------------------------------------------------------------------
 
+    #[inline]
     fn scan_ascii_string_run(&mut self) {
+        // x86_64 ABI guarantees SSE2 — no runtime detection needed.
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: SSE2 is part of the x86_64 ABI baseline. Every x86_64
+        // CPU has it; rustc's default target features include `+sse2`.
+        // The intrinsics are `unsafe` by signature, not because we're
+        // doing anything memory-unsafe — `_mm_loadu_si128` accepts
+        // unaligned pointers and we walk only valid input bytes.
+        unsafe {
+            self.scan_ascii_string_run_sse2();
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        self.scan_ascii_string_run_scalar();
+    }
+
+    /// Scalar fallback for the ASCII string scan. Used on non-x86_64 targets
+    /// and as the inner loop's tail when fewer than 16 bytes remain.
+    #[inline]
+    fn scan_ascii_string_run_scalar(&mut self) {
         let bytes = self.input;
         let mut i = self.offset;
         let end = bytes.len();
@@ -588,6 +607,69 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
             i += 1;
         }
         self.offset = i;
+    }
+
+    /// SSE2-accelerated ASCII string scan. Walks 16 bytes at a time looking
+    /// for the first "stop byte" (`"`, `\`, control char <0x20, or high-bit
+    /// byte ≥0x80) and advances `self.offset` to it.
+    ///
+    /// Algorithm: load 16 bytes, build a 16-bit bitmask where bit `k` is set
+    /// iff `bytes[i+k]` is a stop byte. If any bit is set, advance by the
+    /// trailing-zero count to land on the first stop byte. Otherwise advance
+    /// by 16 and continue.
+    ///
+    /// The "control or high-bit" test is fused into a single `cmplt_epi8`:
+    /// reading bytes as `i8`, both `<0x20` (e.g. `0x05` = 5) and `≥0x80`
+    /// (e.g. `0xC3` = -61) compare-less-than the constant 0x20. So one
+    /// signed-compare instruction covers both stop categories.
+    ///
+    /// # Safety
+    ///
+    /// Only the SSE2 target feature is required. On `x86_64` it's part of the
+    /// ABI baseline; the cfg gate at the call site enforces this.
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "sse2")]
+    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    unsafe fn scan_ascii_string_run_sse2(&mut self) {
+        use core::arch::x86_64::{
+            _mm_cmpeq_epi8, _mm_cmplt_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128,
+            _mm_set1_epi8,
+        };
+
+        let bytes = self.input;
+        let end = bytes.len();
+        let mut i = self.offset;
+
+        // Splat constants. The `as i8` casts wrap by design — SSE2 byte
+        // compares are always signed at the silicon level; we want the bit
+        // patterns for `"`, `\`, and 0x20 regardless of sign interpretation.
+        let quote = _mm_set1_epi8(b'"' as i8);
+        let backslash = _mm_set1_epi8(b'\\' as i8);
+        // `cmplt_epi8(b, 0x20)` flags both `b<0x20` (controls) AND `b>=0x80`
+        // (high-bit bytes interpreted as negative i8). One compare, two stops.
+        let lt_threshold = _mm_set1_epi8(0x20_i8);
+
+        while i + 16 <= end {
+            // SAFETY: `i + 16 <= end` checked above; the pointer + 16 bytes
+            // lie inside `bytes`. `_mm_loadu_si128` accepts unaligned addresses.
+            let chunk = unsafe { _mm_loadu_si128(bytes.as_ptr().add(i).cast()) };
+            let m_quote = _mm_cmpeq_epi8(chunk, quote);
+            let m_back = _mm_cmpeq_epi8(chunk, backslash);
+            let m_ctrl_or_hi = _mm_cmplt_epi8(chunk, lt_threshold);
+            let mask = _mm_or_si128(_mm_or_si128(m_quote, m_back), m_ctrl_or_hi);
+            // movemask returns i32 in [0, 0xFFFF]; cast to u32 is lossless.
+            let bits = _mm_movemask_epi8(mask) as u32;
+            if bits != 0 {
+                i += bits.trailing_zeros() as usize;
+                self.offset = i;
+                return;
+            }
+            i += 16;
+        }
+
+        // Tail: scalar walk for the final <16 bytes.
+        self.offset = i;
+        self.scan_ascii_string_run_scalar();
     }
 
     fn consume_utf8_multibyte(&mut self) -> Result<(), Error> {
