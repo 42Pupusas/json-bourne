@@ -16,6 +16,7 @@
 extern crate alloc;
 
 mod de;
+mod ser;
 
 pub use bourne_core::{
     Checkpoint, Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position, ValueKind,
@@ -23,6 +24,9 @@ pub use bourne_core::{
 pub use de::{FromJson, parse, parse_str};
 #[cfg(feature = "alloc")]
 pub use de::{MapKey, key_to_cow};
+pub use ser::{JsonWrite, ToJson};
+#[cfg(feature = "alloc")]
+pub use ser::{StringSink, to_string, to_vec};
 
 mod macros;
 
@@ -873,5 +877,167 @@ mod tests {
         let c: Cow<'_, str> = parse_str(r#""line\nwrap""#).unwrap();
         assert_eq!(c, "line\nwrap");
         assert!(matches!(c, Cow::Owned(_)));
+    }
+}
+
+/// Round-trip tests for [`crate::ToJson`] primitives. Pairs each impl
+/// against the existing `FromJson` impl: serialize a value, parse it
+/// back, assert equality. This is the contract that the two sides agree
+/// on the wire format — if a primitive's encoding ever drifts, one of
+/// these tests breaks before any user code does.
+#[cfg(all(test, feature = "alloc"))]
+mod ser_roundtrip {
+    use super::{parse_str, to_string};
+
+    /// Test helper: takes the value by value so call sites can pass
+    /// `rt(0_i64)` instead of `rt(&0_i64)`. The lint warning that this
+    /// "could take &T" is correct in the abstract but ergonomic loss
+    /// outweighs the (zero-cost) copy for `Copy` primitives, and the
+    /// owned `String` test variants are small.
+    #[allow(clippy::needless_pass_by_value)]
+    fn rt<T>(v: T)
+    where
+        T: crate::ToJson + for<'a> crate::FromJson<'a> + PartialEq + core::fmt::Debug,
+    {
+        let s = to_string(&v).expect("serialize");
+        let v2: T = parse_str(&s).expect("parse back");
+        assert_eq!(v, v2, "round-trip diverged via {s:?}");
+    }
+
+    #[test]
+    fn bool_roundtrips() {
+        rt(true);
+        rt(false);
+    }
+
+    #[test]
+    fn unit_roundtrips() {
+        rt(());
+    }
+
+    #[test]
+    fn signed_ints_roundtrip() {
+        rt(0_i8);
+        rt(i8::MIN);
+        rt(i8::MAX);
+        rt(0_i16);
+        rt(i16::MIN);
+        rt(i16::MAX);
+        rt(0_i32);
+        rt(i32::MIN);
+        rt(i32::MAX);
+        rt(0_i64);
+        rt(i64::MIN);
+        rt(i64::MAX);
+        rt(0_isize);
+        rt(isize::MIN);
+        rt(isize::MAX);
+    }
+
+    #[test]
+    fn unsigned_ints_roundtrip() {
+        rt(0_u8);
+        rt(u8::MAX);
+        rt(0_u16);
+        rt(u16::MAX);
+        rt(0_u32);
+        rt(u32::MAX);
+        rt(0_u64);
+        rt(u64::MAX);
+        rt(0_usize);
+        rt(usize::MAX);
+    }
+
+    #[test]
+    fn wide_ints_roundtrip() {
+        rt(0_i128);
+        rt(i128::MIN);
+        rt(i128::MAX);
+        rt(0_u128);
+        rt(u128::MAX);
+    }
+
+    #[test]
+    fn strings_roundtrip() {
+        // Plain ASCII, escapes, control bytes, non-ASCII UTF-8.
+        for s in [
+            "",
+            "hello",
+            "a\\b",
+            "with \"quotes\"",
+            "tab\tnewline\nreturn\rbs\x08ff\x0cnul\x00ctl\x1f",
+            "café 中文 😀",
+        ] {
+            rt(String::from(s));
+        }
+    }
+
+    /// Cow can't go through the generic `rt` helper — `FromJson<'a>` for
+    /// `Cow<'a, str>` ties the output lifetime to the input buffer, which
+    /// the HRTB the helper requires can't satisfy. Test the wire shape
+    /// inline instead.
+    #[test]
+    fn cow_roundtrips() {
+        use std::borrow::Cow;
+        for src in ["owned", "with\nescape", ""] {
+            let v = Cow::<str>::Owned(String::from(src));
+            let s = to_string(&v).unwrap();
+            let back: Cow<'_, str> = parse_str(&s).unwrap();
+            assert_eq!(back, src);
+        }
+    }
+
+    #[test]
+    fn char_roundtrips() {
+        for c in ['a', 'Z', '中', '😀', '\n', '\t', '"', '\\'] {
+            rt(c);
+        }
+    }
+
+    #[test]
+    fn option_roundtrips() {
+        rt(Option::<u32>::None);
+        rt(Some(42_u32));
+        rt(Option::<String>::None);
+        rt(Some(String::from("x")));
+    }
+
+    /// Reference impls forward through the inner value — verify the
+    /// blanket `&T` impl produces the same bytes as the owned form.
+    #[test]
+    fn reference_forwarding() {
+        let v: u32 = 7;
+        let owned = to_string(&v).unwrap();
+        let by_ref = to_string(&&v).unwrap();
+        assert_eq!(owned, by_ref);
+    }
+
+    /// Wrapper types are transparent — round-trip through the wrapper
+    /// must produce the same bytes as the inner value.
+    #[test]
+    fn wrapper_types_transparent() {
+        use std::rc::Rc;
+        use std::sync::Arc;
+        let v: u32 = 9;
+        assert_eq!(to_string(&v).unwrap(), to_string(&Box::new(v)).unwrap());
+        assert_eq!(to_string(&v).unwrap(), to_string(&Rc::new(v)).unwrap());
+        assert_eq!(to_string(&v).unwrap(), to_string(&Arc::new(v)).unwrap());
+    }
+
+    /// Pin the wire shape of a few primitives so any accidental
+    /// formatter change (digit grouping, capitalization, exponent
+    /// notation) shows up as a diff here, not as a downstream failure.
+    #[test]
+    fn pinned_wire_format() {
+        assert_eq!(to_string(&true).unwrap(), "true");
+        assert_eq!(to_string(&false).unwrap(), "false");
+        assert_eq!(to_string(&()).unwrap(), "null");
+        assert_eq!(to_string(&0_i64).unwrap(), "0");
+        assert_eq!(to_string(&-1_i64).unwrap(), "-1");
+        assert_eq!(to_string(&i64::MIN).unwrap(), "-9223372036854775808");
+        assert_eq!(to_string(&u64::MAX).unwrap(), "18446744073709551615");
+        assert_eq!(to_string(&"hi").unwrap(), "\"hi\"");
+        // Control char inside a string → \u00XX.
+        assert_eq!(to_string(&"\x01").unwrap(), "\"\\u0001\"");
     }
 }

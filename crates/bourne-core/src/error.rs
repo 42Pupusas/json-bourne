@@ -84,6 +84,7 @@ pub enum ErrorKind {
     DuplicateKey,
     MissingField,
     UnknownField,
+    NonFiniteFloat,
 }
 
 impl fmt::Display for ErrorKind {
@@ -111,6 +112,7 @@ impl fmt::Display for ErrorKind {
             Self::DuplicateKey => f.write_str("duplicate object key"),
             Self::MissingField => f.write_str("missing required field"),
             Self::UnknownField => f.write_str("unknown field"),
+            Self::NonFiniteFloat => f.write_str("non-finite float not representable in JSON"),
         }
     }
 }
