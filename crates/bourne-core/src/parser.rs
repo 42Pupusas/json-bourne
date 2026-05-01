@@ -26,10 +26,10 @@ enum State {
     ArrayCommaOrEnd,
     /// Inside an object, expecting either a key or `}`.
     ObjectKeyOrEnd,
-    /// Inside an object, just emitted a key, expecting `:`.
+    /// Inside an object, just emitted a key, expecting `:`. The arm fuses
+    /// `:` consumption with the value parse, so we never observe a separate
+    /// "expecting value" state — that's why there's no `ObjectValue` here.
     ObjectColon,
-    /// Inside an object, expecting a value (after `:`).
-    ObjectValue,
     /// Inside an object, just emitted a value, expecting `,` or `}`.
     ObjectCommaOrEnd,
 }
@@ -191,14 +191,30 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                 },
                 State::ArrayCommaOrEnd => match self.peek() {
                     Some(b',') => {
+                        // After `,` inside an array we already know the next
+                        // token must be a value (or an error for `,]`). Skip
+                        // the loop-continue + state-table re-dispatch and go
+                        // straight to parse_value here. For integer-array
+                        // workloads this collapses 6+ jumps per element into
+                        // a single fused path.
                         self.bump();
-                        self.state = State::ArrayValueOrEnd;
-                        // Reject trailing comma: `,]` is invalid.
                         self.skip_whitespace();
                         if self.peek() == Some(b']') {
                             return Err(self.err(ErrorKind::UnexpectedByte(b']')));
                         }
-                        continue;
+                        let ev = self.parse_value()?;
+                        if matches!(
+                            ev,
+                            Event::String(_)
+                                | Event::Number(_)
+                                | Event::Bool(_)
+                                | Event::Null
+                                | Event::EndArray
+                                | Event::EndObject
+                        ) {
+                            self.state = State::ArrayCommaOrEnd;
+                        }
+                        Ok(Some(ev))
                     }
                     Some(b']') => {
                         self.bump();
@@ -222,28 +238,28 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                 },
                 State::ObjectColon => match self.peek() {
                     Some(b':') => {
+                        // Same fusion as ArrayCommaOrEnd's `,` arm: after `:`
+                        // we know the next event is a value, so parse it here
+                        // instead of falling back into the state-table loop.
                         self.bump();
-                        self.state = State::ObjectValue;
-                        continue;
+                        self.skip_whitespace();
+                        let ev = self.parse_value()?;
+                        if matches!(
+                            ev,
+                            Event::String(_)
+                                | Event::Number(_)
+                                | Event::Bool(_)
+                                | Event::Null
+                                | Event::EndArray
+                                | Event::EndObject
+                        ) {
+                            self.state = State::ObjectCommaOrEnd;
+                        }
+                        Ok(Some(ev))
                     }
                     Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
                     None => Err(self.err(ErrorKind::UnexpectedEof)),
                 },
-                State::ObjectValue => {
-                    let ev = self.parse_value()?;
-                    if matches!(
-                        ev,
-                        Event::String(_)
-                            | Event::Number(_)
-                            | Event::Bool(_)
-                            | Event::Null
-                            | Event::EndArray
-                            | Event::EndObject
-                    ) {
-                        self.state = State::ObjectCommaOrEnd;
-                    }
-                    Ok(Some(ev))
-                }
                 State::ObjectCommaOrEnd => match self.peek() {
                     Some(b',') => {
                         self.bump();
