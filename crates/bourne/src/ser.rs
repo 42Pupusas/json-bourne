@@ -463,6 +463,73 @@ impl<T: ToJson + ?Sized> ToJson for &T {
     }
 }
 
+// Slices and fixed-size arrays serialize as JSON arrays. The shared
+// helper writes the bracketed comma-separated body so impls for Vec,
+// slice, and [T; N] don't drift on punctuation.
+//
+// `vec_write_json` is the symmetric hook to FromJson's `vec_from_lex`:
+// types like `i64` / `&str` whose per-element write goes through method
+// dispatch can override it to write directly through the sink. Default
+// loops `T::write_json` per element.
+fn write_array<T: ToJson, I: IntoIterator<Item = T>, W: JsonWrite + ?Sized>(
+    iter: I,
+    w: &mut W,
+) -> Result<(), W::Error> {
+    w.write_byte(b'[')?;
+    let mut first = true;
+    for v in iter {
+        if !first {
+            w.write_byte(b',')?;
+        }
+        v.write_json(w)?;
+        first = false;
+    }
+    w.write_byte(b']')
+}
+
+impl<T: ToJson> ToJson for [T] {
+    #[inline]
+    fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+        write_array(self.iter(), w)
+    }
+}
+
+impl<T: ToJson, const N: usize> ToJson for [T; N] {
+    #[inline]
+    fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+        write_array(self.iter(), w)
+    }
+}
+
+// Tuples serialize as fixed-length heterogeneous arrays. Mirrors the
+// FromJson side which accepts `[T, U, V]` for `(T, U, V)`.
+//
+// The macro takes the *first* element separately from the rest so the
+// comma placement is unambiguous: emit the first, then for each rest
+// element emit `,` followed by it. No trailing comma, no double-walk.
+macro_rules! impl_tuple_to_json {
+    ($first_idx:tt: $First:ident $(, $idx:tt: $T:ident)* $(,)?) => {
+        impl<$First: ToJson $(, $T: ToJson)*> ToJson for ($First, $($T,)*) {
+            fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+                w.write_byte(b'[')?;
+                self.$first_idx.write_json(w)?;
+                $(
+                    w.write_byte(b',')?;
+                    self.$idx.write_json(w)?;
+                )*
+                w.write_byte(b']')
+            }
+        }
+    };
+}
+
+impl_tuple_to_json!(0: A);
+impl_tuple_to_json!(0: A, 1: B);
+impl_tuple_to_json!(0: A, 1: B, 2: C);
+impl_tuple_to_json!(0: A, 1: B, 2: C, 3: D);
+impl_tuple_to_json!(0: A, 1: B, 2: C, 3: D, 4: E);
+impl_tuple_to_json!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
+
 // ---------------------------------------------------------------------------
 // alloc-gated impls
 // ---------------------------------------------------------------------------
@@ -520,7 +587,202 @@ mod alloc_impls {
             (**self).write_json(w)
         }
     }
+
+    impl<T: ToJson> ToJson for alloc::vec::Vec<T> {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            // Forward to the slice impl in the parent module.
+            self.as_slice().write_json(w)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Map and set collections.
+    //
+    // Mirror image of `de.rs`: keys are written via `MapKeyOut`, which
+    // exposes the canonical `&str` form regardless of whether the
+    // underlying type is `String`, `&str`, or `Cow<'_, str>`. Values
+    // serialize via their own `ToJson` impl. Sets serialize as arrays
+    // in iteration order — for `HashSet` that's hash-bucket order,
+    // matching the convention serde_json uses.
+    // -----------------------------------------------------------------
+
+    /// Sealed adapter from a map's key type to the borrowed `&str` form.
+    ///
+    /// JSON object keys are always strings, so any map serialized via
+    /// `ToJson` needs its key type to expose a `&str` view. Implemented
+    /// for `String`, `&str`, and `Cow<'_, str>` — the same set the
+    /// parse side supports via `MapKey`.
+    pub trait MapKeyOut {
+        fn as_str(&self) -> &str;
+    }
+
+    impl MapKeyOut for String {
+        #[inline]
+        fn as_str(&self) -> &str {
+            self
+        }
+    }
+
+    impl MapKeyOut for &str {
+        #[inline]
+        fn as_str(&self) -> &str {
+            self
+        }
+    }
+
+    impl MapKeyOut for Cow<'_, str> {
+        #[inline]
+        fn as_str(&self) -> &str {
+            self.as_ref()
+        }
+    }
+
+    /// Shared object-writing helper. Mirrors `write_array` for arrays.
+    /// Pulled out so `BTreeMap` and `HashMap` (and any future map type)
+    /// cannot drift on punctuation or empty-object handling.
+    fn write_object<'a, K, V, I, W>(iter: I, w: &mut W) -> Result<(), W::Error>
+    where
+        K: MapKeyOut + 'a,
+        V: ToJson + 'a,
+        I: IntoIterator<Item = (&'a K, &'a V)>,
+        W: JsonWrite + ?Sized,
+    {
+        w.write_byte(b'{')?;
+        let mut first = true;
+        for (k, v) in iter {
+            if !first {
+                w.write_byte(b',')?;
+            }
+            w.write_escaped_str(k.as_str())?;
+            w.write_byte(b':')?;
+            v.write_json(w)?;
+            first = false;
+        }
+        w.write_byte(b'}')
+    }
+
+    impl<K: MapKeyOut, V: ToJson> ToJson for alloc::collections::BTreeMap<K, V> {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            write_object(self.iter(), w)
+        }
+    }
+
+    impl<T: ToJson> ToJson for alloc::collections::BTreeSet<T> {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            super::write_array(self.iter(), w)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl<K, V, S> ToJson for std::collections::HashMap<K, V, S>
+    where
+        K: MapKeyOut + ::core::hash::Hash + Eq,
+        V: ToJson,
+        S: ::core::hash::BuildHasher,
+    {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            write_object(self.iter(), w)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl<T, S> ToJson for std::collections::HashSet<T, S>
+    where
+        T: ToJson + ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher,
+    {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            super::write_array(self.iter(), w)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // std::net and std::path adapters.
+    //
+    // Each writes its canonical Display form as a quoted JSON string,
+    // matching the FromJson `parse_from_str` adapter on the parse
+    // side. Duration goes through f64 seconds, deferred to the float PR.
+    // -----------------------------------------------------------------
+
+    /// Display the value into a small scratch buffer, then write it as
+    /// a JSON string. The `fmt::Write` trait fills our scratch `String`;
+    /// from there we reuse `write_escaped_str` even though these types'
+    /// canonical text never contains characters that need escaping —
+    /// the cost is one SIMD scan that exits immediately, and using the
+    /// escape path keeps a single string-writing entry point.
+    #[cfg(feature = "std")]
+    fn write_display<T: ::core::fmt::Display, W: JsonWrite + ?Sized>(
+        v: &T,
+        w: &mut W,
+    ) -> Result<(), W::Error> {
+        use ::core::fmt::Write as _;
+        let mut buf = String::new();
+        // fmt::Write into a String is infallible.
+        let _ = write!(&mut buf, "{v}");
+        w.write_escaped_str(&buf)
+    }
+
+    #[cfg(feature = "std")]
+    impl ToJson for std::net::IpAddr {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            write_display(self, w)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl ToJson for std::net::Ipv4Addr {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            write_display(self, w)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl ToJson for std::net::Ipv6Addr {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            write_display(self, w)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl ToJson for std::net::SocketAddr {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            write_display(self, w)
+        }
+    }
+
+    /// `PathBuf` round-trips only for paths whose bytes are valid UTF-8.
+    /// `Path::display()` lossily replaces invalid bytes — we want a
+    /// clean error in that case, but JSON has no lossless path encoding
+    /// anyway, so the convention matches the parse side: assume UTF-8.
+    /// `to_string_lossy` here is the symmetric move.
+    #[cfg(feature = "std")]
+    impl ToJson for std::path::PathBuf {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            w.write_escaped_str(&self.to_string_lossy())
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl ToJson for std::path::Path {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            w.write_escaped_str(&self.to_string_lossy())
+        }
+    }
 }
+
+#[cfg(feature = "alloc")]
+pub use alloc_impls::MapKeyOut;
 
 // Keep `Position` / `ErrorKind` imports live so PR 2's float path can lean
 // on them without re-importing. The float impls return

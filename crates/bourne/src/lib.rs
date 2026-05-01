@@ -26,7 +26,7 @@ pub use de::{FromJson, parse, parse_str};
 pub use de::{MapKey, key_to_cow};
 pub use ser::{JsonWrite, ToJson};
 #[cfg(feature = "alloc")]
-pub use ser::{StringSink, to_string, to_vec};
+pub use ser::{MapKeyOut, StringSink, to_string, to_vec};
 
 mod macros;
 
@@ -1039,5 +1039,123 @@ mod ser_roundtrip {
         assert_eq!(to_string(&"hi").unwrap(), "\"hi\"");
         // Control char inside a string → \u00XX.
         assert_eq!(to_string(&"\x01").unwrap(), "\"\\u0001\"");
+    }
+
+    #[test]
+    fn vec_roundtrips() {
+        rt(Vec::<i32>::new());
+        rt(vec![1_i32, 2, 3]);
+        rt(vec![String::from("a"), String::from("b")]);
+        rt(vec![Some(1_u32), None, Some(3)]);
+    }
+
+    #[test]
+    fn nested_vec_roundtrips() {
+        rt(vec![vec![1_i32, 2], vec![3], Vec::new()]);
+    }
+
+    #[test]
+    fn fixed_array_roundtrips() {
+        rt([1_i32, 2, 3]);
+        rt([true, false, true]);
+        let zero: [i32; 0] = [];
+        rt(zero);
+    }
+
+    #[test]
+    fn tuple_roundtrips() {
+        rt((1_i32, String::from("hi"), true));
+        rt((1_u8, 2_u16, 3_u32, 4_u64));
+    }
+
+    #[test]
+    fn slice_pinned() {
+        // Slice has no FromJson impl (you parse into Vec), so it can't
+        // round-trip — pin its wire shape directly instead.
+        let s: &[i32] = &[10, 20, 30];
+        assert_eq!(to_string(&s).unwrap(), "[10,20,30]");
+        let empty: &[u8] = &[];
+        assert_eq!(to_string(&empty).unwrap(), "[]");
+    }
+
+    #[test]
+    fn btreemap_roundtrips() {
+        use std::collections::BTreeMap;
+        let mut m = BTreeMap::new();
+        m.insert(String::from("a"), 1_i32);
+        m.insert(String::from("b"), 2);
+        rt(m);
+    }
+
+    #[test]
+    fn btreemap_with_escape_in_key() {
+        use std::collections::BTreeMap;
+        let mut m = BTreeMap::new();
+        m.insert(String::from("a\nb"), 1_i32);
+        rt(m);
+    }
+
+    #[test]
+    fn btreeset_roundtrips() {
+        use std::collections::BTreeSet;
+        let mut s = BTreeSet::new();
+        s.insert(1_i32);
+        s.insert(2);
+        s.insert(3);
+        rt(s);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashmap_roundtrips() {
+        // HashMap iteration order isn't stable, so don't rt() — instead
+        // serialize, parse back into HashMap, and compare maps directly.
+        use std::collections::HashMap;
+        let mut m = HashMap::new();
+        m.insert(String::from("alpha"), 1_i32);
+        m.insert(String::from("beta"), 2);
+        let s = to_string(&m).unwrap();
+        let back: HashMap<String, i32> = parse_str(&s).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashset_roundtrips() {
+        use std::collections::HashSet;
+        let mut s = HashSet::new();
+        s.insert(1_i32);
+        s.insert(2);
+        s.insert(3);
+        let json = to_string(&s).unwrap();
+        let back: HashSet<i32> = parse_str(&json).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn ip_addrs_roundtrip() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+        rt(Ipv4Addr::LOCALHOST);
+        rt(Ipv6Addr::LOCALHOST);
+        rt(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
+        rt(SocketAddr::from(([127, 0, 0, 1], 8080)));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn pathbuf_roundtrips() {
+        use std::path::PathBuf;
+        rt(PathBuf::from("/etc/hosts"));
+    }
+
+    #[test]
+    fn empty_collections_pinned() {
+        use std::collections::BTreeMap;
+        assert_eq!(to_string(&Vec::<i32>::new()).unwrap(), "[]");
+        let empty: [i32; 0] = [];
+        assert_eq!(to_string(&empty).unwrap(), "[]");
+        let m: BTreeMap<String, i32> = BTreeMap::new();
+        assert_eq!(to_string(&m).unwrap(), "{}");
     }
 }
