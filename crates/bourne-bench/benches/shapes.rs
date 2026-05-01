@@ -5,7 +5,7 @@
 //! before the broader stream/typed benches surface it.
 
 use bourne::parse;
-use bourne_bench::{deep_nesting, escaped_string_array};
+use bourne_bench::{deep_nesting, escaped_string_array, float_array, int_array};
 use bourne_core::Parser;
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
@@ -20,12 +20,15 @@ fn bench_shapes(c: &mut Criterion) {
     let mut group = c.benchmark_group("shapes");
 
     // Number lexer hot path — pure integer parsing, no object overhead.
-    let ints = "[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20]".repeat(1000);
+    // 20k ints in one valid array (was previously 1000 concatenated arrays
+    // which produced trailing-data errors).
+    let ints = int_array(20_000);
     group.throughput(Throughput::Bytes(ints.len() as u64));
     group.bench_function("ints_lex", |b| b.iter(|| drain(black_box(ints.as_bytes()))));
 
-    // Floats: fraction + exponent — slowest number path.
-    let floats = "[1.5e10,-2.7e-5,3.14159,0.0,1e100]".repeat(1000);
+    // Floats: fraction + exponent — slowest number path. 5000 mixed-form
+    // floats in a single valid array.
+    let floats = float_array(5_000);
     group.throughput(Throughput::Bytes(floats.len() as u64));
     group.bench_function("floats_lex", |b| b.iter(|| drain(black_box(floats.as_bytes()))));
 

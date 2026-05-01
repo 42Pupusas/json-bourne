@@ -39,6 +39,25 @@ pub fn string_array(n: usize) -> String {
     s
 }
 
+/// A flat array of N floats covering integer, fraction, and exponent forms
+/// — exercises the slowest number path.
+#[must_use]
+pub fn float_array(n: usize) -> String {
+    // Five forms repeated mod 5 keeps the lexer touching every branch
+    // (integer, leading-`-`, fraction, exponent, sign-on-exponent).
+    const SAMPLES: [&str; 5] = ["1.5e10", "-2.7e-5", "3.14159", "0.0", "1e100"];
+    let mut s = String::with_capacity(n * 8);
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(SAMPLES[i % SAMPLES.len()]);
+    }
+    s.push(']');
+    s
+}
+
 /// A flat array of N strings with `\n` escape — exercises the validation path.
 #[must_use]
 pub fn escaped_string_array(n: usize) -> String {
