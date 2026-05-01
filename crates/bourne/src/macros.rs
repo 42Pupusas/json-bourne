@@ -301,6 +301,187 @@ macro_rules! from_json {
     };
 
     // -----------------------------------------------------------------
+    // Untagged enum, no generics.
+    //
+    // Container attribute `#[bourne(untagged)]` parses by trial: each
+    // variant is attempted in declaration order; the first one that
+    // parses successfully wins. On failure the lexer is restored to
+    // the value's start before the next attempt.
+    //
+    // JSON shapes per variant:
+    //   - Unit `Foo`            → JSON `null`
+    //   - Newtype `Foo(T)`      → bare `T`
+    //   - Tuple `Foo(T, U)`     → `[T, U]`
+    //   - Struct `Foo {a, b}`   → `{"a": ..., "b": ...}`
+    //
+    // Order matters: variants overlapping in shape (e.g. two newtype
+    // variants where both inner types accept the same JSON) resolve
+    // to the first one declared.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(untagged)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_untagged_dispatch!(__lex, $name, ($($variants)*))
+            }
+        }
+    };
+
+    // Untagged enum, one lifetime.
+    (
+        #[bourne(untagged)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_untagged_dispatch!(__lex, $name, ($($variants)*))
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Adjacently-tagged enum, no generics.
+    //
+    // Container attribute `#[bourne(tag = "t", content = "c")]` puts
+    // the discriminator and payload in two sibling fields:
+    //
+    //   {"t": "Foo", "c": <payload>}
+    //   {"t": "Bar"}                  // unit — content absent
+    //
+    // Field order is not significant. All variant shapes are
+    // supported (unit, newtype, tuple, struct), unlike the
+    // internally-tagged case.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(tag = $tag:literal, content = $content:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_adjacently_tagged_dispatch!(
+                    __lex, $name, $tag, $content, ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Adjacently-tagged enum, one lifetime.
+    (
+        #[bourne(tag = $tag:literal, content = $content:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_adjacently_tagged_dispatch!(
+                    __lex, $name, $tag, $content, ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Internally-tagged enum, no generics.
+    //
+    // Container attribute `#[bourne(tag = "type")]` makes the variant
+    // discriminator a sibling field of the variant's own fields:
+    //
+    //   {"type": "Foo", "a": 1, "b": 2}   // → Foo { a: 1, b: 2 }
+    //   {"type": "Bar"}                    // → Bar (unit)
+    //
+    // Container attribute must appear *first* among outer attrs (same
+    // rule as `deny_unknown_fields = false`): macro_rules! arms match
+    // a fixed prefix.
+    //
+    // Supported variant shapes: unit and struct-variant only. Newtype
+    // and tuple variants do not have a coherent internally-tagged
+    // representation (the discriminator would have to live inside the
+    // newtype payload, which conflicts with the payload's own shape);
+    // serde rejects them too.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(tag = $tag:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_internally_tagged_dispatch!(
+                    __lex, $name, $tag, ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Internally-tagged enum, one lifetime.
+    (
+        #[bourne(tag = $tag:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_internally_tagged_dispatch!(
+                    __lex, $name, $tag, ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
     // Externally-tagged enum, no generics.
     //
     // JSON shape per variant:
@@ -1215,6 +1396,858 @@ macro_rules! __from_json_enum_walk {
 }
 
 // ============================================================================
+// Internally-tagged enum dispatch.
+//
+// Strategy: open the object, snapshot the lexer right after `{`, walk
+// keys until we find the tag (parsing+restoring per non-tag value),
+// read the tag's string value, then restore the snapshot and re-enter
+// the variant's named-body parser with a "skip this one key by name"
+// hint so the tag itself is consumed without complaint.
+//
+// The "find tag" pass parses non-tag values via `skip_value`, which is
+// O(value-size) — for typical `{"type": "...", ...payload...}` shapes
+// where the tag is the first key, that's a no-op and the second pass
+// reads each value once. Worst case (tag is the last key) we read the
+// payload twice. That trade is the cost of avoiding a Value DOM here.
+//
+// State accumulators:
+//   - unit_arms:   match arms keyed on tag string → `Ok(Variant)`
+//   - struct_arms: match arms keyed on tag string → struct-variant body
+//                  parser invocation (with tag-skip)
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_internally_tagged_dispatch {
+    ($lex:ident, $name:ident, $tag:literal, ($($variants:tt)*)) => {{
+        // Snapshot the cursor before consuming `{` so the second pass
+        // (variant body) can call `object_start()` again from a clean
+        // state — restoring puts us back to "expect a JSON value at
+        // the cursor" which is exactly what the variant body assumes.
+        let __cp = $lex.checkpoint();
+        $lex.object_start()?;
+
+        // Find-tag pass. The tag value is borrowed from the input
+        // slice; restoring the lexer's cursor does not invalidate
+        // borrows into the input (only `offset` and stack depth move,
+        // the slice itself is unchanged).
+        //
+        // Limitation: the tag value goes through `parse_str_value`,
+        // which rejects backslash escapes. A tag like `"Foo"`
+        // therefore won't match the variant name `Foo`. This matches
+        // the existing struct-field-name dispatch behavior; both are
+        // raised together if/when we gain a `Cow<str>` decode path
+        // here.
+        let mut __maybe_key = $lex.object_first_key_lex()?;
+        let __tag_value: &str = loop {
+            let Some(__key_js) = __maybe_key else {
+                return ::core::result::Result::Err(
+                    $crate::Error::new($crate::ErrorKind::MissingField, $lex.position()),
+                );
+            };
+            let __key_cow = $crate::key_to_cow(__key_js, $lex)?;
+            if __key_cow.as_ref() == $tag {
+                break $lex.parse_str_value()?;
+            }
+            $lex.skip_value()?;
+            __maybe_key = $lex.object_next_key_lex()?;
+        };
+
+        // Restore and dispatch on the tag.
+        $lex.restore(__cp);
+        $crate::__from_json_internally_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            tag_value: (__tag_value),
+            unit_arms: { },
+            struct_arms: { },
+            cur_rename: (),
+            input: ($($variants)*)
+        )
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_internally_tagged_walk {
+    // Done: emit the dispatch.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: { $($u:tt)* },
+        struct_arms: { $($s:tt)* },
+        cur_rename: (),
+        input: ()
+    ) => {
+        match $tagval {
+            $($u)*
+            $($s)*
+            _ => ::core::result::Result::Err(
+                $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
+            ),
+        }
+    };
+
+    // bourne(rename = "x") on the next variant.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: $u:tt,
+        struct_arms: $s:tt,
+        cur_rename: (),
+        input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_internally_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            tag_value: ($tagval),
+            unit_arms: $u,
+            struct_arms: $s,
+            cur_rename: ($renamed),
+            input: ($($rest)*)
+        )
+    };
+
+    // Skip other variant attributes.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: $u:tt,
+        struct_arms: $s:tt,
+        cur_rename: ($($rename:tt)?),
+        input: ( #[$_other:meta] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_internally_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            tag_value: ($tagval),
+            unit_arms: $u,
+            struct_arms: $s,
+            cur_rename: ($($rename)?),
+            input: ($($rest)*)
+        )
+    };
+
+    // Reject newtype variant.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: $u:tt,
+        struct_arms: $s:tt,
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident ( $($_body:tt)* ) $($rest:tt)* )
+    ) => {
+        ::core::compile_error!(
+            "from_json! macro: internally-tagged enums (#[bourne(tag = \"...\")]) \
+             do not support newtype or tuple variants. Only unit and struct variants \
+             are allowed; the tag must be a sibling field of the variant's own \
+             fields, which is not representable for a non-object payload."
+        );
+    };
+
+    // Unit variant followed by `,`.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: { $($u:tt)* },
+        struct_arms: $s:tt,
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident , $($rest:tt)* )
+    ) => {
+        $crate::__from_json_internally_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            tag_value: ($tagval),
+            unit_arms: {
+                $($u)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    $crate::__from_json_internally_tagged_unit_body!($lex, $tag);
+                    ::core::result::Result::Ok($name::$vname)
+                },
+            },
+            struct_arms: $s,
+            cur_rename: (),
+            input: ($($rest)*)
+        )
+    };
+    // Unit variant, last.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: { $($u:tt)* },
+        struct_arms: $s:tt,
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident )
+    ) => {
+        $crate::__from_json_internally_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            tag_value: ($tagval),
+            unit_arms: {
+                $($u)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    $crate::__from_json_internally_tagged_unit_body!($lex, $tag);
+                    ::core::result::Result::Ok($name::$vname)
+                },
+            },
+            struct_arms: $s,
+            cur_rename: (),
+            input: ()
+        )
+    };
+
+    // Struct variant with trailing comma.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: $u:tt,
+        struct_arms: { $($s:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident { $($body:tt)* } , $($rest:tt)* )
+    ) => {
+        $crate::__from_json_internally_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            tag_value: ($tagval),
+            unit_arms: $u,
+            struct_arms: {
+                $($s)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    $crate::__from_json_named_body_skip_one!(
+                        $lex,
+                        ($name::$vname),
+                        $tag,
+                        $($body)*
+                    )
+                },
+            },
+            cur_rename: (),
+            input: ($($rest)*)
+        )
+    };
+    // Struct variant, last.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        tag_value: ($tagval:ident),
+        unit_arms: $u:tt,
+        struct_arms: { $($s:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident { $($body:tt)* } )
+    ) => {
+        $crate::__from_json_internally_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            tag_value: ($tagval),
+            unit_arms: $u,
+            struct_arms: {
+                $($s)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    $crate::__from_json_named_body_skip_one!(
+                        $lex,
+                        ($name::$vname),
+                        $tag,
+                        $($body)*
+                    )
+                },
+            },
+            cur_rename: (),
+            input: ()
+        )
+    };
+}
+
+// Body-walk variant of __from_json_named_body that treats one specific
+// key (`$skip_key`) as the tag-and-skip-it case rather than as
+// "unknown". All other keys behave strict. Reuses the existing
+// `__from_json_walk!` engine via a new `unknown:` mode value
+// `tag_skip(...)`.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_named_body_skip_one {
+    ($lex:ident, ($($self_ctor:tt)+), $skip_key:literal, $($body:tt)*) => {
+        $crate::__from_json_walk!(
+            lex: $lex,
+            ctor: ($($self_ctor)+),
+            unknown: (tag_skip $skip_key),
+            decls: { },
+            arms: { },
+            assigns: { },
+            ftokens: [],
+            cur_name: (),
+            cur_rename: (),
+            cur_default: (),
+            input: ($($body)*)
+        )
+    };
+}
+
+// Body for a unit variant in internally-tagged mode: the only other
+// keys allowed are the tag itself (already validated). Any other key
+// is `UnknownField`. The variant has been selected by the caller; we
+// just need to drain the remaining keys.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_internally_tagged_unit_body {
+    ($lex:ident, $tag:literal) => {{
+        $lex.object_start()?;
+        let mut __maybe_key = $lex.object_first_key_lex()?;
+        while let ::core::option::Option::Some(__key_js) = __maybe_key {
+            let __key_cow = $crate::key_to_cow(__key_js, $lex)?;
+            if __key_cow.as_ref() == $tag {
+                $lex.skip_value()?;
+            } else {
+                return ::core::result::Result::Err(
+                    $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
+                );
+            }
+            __maybe_key = $lex.object_next_key_lex()?;
+        }
+    }};
+}
+
+// ============================================================================
+// Adjacently-tagged enum dispatch.
+//
+// Walk the object once, capturing:
+//   - the tag string (borrowed from input — survives `restore` since
+//     restore only moves the cursor, not the input slice itself)
+//   - a checkpoint pointing at the content value (if a `content` key
+//     is encountered), which we use to seek back for the variant body
+//
+// After the object closes, dispatch on the tag. Unit-variant arms
+// reject any captured content; non-unit arms require it. The restore-
+// to-content step puts the lexer back into "expecting one JSON value"
+// state for the variant payload.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_adjacently_tagged_dispatch {
+    ($lex:ident, $name:ident, $tag:literal, $content:literal, ($($variants:tt)*)) => {{
+        $lex.object_start()?;
+
+        let mut __tag_value: ::core::option::Option<&str> = ::core::option::Option::None;
+        let mut __content_cp: ::core::option::Option<$crate::Checkpoint> =
+            ::core::option::Option::None;
+
+        let mut __maybe_key = $lex.object_first_key_lex()?;
+        while let ::core::option::Option::Some(__key_js) = __maybe_key {
+            let __key_cow = $crate::key_to_cow(__key_js, $lex)?;
+            if __key_cow.as_ref() == $tag {
+                if __tag_value.is_some() {
+                    return ::core::result::Result::Err(
+                        $crate::Error::new($crate::ErrorKind::DuplicateKey, $lex.position()),
+                    );
+                }
+                __tag_value = ::core::option::Option::Some($lex.parse_str_value()?);
+            } else if __key_cow.as_ref() == $content {
+                if __content_cp.is_some() {
+                    return ::core::result::Result::Err(
+                        $crate::Error::new($crate::ErrorKind::DuplicateKey, $lex.position()),
+                    );
+                }
+                __content_cp = ::core::option::Option::Some($lex.checkpoint());
+                $lex.skip_value()?;
+            } else {
+                return ::core::result::Result::Err(
+                    $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
+                );
+            }
+            __maybe_key = $lex.object_next_key_lex()?;
+        }
+
+        let __tag = __tag_value.ok_or_else(|| {
+            $crate::Error::new($crate::ErrorKind::MissingField, $lex.position())
+        })?;
+
+        // Snapshot the post-object cursor (with depth back to 0). After
+        // restoring inward to the content checkpoint and parsing the
+        // payload, we restore here so the outer parser sees the lexer
+        // at end-of-object and `finish()` accepts the input.
+        let __post_cp = $lex.checkpoint();
+
+        let __value = $crate::__from_json_adjacently_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            content_key: $content,
+            tag_value: (__tag),
+            content_cp: (__content_cp),
+            arms: { },
+            cur_rename: (),
+            input: ($($variants)*)
+        )?;
+        $lex.restore(__post_cp);
+        ::core::result::Result::Ok(__value)
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_adjacently_tagged_walk {
+    // Done — emit the dispatch.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        content_key: $content:literal,
+        tag_value: ($tagval:ident),
+        content_cp: ($cp:ident),
+        arms: { $($a:tt)* },
+        cur_rename: (),
+        input: ()
+    ) => {
+        match $tagval {
+            $($a)*
+            _ => ::core::result::Result::Err(
+                $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
+            ),
+        }
+    };
+
+    // bourne(rename = "x") on the next variant.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        content_key: $content:literal,
+        tag_value: ($tagval:ident),
+        content_cp: ($cp:ident),
+        arms: $a:tt,
+        cur_rename: (),
+        input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_adjacently_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            content_key: $content,
+            tag_value: ($tagval),
+            content_cp: ($cp),
+            arms: $a,
+            cur_rename: ($renamed),
+            input: ($($rest)*)
+        )
+    };
+
+    // Skip other variant attributes.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        content_key: $content:literal,
+        tag_value: ($tagval:ident),
+        content_cp: ($cp:ident),
+        arms: $a:tt,
+        cur_rename: ($($rename:tt)?),
+        input: ( #[$_other:meta] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_adjacently_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            content_key: $content,
+            tag_value: ($tagval),
+            content_cp: ($cp),
+            arms: $a,
+            cur_rename: ($($rename)?),
+            input: ($($rest)*)
+        )
+    };
+
+    // Unit variant — content must NOT be present.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        content_key: $content:literal,
+        tag_value: ($tagval:ident),
+        content_cp: ($cp:ident),
+        arms: { $($a:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__from_json_adjacently_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            content_key: $content,
+            tag_value: ($tagval),
+            content_cp: ($cp),
+            arms: {
+                $($a)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    if $cp.is_some() {
+                        ::core::result::Result::Err(
+                            $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
+                        )
+                    } else {
+                        ::core::result::Result::Ok($name::$vname)
+                    }
+                },
+            },
+            cur_rename: (),
+            input: ($($($rest)*)?)
+        )
+    };
+
+    // Newtype variant — content required, parsed bare.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        content_key: $content:literal,
+        tag_value: ($tagval:ident),
+        content_cp: ($cp:ident),
+        arms: { $($a:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident ( $fty:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__from_json_adjacently_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            content_key: $content,
+            tag_value: ($tagval),
+            content_cp: ($cp),
+            arms: {
+                $($a)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    match $cp {
+                        ::core::option::Option::Some(__c) => {
+                            $lex.restore(__c);
+                            ::core::result::Result::Ok($name::$vname(
+                                <$fty as $crate::FromJson<'_>>::from_lex($lex)?,
+                            ))
+                        }
+                        ::core::option::Option::None => ::core::result::Result::Err(
+                            $crate::Error::new($crate::ErrorKind::MissingField, $lex.position()),
+                        ),
+                    }
+                },
+            },
+            cur_rename: (),
+            input: ($($($rest)*)?)
+        )
+    };
+
+    // Multi-field tuple variant — content required, parsed as array.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        content_key: $content:literal,
+        tag_value: ($tagval:ident),
+        content_cp: ($cp:ident),
+        arms: { $($a:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident ( $fty1:ty, $($ftyn:ty),+ $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__from_json_adjacently_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            content_key: $content,
+            tag_value: ($tagval),
+            content_cp: ($cp),
+            arms: {
+                $($a)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    match $cp {
+                        ::core::option::Option::Some(__c) => {
+                            $lex.restore(__c);
+                            if $lex.array_start()? {
+                                return ::core::result::Result::Err(
+                                    $crate::Error::new($crate::ErrorKind::TypeMismatch, $lex.position()),
+                                );
+                            }
+                            let __elem_0 = <$fty1 as $crate::FromJson<'_>>::from_lex($lex)?;
+                            $crate::__from_json_tuple_walk!(
+                                lex: $lex,
+                                self_ctor: ($name::$vname),
+                                accum: [ __elem_0 ],
+                                remaining: [ $(($ftyn))+ ]
+                            )
+                        }
+                        ::core::option::Option::None => ::core::result::Result::Err(
+                            $crate::Error::new($crate::ErrorKind::MissingField, $lex.position()),
+                        ),
+                    }
+                },
+            },
+            cur_rename: (),
+            input: ($($($rest)*)?)
+        )
+    };
+
+    // Struct variant — content required, parsed as nested object.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        tag_key: $tag:literal,
+        content_key: $content:literal,
+        tag_value: ($tagval:ident),
+        content_cp: ($cp:ident),
+        arms: { $($a:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident { $($body:tt)* } $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__from_json_adjacently_tagged_walk!(
+            lex: $lex,
+            name: $name,
+            tag_key: $tag,
+            content_key: $content,
+            tag_value: ($tagval),
+            content_cp: ($cp),
+            arms: {
+                $($a)*
+                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                    match $cp {
+                        ::core::option::Option::Some(__c) => {
+                            $lex.restore(__c);
+                            $crate::__from_json_named_body!(
+                                $lex,
+                                ($name::$vname),
+                                strict,
+                                $($body)*
+                            )
+                        }
+                        ::core::option::Option::None => ::core::result::Result::Err(
+                            $crate::Error::new($crate::ErrorKind::MissingField, $lex.position()),
+                        ),
+                    }
+                },
+            },
+            cur_rename: (),
+            input: ($($($rest)*)?)
+        )
+    };
+}
+
+// ============================================================================
+// Untagged enum dispatch.
+//
+// Take a checkpoint at the value's start, then for each variant:
+//   1. Restore (no-op on first try).
+//   2. Run a `(|| { ... })()` closure that parses the variant's JSON
+//      shape and constructs the variant.
+//   3. On `Ok`, return.
+//   4. On `Err`, fall through to the next variant.
+//
+// If all variants fail, return a generic TypeMismatch error pointing
+// at the value's start. We cannot return all candidate errors without
+// allocating; this matches serde's untagged behavior.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_untagged_dispatch {
+    ($lex:ident, $name:ident, ($($variants:tt)*)) => {{
+        let __cp = $lex.checkpoint();
+        $crate::__from_json_untagged_walk!(
+            lex: $lex,
+            name: $name,
+            cp: (__cp),
+            cur_rename: (),
+            input: ($($variants)*)
+        )
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_untagged_walk {
+    // Done — all variants tried, return generic error.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        cp: ($cp:ident),
+        cur_rename: (),
+        input: ()
+    ) => {
+        ::core::result::Result::Err(
+            $crate::Error::new($crate::ErrorKind::TypeMismatch, $lex.position()),
+        )
+    };
+
+    // Skip rename attribute — irrelevant to untagged (no tag string).
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        cp: ($cp:ident),
+        cur_rename: (),
+        input: ( #[bourne(rename = $_renamed:literal)] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_untagged_walk!(
+            lex: $lex,
+            name: $name,
+            cp: ($cp),
+            cur_rename: (),
+            input: ($($rest)*)
+        )
+    };
+
+    // Skip other variant attributes.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        cp: ($cp:ident),
+        cur_rename: (),
+        input: ( #[$_other:meta] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_untagged_walk!(
+            lex: $lex,
+            name: $name,
+            cp: ($cp),
+            cur_rename: (),
+            input: ($($rest)*)
+        )
+    };
+
+    // Unit variant — JSON null.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        cp: ($cp:ident),
+        cur_rename: (),
+        input: ( $vname:ident $(, $($rest:tt)*)? )
+    ) => {{
+        $lex.restore($cp);
+        let __try: ::core::result::Result<$name, $crate::Error> = (|| {
+            <() as $crate::FromJson<'_>>::from_lex($lex)?;
+            ::core::result::Result::Ok($name::$vname)
+        })();
+        if let ::core::result::Result::Ok(__v) = __try {
+            ::core::result::Result::Ok(__v)
+        } else {
+            $crate::__from_json_untagged_walk!(
+                lex: $lex,
+                name: $name,
+                cp: ($cp),
+                cur_rename: (),
+                input: ($($($rest)*)?)
+            )
+        }
+    }};
+
+    // Newtype variant — bare inner value.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        cp: ($cp:ident),
+        cur_rename: (),
+        input: ( $vname:ident ( $fty:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {{
+        $lex.restore($cp);
+        let __try: ::core::result::Result<$name, $crate::Error> = (|| {
+            ::core::result::Result::Ok($name::$vname(
+                <$fty as $crate::FromJson<'_>>::from_lex($lex)?,
+            ))
+        })();
+        if let ::core::result::Result::Ok(__v) = __try {
+            ::core::result::Result::Ok(__v)
+        } else {
+            $crate::__from_json_untagged_walk!(
+                lex: $lex,
+                name: $name,
+                cp: ($cp),
+                cur_rename: (),
+                input: ($($($rest)*)?)
+            )
+        }
+    }};
+
+    // Multi-field tuple variant — JSON array.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        cp: ($cp:ident),
+        cur_rename: (),
+        input: ( $vname:ident ( $fty1:ty, $($ftyn:ty),+ $(,)? ) $(, $($rest:tt)*)? )
+    ) => {{
+        $lex.restore($cp);
+        let __try: ::core::result::Result<$name, $crate::Error> = (|| {
+            if $lex.array_start()? {
+                return ::core::result::Result::Err(
+                    $crate::Error::new($crate::ErrorKind::TypeMismatch, $lex.position()),
+                );
+            }
+            let __elem_0 = <$fty1 as $crate::FromJson<'_>>::from_lex($lex)?;
+            $crate::__from_json_tuple_walk!(
+                lex: $lex,
+                self_ctor: ($name::$vname),
+                accum: [ __elem_0 ],
+                remaining: [ $(($ftyn))+ ]
+            )
+        })();
+        if let ::core::result::Result::Ok(__v) = __try {
+            ::core::result::Result::Ok(__v)
+        } else {
+            $crate::__from_json_untagged_walk!(
+                lex: $lex,
+                name: $name,
+                cp: ($cp),
+                cur_rename: (),
+                input: ($($($rest)*)?)
+            )
+        }
+    }};
+
+    // Struct variant — JSON object.
+    (
+        lex: $lex:ident,
+        name: $name:ident,
+        cp: ($cp:ident),
+        cur_rename: (),
+        input: ( $vname:ident { $($body:tt)* } $(, $($rest:tt)*)? )
+    ) => {{
+        $lex.restore($cp);
+        let __try: ::core::result::Result<$name, $crate::Error> = (|| {
+            $crate::__from_json_named_body!(
+                $lex,
+                ($name::$vname),
+                strict,
+                $($body)*
+            )
+        })();
+        if let ::core::result::Result::Ok(__v) = __try {
+            ::core::result::Result::Ok(__v)
+        } else {
+            $crate::__from_json_untagged_walk!(
+                lex: $lex,
+                name: $name,
+                cp: ($cp),
+                cur_rename: (),
+                input: ($($($rest)*)?)
+            )
+        }
+    }};
+}
+
+// ============================================================================
 // Tuple struct element walker.
 //
 // State: `accum` holds the names of elements read so far; `remaining`
@@ -1378,7 +2411,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -1396,7 +2429,7 @@ macro_rules! __from_json_walk {
             match __key_cow.as_ref() {
                 $($arms)*
                 _ => {
-                    $crate::__from_json_unknown_arm!($u, $lex);
+                    $crate::__from_json_unknown_arm!($u, $lex, __key_cow);
                 }
             }
             __maybe_key = $lex.object_next_key_lex()?;
@@ -1413,7 +2446,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -1445,7 +2478,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -1494,7 +2527,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1529,7 +2562,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1558,7 +2591,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1587,7 +2620,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1616,7 +2649,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1640,7 +2673,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1669,7 +2702,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1698,7 +2731,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -1730,7 +2763,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -1779,7 +2812,7 @@ macro_rules! __from_json_walk {
     (
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
-        unknown: $u:ident,
+        unknown: $u:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -1816,13 +2849,35 @@ macro_rules! __from_json_walk {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __from_json_unknown_arm {
-    (strict, $lex:ident) => {
+    (strict, $lex:ident, $key:ident) => {
         return ::core::result::Result::Err(
             $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
         );
     };
-    (lenient, $lex:ident) => {
+    (lenient, $lex:ident, $key:ident) => {
         $lex.skip_value()?;
+    };
+    // Used by internally-tagged enum struct-variant bodies. The tag
+    // key (`$skip_key`) was already consumed during the find-tag pass
+    // before restore; on the second pass we encounter it again as a
+    // sibling field and must skip it. Any *other* unknown key remains
+    // a hard error.
+    //
+    // Wrapped in parens at the call site (`unknown: (tag_skip "x")`)
+    // so the engine's `unknown: $u:tt` matcher captures the whole
+    // mode token as a single tt.
+    //
+    // `$key` is the local Cow<str> bound by the body walker; passing
+    // it explicitly avoids the macro_rules hygiene issue that would
+    // otherwise mangle the binding when this arm expands.
+    ((tag_skip $skip_key:literal), $lex:ident, $key:ident) => {
+        if $key.as_ref() == $skip_key {
+            $lex.skip_value()?;
+        } else {
+            return ::core::result::Result::Err(
+                $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
+            );
+        }
     };
 }
 

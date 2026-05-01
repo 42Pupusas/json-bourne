@@ -98,6 +98,16 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
             Some(self.frames[self.len - 1])
         }
     }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) const fn truncate(&mut self, new_len: usize) {
+        if new_len <= self.len {
+            self.len = new_len;
+        }
+    }
 }
 
 /// Stateless JSON lexer over a borrowed byte slice.
@@ -116,6 +126,24 @@ pub struct Lexer<'input, const MAX_DEPTH: usize = DEFAULT_MAX_DEPTH> {
     /// what lets `bump()` compile to a single increment.
     offset: usize,
     pub(crate) stack: Stack<MAX_DEPTH>,
+}
+
+/// Saved lexer position + nesting depth, restorable via [`Lexer::restore`].
+///
+/// Returned by [`Lexer::checkpoint`]. The two fields together capture
+/// everything a typed consumer might mutate while exploring an input
+/// speculatively — the byte cursor and the container-frame stack depth.
+/// Restoring rewinds both, putting the lexer back into the exact state it
+/// was in when the checkpoint was taken.
+///
+/// Used by enum dispatch for representations that must try a variant and
+/// retry another on failure (`#[bourne(untagged)]`) or that must locate a
+/// tag field before parsing the rest of the object
+/// (`#[bourne(tag = "...")]`).
+#[derive(Copy, Clone, Debug)]
+pub struct Checkpoint {
+    offset: usize,
+    stack_len: usize,
 }
 
 /// Result of `Lexer::peek_value_kind`. Tells a caller what kind of value
@@ -167,6 +195,36 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     #[must_use]
     pub const fn offset(&self) -> usize {
         self.offset
+    }
+
+    /// Snapshot the current cursor and nesting depth. Pair with
+    /// [`restore`](Self::restore) to roll the lexer back after a
+    /// speculative parse — typically used by `#[bourne(untagged)]` enum
+    /// dispatch to try variants in order.
+    ///
+    /// The returned [`Checkpoint`] is opaque: do not construct one yourself
+    /// or mix checkpoints across different `Lexer` instances.
+    #[must_use]
+    pub const fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            offset: self.offset,
+            stack_len: self.stack.len(),
+        }
+    }
+
+    /// Roll the lexer back to a previously taken [`Checkpoint`].
+    ///
+    /// Restores both the byte cursor and the container-frame stack depth.
+    /// Intended for the speculative-retry pattern: take a checkpoint,
+    /// attempt a parse, on `Err` call `restore` and try a different shape.
+    ///
+    /// The checkpoint must have been produced by `self.checkpoint()`. If
+    /// the checkpoint is from a different lexer or from after a `restore`
+    /// to a deeper depth, behavior is logically incoherent (the `truncate`
+    /// no-ops if asked to grow), though never memory-unsafe.
+    pub const fn restore(&mut self, cp: Checkpoint) {
+        self.offset = cp.offset;
+        self.stack.truncate(cp.stack_len);
     }
 
     /// Skip whitespace then peek at the next byte to determine the kind of

@@ -20,7 +20,7 @@ mod parser;
 
 pub use error::{Error, ErrorKind, LineColumn, Position};
 pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
-pub use lexer::{DEFAULT_MAX_DEPTH, Lexer, ValueKind};
+pub use lexer::{Checkpoint, DEFAULT_MAX_DEPTH, Lexer, ValueKind};
 pub use parser::Parser;
 
 #[cfg(test)]

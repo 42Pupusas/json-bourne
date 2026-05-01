@@ -17,7 +17,9 @@ extern crate alloc;
 
 mod de;
 
-pub use bourne_core::{Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position, ValueKind};
+pub use bourne_core::{
+    Checkpoint, Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position, ValueKind,
+};
 pub use de::{FromJson, parse, parse_str};
 #[cfg(feature = "alloc")]
 pub use de::{MapKey, key_to_cow};

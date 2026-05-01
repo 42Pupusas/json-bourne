@@ -243,6 +243,70 @@ fn lenient_still_rejects_missing_required() {
     assert_eq!(err.kind, ErrorKind::MissingField);
 }
 
+#[test]
+fn lenient_unknown_at_start_then_known_fields() {
+    let json = r#"{"extra":true,"id":7,"name":"eve"}"#;
+    let u: LenientUser<'_> = parse_str(json).unwrap();
+    assert_eq!(u.id, 7);
+    assert_eq!(u.name, "eve");
+}
+
+#[test]
+fn lenient_unknown_at_end_after_known_fields() {
+    let json = r#"{"id":8,"name":"finn","extra":false}"#;
+    let u: LenientUser<'_> = parse_str(json).unwrap();
+    assert_eq!(u.id, 8);
+    assert_eq!(u.name, "finn");
+}
+
+#[test]
+fn lenient_multiple_consecutive_unknowns() {
+    let json = r#"{"a":1,"b":2,"c":3,"id":9,"d":4,"e":5,"name":"grace","f":6}"#;
+    let u: LenientUser<'_> = parse_str(json).unwrap();
+    assert_eq!(u.id, 9);
+    assert_eq!(u.name, "grace");
+}
+
+#[test]
+fn lenient_unknown_with_deeply_nested_value() {
+    let json = r#"{"id":10,"deep":[[[[{"a":[{"b":[1,[2,[3]]]}]}]]]],"name":"hank"}"#;
+    let u: LenientUser<'_> = parse_str(json).unwrap();
+    assert_eq!(u.id, 10);
+    assert_eq!(u.name, "hank");
+}
+
+#[test]
+fn lenient_unknown_with_escaped_key() {
+    let json = r#"{"id":11,"foo":1,"name":"ivy"}"#;
+    let u: LenientUser<'_> = parse_str(json).unwrap();
+    assert_eq!(u.id, 11);
+    assert_eq!(u.name, "ivy");
+}
+
+#[test]
+fn lenient_unknown_with_null_and_escapes_in_value() {
+    let json = r#"{"id":12,"meta":{"x":null,"s":"a\nbB"},"name":"juno"}"#;
+    let u: LenientUser<'_> = parse_str(json).unwrap();
+    assert_eq!(u.id, 12);
+    assert_eq!(u.name, "juno");
+}
+
+#[test]
+fn lenient_unknown_value_with_malformed_inside_still_errors() {
+    // The skip path lexes the value to find its end. A malformed
+    // unknown value should still surface an error rather than be
+    // silently dropped — protects the invariant that lenient is
+    // about *unknown keys*, not about *malformed JSON*.
+    let json = r#"{"id":1,"junk":[1,,2],"name":"k"}"#;
+    let err = parse_str::<LenientUser<'_>>(json).unwrap_err();
+    // The exact error kind depends on lexer specifics; we just want
+    // to confirm the parse fails rather than silently succeeding.
+    assert!(matches!(
+        err.kind,
+        ErrorKind::UnexpectedByte(_) | ErrorKind::TypeMismatch | ErrorKind::InvalidNumber
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Externally-tagged enums.
 // ---------------------------------------------------------------------------
@@ -355,4 +419,323 @@ fn variant_rename_uses_renamed_tag() {
 fn variant_rename_rejects_original_name() {
     let err = parse_str::<Direction>("\"North\"").unwrap_err();
     assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+// ---------------------------------------------------------------------------
+// Internally-tagged enums (#[bourne(tag = "...")]).
+// ---------------------------------------------------------------------------
+
+from_json! {
+    #[bourne(tag = "type")]
+    #[derive(Debug, PartialEq)]
+    enum Animal {
+        Dog,
+        Cat { lives: u32 },
+        Fish { species: u32, depth: i32 },
+    }
+}
+
+#[test]
+fn internally_tagged_unit_variant() {
+    let a: Animal = parse_str(r#"{"type":"Dog"}"#).unwrap();
+    assert_eq!(a, Animal::Dog);
+}
+
+#[test]
+fn internally_tagged_struct_variant_tag_first() {
+    let a: Animal = parse_str(r#"{"type":"Cat","lives":9}"#).unwrap();
+    assert_eq!(a, Animal::Cat { lives: 9 });
+}
+
+#[test]
+fn internally_tagged_struct_variant_tag_last() {
+    let a: Animal = parse_str(r#"{"lives":9,"type":"Cat"}"#).unwrap();
+    assert_eq!(a, Animal::Cat { lives: 9 });
+}
+
+#[test]
+fn internally_tagged_struct_variant_tag_middle() {
+    let a: Animal = parse_str(r#"{"species":7,"type":"Fish","depth":-200}"#).unwrap();
+    assert_eq!(
+        a,
+        Animal::Fish {
+            species: 7,
+            depth: -200,
+        }
+    );
+}
+
+#[test]
+fn internally_tagged_missing_tag_field() {
+    let err = parse_str::<Animal>(r#"{"lives":9}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::MissingField);
+}
+
+#[test]
+fn internally_tagged_unknown_variant() {
+    let err = parse_str::<Animal>(r#"{"type":"Bird"}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+#[test]
+fn internally_tagged_unknown_field_in_variant() {
+    let err = parse_str::<Animal>(r#"{"type":"Cat","lives":9,"extra":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+#[test]
+fn internally_tagged_missing_required_field() {
+    let err = parse_str::<Animal>(r#"{"type":"Cat"}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::MissingField);
+}
+
+#[test]
+fn internally_tagged_unit_rejects_extra_fields() {
+    let err = parse_str::<Animal>(r#"{"type":"Dog","extra":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+from_json! {
+    #[bourne(tag = "kind")]
+    #[derive(Debug, PartialEq)]
+    enum Renamed {
+        #[bourne(rename = "ok")]
+        Success { value: i32 },
+        #[bourne(rename = "err")]
+        Failure,
+    }
+}
+
+#[test]
+fn internally_tagged_variant_rename() {
+    let v: Renamed = parse_str(r#"{"kind":"ok","value":42}"#).unwrap();
+    assert_eq!(v, Renamed::Success { value: 42 });
+    let v: Renamed = parse_str(r#"{"kind":"err"}"#).unwrap();
+    assert_eq!(v, Renamed::Failure);
+}
+
+#[test]
+fn internally_tagged_rename_rejects_original_name() {
+    let err = parse_str::<Renamed>(r#"{"kind":"Success","value":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+// ---------------------------------------------------------------------------
+// Adjacently-tagged enums (#[bourne(tag = "t", content = "c")]).
+// ---------------------------------------------------------------------------
+
+from_json! {
+    #[bourne(tag = "t", content = "c")]
+    #[derive(Debug, PartialEq)]
+    enum Msg {
+        Ping,
+        Echo(i64),
+        Pair(i32, i32),
+        Body { code: u32, text: String },
+    }
+}
+
+#[test]
+fn adjacent_unit_variant_no_content() {
+    let m: Msg = parse_str(r#"{"t":"Ping"}"#).unwrap();
+    assert_eq!(m, Msg::Ping);
+}
+
+#[test]
+fn adjacent_unit_variant_rejects_content() {
+    let err = parse_str::<Msg>(r#"{"t":"Ping","c":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+#[test]
+fn adjacent_newtype_variant() {
+    let m: Msg = parse_str(r#"{"t":"Echo","c":42}"#).unwrap();
+    assert_eq!(m, Msg::Echo(42));
+}
+
+#[test]
+fn adjacent_newtype_content_first() {
+    let m: Msg = parse_str(r#"{"c":42,"t":"Echo"}"#).unwrap();
+    assert_eq!(m, Msg::Echo(42));
+}
+
+#[test]
+fn adjacent_tuple_variant() {
+    let m: Msg = parse_str(r#"{"t":"Pair","c":[1,2]}"#).unwrap();
+    assert_eq!(m, Msg::Pair(1, 2));
+}
+
+#[test]
+fn adjacent_struct_variant() {
+    let m: Msg = parse_str(r#"{"t":"Body","c":{"code":200,"text":"ok"}}"#).unwrap();
+    assert_eq!(
+        m,
+        Msg::Body {
+            code: 200,
+            text: String::from("ok"),
+        }
+    );
+}
+
+#[test]
+fn adjacent_struct_variant_content_first() {
+    let m: Msg = parse_str(r#"{"c":{"code":200,"text":"ok"},"t":"Body"}"#).unwrap();
+    assert_eq!(
+        m,
+        Msg::Body {
+            code: 200,
+            text: String::from("ok"),
+        }
+    );
+}
+
+#[test]
+fn adjacent_missing_tag() {
+    let err = parse_str::<Msg>(r#"{"c":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::MissingField);
+}
+
+#[test]
+fn adjacent_missing_content_for_payload_variant() {
+    let err = parse_str::<Msg>(r#"{"t":"Echo"}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::MissingField);
+}
+
+#[test]
+fn adjacent_unknown_tag() {
+    let err = parse_str::<Msg>(r#"{"t":"Nope","c":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+#[test]
+fn adjacent_extra_field_rejected() {
+    let err = parse_str::<Msg>(r#"{"t":"Echo","c":1,"x":2}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+#[test]
+fn adjacent_duplicate_tag_rejected() {
+    let err = parse_str::<Msg>(r#"{"t":"Ping","t":"Echo"}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DuplicateKey);
+}
+
+// ---------------------------------------------------------------------------
+// Untagged enums (#[bourne(untagged)]).
+// ---------------------------------------------------------------------------
+
+from_json! {
+    #[bourne(untagged)]
+    #[derive(Debug, PartialEq)]
+    enum Scalar {
+        I(i64),
+        S(String),
+        Nothing,
+    }
+}
+
+#[test]
+fn untagged_picks_int_branch() {
+    let v: Scalar = parse_str("42").unwrap();
+    assert_eq!(v, Scalar::I(42));
+}
+
+#[test]
+fn untagged_picks_string_branch() {
+    let v: Scalar = parse_str(r#""hello""#).unwrap();
+    assert_eq!(v, Scalar::S(String::from("hello")));
+}
+
+#[test]
+fn untagged_picks_unit_branch_for_null() {
+    let v: Scalar = parse_str("null").unwrap();
+    assert_eq!(v, Scalar::Nothing);
+}
+
+#[test]
+fn untagged_no_match_yields_type_mismatch() {
+    let err = parse_str::<Scalar>("true").unwrap_err();
+    assert_eq!(err.kind, ErrorKind::TypeMismatch);
+}
+
+from_json! {
+    #[bourne(untagged)]
+    #[derive(Debug, PartialEq)]
+    enum Shape2 {
+        Pair(i32, i32),
+        Triple(i32, i32, i32),
+        Single(i32),
+    }
+}
+
+#[test]
+fn untagged_distinguishes_arrays_by_length() {
+    let v: Shape2 = parse_str("[1,2]").unwrap();
+    assert_eq!(v, Shape2::Pair(1, 2));
+    let v: Shape2 = parse_str("[1,2,3]").unwrap();
+    assert_eq!(v, Shape2::Triple(1, 2, 3));
+    let v: Shape2 = parse_str("7").unwrap();
+    assert_eq!(v, Shape2::Single(7));
+}
+
+from_json! {
+    #[derive(Debug, PartialEq)]
+    struct Coord {
+        x: i32,
+        y: i32,
+    }
+}
+
+from_json! {
+    #[derive(Debug, PartialEq)]
+    struct Named {
+        name: String,
+    }
+}
+
+from_json! {
+    #[bourne(untagged)]
+    #[derive(Debug, PartialEq)]
+    enum Either {
+        AsCoord(Coord),
+        AsNamed(Named),
+    }
+}
+
+#[test]
+fn untagged_picks_struct_by_field_shape() {
+    let v: Either = parse_str(r#"{"x":1,"y":2}"#).unwrap();
+    assert_eq!(v, Either::AsCoord(Coord { x: 1, y: 2 }));
+    let v: Either = parse_str(r#"{"name":"alice"}"#).unwrap();
+    assert_eq!(
+        v,
+        Either::AsNamed(Named {
+            name: String::from("alice"),
+        })
+    );
+}
+
+from_json! {
+    #[bourne(untagged)]
+    #[derive(Debug, PartialEq)]
+    enum InlineStruct {
+        Point { x: i32, y: i32 },
+        Line { from: i32, to: i32 },
+    }
+}
+
+#[test]
+fn untagged_inline_struct_variants() {
+    let v: InlineStruct = parse_str(r#"{"x":3,"y":4}"#).unwrap();
+    assert_eq!(v, InlineStruct::Point { x: 3, y: 4 });
+    let v: InlineStruct = parse_str(r#"{"from":1,"to":10}"#).unwrap();
+    assert_eq!(v, InlineStruct::Line { from: 1, to: 10 });
+}
+
+#[test]
+fn untagged_first_match_wins() {
+    // Both Point and Line are objects; an object that matches Point's
+    // shape should never reach Line. (Regression guard against the
+    // walker not short-circuiting on Ok.)
+    let v: InlineStruct = parse_str(r#"{"x":0,"y":0}"#).unwrap();
+    assert!(matches!(v, InlineStruct::Point { .. }));
 }
