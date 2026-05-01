@@ -14,9 +14,14 @@
 
 use bourne::{FromJson, parse};
 use bourne_bench::realistic::{mixed_length_string_array_with_escapes, unicode_string_array};
-use bourne_bench::{SMALL_OBJECT, int_array, string_array};
+use bourne_bench::{
+    SMALL_OBJECT, duration_seconds_array, float_array, i128_array, int_array,
+    small_keyed_object, small_object_escaped_keys, string_array,
+};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
+use std::collections::HashMap;
 use std::hint::black_box;
+use std::time::Duration;
 
 // ---------------------------------------------------------------------------
 // Struct shape — kept identical to compare.rs so profiles cross-reference.
@@ -123,6 +128,41 @@ fn run_vec_borrowed_unicode(input: &[u8], iters: u64) {
     }
 }
 
+fn run_vec_f64(input: &[u8], iters: u64) {
+    for _ in 0..iters {
+        let v: Vec<f64> = parse(black_box(input)).unwrap();
+        black_box(v);
+    }
+}
+
+fn run_vec_i128(input: &[u8], iters: u64) {
+    for _ in 0..iters {
+        let v: Vec<i128> = parse(black_box(input)).unwrap();
+        black_box(v);
+    }
+}
+
+fn run_vec_duration(input: &[u8], iters: u64) {
+    for _ in 0..iters {
+        let v: Vec<Duration> = parse(black_box(input)).unwrap();
+        black_box(v);
+    }
+}
+
+fn run_hashmap_string_keys(input: &[u8], iters: u64) {
+    for _ in 0..iters {
+        let m: HashMap<String, i64> = parse(black_box(input)).unwrap();
+        black_box(m);
+    }
+}
+
+fn run_hashmap_keys_escaped(input: &[u8], iters: u64) {
+    for _ in 0..iters {
+        let m: HashMap<String, i64> = parse(black_box(input)).unwrap();
+        black_box(m);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workload registry
 // ---------------------------------------------------------------------------
@@ -138,6 +178,12 @@ const fn workloads() -> &'static [&'static str] {
         "vec_string_10k",
         "vec_borrowed_unicode_10k",
         "vec_string_escaped_1k",
+        // New: surfaces added in the feature-parity pass.
+        "vec_f64_10k",
+        "vec_i128_10k",
+        "vec_duration_10k",
+        "hashmap_string_keys_1k",
+        "hashmap_keys_escaped_1k",
     ]
 }
 
@@ -184,6 +230,37 @@ fn run(name: &str) {
             // workload is shaped to exercise the decoder hot path.
             let input = mixed_length_string_array_with_escapes(1_000);
             run_vec_string(input.as_bytes(), 8_000);
+        }
+        "vec_f64_10k" => {
+            // The new fused `parse_f64_value` path. Bench measured this
+            // at ~17.85 µs / 1024 elems = ~175 ns / 10k. Iter count
+            // chosen for ~5s.
+            let input = float_array(10_000);
+            run_vec_f64(input.as_bytes(), 30_000);
+        }
+        "vec_i128_10k" => {
+            // 128-bit integer decode via JsonNum::as_i128 (str::parse).
+            // Measured ~440 µs / 10k → ~12k iters for ~5s.
+            let input = i128_array(10_000);
+            run_vec_i128(input.as_bytes(), 12_000);
+        }
+        "vec_duration_10k" => {
+            // f64 decode + finite/non-negative/range check + libstd's
+            // `Duration::from_secs_f64`. Measured ~265 µs / 10k.
+            let input = duration_seconds_array(10_000);
+            run_vec_duration(input.as_bytes(), 18_000);
+        }
+        "hashmap_string_keys_1k" => {
+            // Object → HashMap<String, i64> on the new `_lex` key path.
+            // Measured ~110 µs / 1k → ~45k iters for ~5s.
+            let input = small_keyed_object(1_000);
+            run_hashmap_string_keys(input.as_bytes(), 45_000);
+        }
+        "hashmap_keys_escaped_1k" => {
+            // Same shape but every key carries a `\n` escape, exercising
+            // `key_to_cow`'s decode arm. Measured ~125 µs / 1k.
+            let input = small_object_escaped_keys(1_000);
+            run_hashmap_keys_escaped(input.as_bytes(), 40_000);
         }
         other => {
             eprintln!("unknown workload: {other}");

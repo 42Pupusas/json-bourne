@@ -18,7 +18,7 @@ use bourne_bench::realistic::{
     giant_geojson_doc, metric_event_array, mixed_length_string_array_with_escapes,
     nested_config_doc, wide_key_object,
 };
-use bourne_bench::{SMALL_OBJECT, int_array, string_array};
+use bourne_bench::{SMALL_OBJECT, float_array, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
 
@@ -223,6 +223,22 @@ fn run_serde_vec_i64(input: &[u8]) -> Report {
     Report { allocs: snap.allocs, bytes: snap.bytes }
 }
 
+fn run_bourne_vec_f64(input: &[u8]) -> Report {
+    let (_, snap) = measure(|| {
+        let v: Vec<f64> = parse(input).unwrap();
+        v
+    });
+    Report { allocs: snap.allocs, bytes: snap.bytes }
+}
+
+fn run_serde_vec_f64(input: &[u8]) -> Report {
+    let (_, snap) = measure(|| {
+        let v: Vec<f64> = serde_json::from_slice(input).unwrap();
+        v
+    });
+    Report { allocs: snap.allocs, bytes: snap.bytes }
+}
+
 fn run_bourne_vec_str<'input>(input: &'input [u8]) -> Report {
     let (_, snap) = measure(|| {
         let v: Vec<&'input str> = parse(input).unwrap();
@@ -361,6 +377,23 @@ fn main() {
         "vec_i64/10000",
         run_bourne_vec_i64(s.as_bytes()),
         run_serde_vec_i64(s.as_bytes()),
+    );
+
+    // 3b. Vec<f64> — paired with vec_i64 above so the report shows the
+    // fast-path-vs-fast-path memory story for both number kinds. After
+    // the `parse_f64_value` rewrite these should match `vec_i64`'s
+    // alloc shape exactly: just Vec growth, no per-element churn.
+    let s = float_array(100);
+    print_row(
+        "vec_f64/100",
+        run_bourne_vec_f64(s.as_bytes()),
+        run_serde_vec_f64(s.as_bytes()),
+    );
+    let s = float_array(10_000);
+    print_row(
+        "vec_f64/10000",
+        run_bourne_vec_f64(s.as_bytes()),
+        run_serde_vec_f64(s.as_bytes()),
     );
 
     // 4. Vec<&str> — borrowed both sides.

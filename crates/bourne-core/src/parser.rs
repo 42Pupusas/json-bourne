@@ -1,5 +1,5 @@
 use crate::error::{Error, ErrorKind};
-use crate::event::Event;
+use crate::event::{Event, JsonStr};
 use crate::lexer::{DEFAULT_MAX_DEPTH, Frame, Lexer};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -260,6 +260,43 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
 
     pub fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
         let key = self.lex.object_next_key()?;
+        self.state = match key {
+            None => match self.lex.stack.top() {
+                None => State::DocumentEnd,
+                Some(Frame::Array) => State::ArrayCommaOrEnd,
+                Some(Frame::Object) => State::ObjectCommaOrEnd,
+            },
+            Some(_) => State::ObjectValue,
+        };
+        Ok(key)
+    }
+
+    /// Like [`object_first_key`], but returns the key as a [`JsonStr`]
+    /// span so the caller can decode escapes when present. The fast
+    /// `&str`-returning variant rejects any backslash; this one carries
+    /// escape-bearing keys through.
+    ///
+    /// [`object_first_key`]: Self::object_first_key
+    pub fn object_first_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
+        let key = self.lex.object_first_key_lex()?;
+        self.state = match key {
+            None => match self.lex.stack.top() {
+                None => State::DocumentEnd,
+                Some(Frame::Array) => State::ArrayCommaOrEnd,
+                Some(Frame::Object) => State::ObjectCommaOrEnd,
+            },
+            Some(_) => State::ObjectValue,
+        };
+        Ok(key)
+    }
+
+    /// Like [`object_next_key`], but returns the key as a [`JsonStr`]
+    /// span. See [`object_first_key_lex`].
+    ///
+    /// [`object_next_key`]: Self::object_next_key
+    /// [`object_first_key_lex`]: Self::object_first_key_lex
+    pub fn object_next_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
+        let key = self.lex.object_next_key_lex()?;
         self.state = match key {
             None => match self.lex.stack.top() {
                 None => State::DocumentEnd,

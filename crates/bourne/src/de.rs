@@ -168,16 +168,66 @@ macro_rules! impl_int {
 impl_int!(i8 => as_i64, i16 => as_i64, i32 => as_i64, i64 => as_i64, isize => as_i64);
 impl_int!(u8 => as_u64, u16 => as_u64, u32 => as_u64, u64 => as_u64, usize => as_u64);
 
+// 128-bit ints — fused lex + decode via `parse_i128_value` /
+// `parse_u128_value`. The earlier path went through `JsonNum::as_*128`
+// which delegated to `str::parse::<i128>`; perf showed that taking 60%
+// of the `Vec<i128>` workload because `str::parse` uses checked
+// arithmetic on every digit. The bespoke parser skips overflow checks
+// for the first 38 digits (which always fit a `u128`).
+macro_rules! impl_int_wide {
+    ($($t:ty => $parse_fn:ident),* $(,)?) => {
+        $(
+            impl<'input> FromJson<'input> for $t {
+                fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+                    match lex.peek_value_kind()? {
+                        ValueKind::Number => lex.$parse_fn(),
+                        _ => Err(type_error(lex, ErrorKind::ExpectedNumber)),
+                    }
+                }
+
+                /// Fused-pass fast path for `Vec<Self>`: skip the
+                /// per-element peek-and-dispatch.
+                #[cfg(feature = "alloc")]
+                fn vec_from_lex(lex: &mut Lexer<'input>) -> Result<alloc::vec::Vec<Self>, Error> {
+                    let mut out: alloc::vec::Vec<Self> = alloc::vec::Vec::new();
+                    if lex.array_start()? {
+                        return Ok(out);
+                    }
+                    out.push(lex.$parse_fn()?);
+                    while !lex.array_continue(b']')? {
+                        out.push(lex.$parse_fn()?);
+                    }
+                    Ok(out)
+                }
+            }
+        )*
+    };
+}
+
+impl_int_wide!(i128 => parse_i128_value, u128 => parse_u128_value);
+
 impl<'input> FromJson<'input> for f64 {
     fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
         match lex.peek_value_kind()? {
-            ValueKind::Number => {
-                let n: JsonNum = lex.read_number()?;
-                n.as_f64(lex.input())
-                    .map_err(|kind| Error::new(kind, lex.position()))
-            }
+            ValueKind::Number => lex.parse_f64_value(),
             _ => Err(type_error(lex, ErrorKind::ExpectedNumber)),
         }
+    }
+
+    /// Fused-pass fast path for `Vec<f64>`: skip `JsonNum` and the
+    /// type-peek per element. The `array_continue` polarity is the
+    /// same shape the integer impls use.
+    #[cfg(feature = "alloc")]
+    fn vec_from_lex(lex: &mut Lexer<'input>) -> Result<alloc::vec::Vec<Self>, Error> {
+        let mut out: alloc::vec::Vec<Self> = alloc::vec::Vec::new();
+        if lex.array_start()? {
+            return Ok(out);
+        }
+        out.push(lex.parse_f64_value()?);
+        while !lex.array_continue(b']')? {
+            out.push(lex.parse_f64_value()?);
+        }
+        Ok(out)
     }
 }
 
@@ -277,6 +327,9 @@ impl_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "alloc")]
+pub use alloc_impls::{MapKey, key_to_cow};
+
+#[cfg(feature = "alloc")]
 mod alloc_impls {
     extern crate alloc;
     use super::{FromJson, type_error};
@@ -320,6 +373,318 @@ mod alloc_impls {
                 _ => Err(type_error(lex, ErrorKind::ExpectedString)),
             }
         }
+    }
+
+    /// JSON has no `char` type — pick "string of exactly one Unicode
+    /// scalar value" as the convention. Empty strings, multi-character
+    /// strings, and strings whose decoded form is not exactly one
+    /// scalar all reject. Escapes are honored (e.g. `"\n"`, `"é"`).
+    impl<'input> FromJson<'input> for char {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            match lex.peek_value_kind()? {
+                ValueKind::String => {
+                    let js = lex.read_string_no_validate()?;
+                    // Borrow path: no escapes — read the validated UTF-8
+                    // directly and require exactly one scalar.
+                    if let Some(borrowed) = js.as_str(lex.input()) {
+                        return single_char(borrowed)
+                            .ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch));
+                    }
+                    // Escape path: decode into a small scratch buffer.
+                    // Most escape sequences produce ≤4 UTF-8 bytes, so a
+                    // small allocation is fine; we still error if the
+                    // decoded content isn't exactly one scalar.
+                    let decoded = decode_owned(js, lex)?;
+                    single_char(&decoded)
+                        .ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch))
+                }
+                _ => Err(type_error(lex, ErrorKind::ExpectedString)),
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Map and set collections.
+    //
+    // JSON object keys are always strings; the lexer's `_lex`-suffixed
+    // key methods surface them as `JsonStr` so callers can decode
+    // escapes when present. `key_to_cow` below borrows when escape-free
+    // and decodes otherwise — yielding `Cow<'input, str>`. The MapKey
+    // adapter then converts that into the user's chosen K. Supported
+    // keys: String, Cow<'input, str>, and (escape-free only)
+    // &'input str.
+    //
+    // `BTreeMap`/`BTreeSet` are alloc-gated (live in `alloc`).
+    // `HashMap`/`HashSet` are std-gated (live in `std`).
+    // -----------------------------------------------------------------
+
+    /// Materialize an object key from a [`JsonStr`] span. Borrows when the
+    /// key is escape-free; decodes into an owned `String` otherwise.
+    pub fn key_to_cow<'input>(
+        js: JsonStr,
+        lex: &Lexer<'input>,
+    ) -> Result<Cow<'input, str>, Error> {
+        if let Some(borrowed) = js.as_str(lex.input()) {
+            return Ok(Cow::Borrowed(borrowed));
+        }
+        Ok(Cow::Owned(decode_owned(js, lex)?))
+    }
+
+    /// Internal adapter from a decoded JSON key to the user's key type.
+    ///
+    /// Sealed by the limited set of impls we provide; users who need a
+    /// custom key type should hand-write the `FromJson` impl for the map
+    /// or wrap the key in a newtype.
+    ///
+    /// Returns `Result` because not every adapter is total — `&'input str`
+    /// keys can only borrow, so escaped keys reject with `InvalidEscape`.
+    pub trait MapKey<'input>: Sized {
+        fn from_key(key: Cow<'input, str>, lex: &Lexer<'input>) -> Result<Self, Error>;
+    }
+
+    impl<'input> MapKey<'input> for String {
+        #[inline]
+        fn from_key(key: Cow<'input, str>, _lex: &Lexer<'input>) -> Result<Self, Error> {
+            Ok(key.into_owned())
+        }
+    }
+
+    impl<'input> MapKey<'input> for Cow<'input, str> {
+        #[inline]
+        fn from_key(key: Self, _lex: &Lexer<'input>) -> Result<Self, Error> {
+            Ok(key)
+        }
+    }
+
+    impl<'input> MapKey<'input> for &'input str {
+        /// Borrowing `&'input str` keys cannot represent escape-bearing
+        /// keys, since the decoded form lives in a fresh allocation
+        /// outside the input. Reject those at runtime; callers that
+        /// expect escapes should use `Cow<'input, str>` or `String`.
+        #[inline]
+        fn from_key(key: Cow<'input, str>, lex: &Lexer<'input>) -> Result<Self, Error> {
+            match key {
+                Cow::Borrowed(s) => Ok(s),
+                Cow::Owned(_) => Err(type_error(lex, ErrorKind::InvalidEscape)),
+            }
+        }
+    }
+
+    impl<'input, K, V> FromJson<'input> for alloc::collections::BTreeMap<K, V>
+    where
+        K: MapKey<'input> + Ord,
+        V: FromJson<'input>,
+    {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            if !matches!(lex.peek_value_kind()?, ValueKind::Object) {
+                return Err(type_error(lex, ErrorKind::TypeMismatch));
+            }
+            lex.object_start()?;
+            let mut out = Self::new();
+            let mut maybe_key = lex.object_first_key_lex()?;
+            while let Some(js) = maybe_key {
+                let key_cow = key_to_cow(js, lex)?;
+                let key = K::from_key(key_cow, lex)?;
+                let v = V::from_lex(lex)?;
+                if out.insert(key, v).is_some() {
+                    return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
+                }
+                maybe_key = lex.object_next_key_lex()?;
+            }
+            Ok(out)
+        }
+    }
+
+    impl<'input, T> FromJson<'input> for alloc::collections::BTreeSet<T>
+    where
+        T: FromJson<'input> + Ord,
+    {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            // JSON has no native set type — represent as an array, dedup
+            // implicitly via the BTreeSet. Duplicate elements in the
+            // input are silently coalesced (same convention as serde).
+            let mut out = Self::new();
+            if lex.array_start()? {
+                return Ok(out);
+            }
+            out.insert(T::from_lex(lex)?);
+            while !lex.array_continue(b']')? {
+                out.insert(T::from_lex(lex)?);
+            }
+            Ok(out)
+        }
+    }
+
+    // HashMap and HashSet require `std` (not just `alloc`). The crate
+    // already enables `std` by default; users on `alloc`-only get the
+    // BTree variants.
+    #[cfg(feature = "std")]
+    impl<'input, K, V, S> FromJson<'input> for std::collections::HashMap<K, V, S>
+    where
+        K: MapKey<'input> + ::core::hash::Hash + Eq,
+        V: FromJson<'input>,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            if !matches!(lex.peek_value_kind()?, ValueKind::Object) {
+                return Err(type_error(lex, ErrorKind::TypeMismatch));
+            }
+            lex.object_start()?;
+            let mut out = Self::with_hasher(S::default());
+            let mut maybe_key = lex.object_first_key_lex()?;
+            while let Some(js) = maybe_key {
+                let key_cow = key_to_cow(js, lex)?;
+                let key = K::from_key(key_cow, lex)?;
+                let v = V::from_lex(lex)?;
+                if out.insert(key, v).is_some() {
+                    return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
+                }
+                maybe_key = lex.object_next_key_lex()?;
+            }
+            Ok(out)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl<'input, T, S> FromJson<'input> for std::collections::HashSet<T, S>
+    where
+        T: FromJson<'input> + ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            let mut out = Self::with_hasher(S::default());
+            if lex.array_start()? {
+                return Ok(out);
+            }
+            out.insert(T::from_lex(lex)?);
+            while !lex.array_continue(b']')? {
+                out.insert(T::from_lex(lex)?);
+            }
+            Ok(out)
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // std::time and std::net adapters.
+    //
+    // JSON has no native types for any of these, so we pick a single
+    // convention per type. These are deliberately simple — projects
+    // with bespoke encodings (RFC 3339 timestamps, custom Duration
+    // shapes) should hand-write a wrapper newtype.
+    // -----------------------------------------------------------------
+
+    /// Parse a `Duration` from JSON `Number` (seconds, possibly fractional).
+    /// Negative inputs and non-finite values are rejected. Subsecond
+    /// precision is preserved to nanosecond resolution.
+    ///
+    /// Implementation note: pre-validates the input to a finite,
+    /// non-negative value within `Duration`'s u64-seconds range, then
+    /// delegates to `Duration::from_secs_f64`. The earlier hand-rolled
+    /// `trunc`/`mul`/`round`/`clamp` sequence was ~3.5× slower than
+    /// `from_secs_f64` on profile (the libstd routine inlines a
+    /// branch-light decomposition of the f64 mantissa).
+    #[cfg(feature = "std")]
+    impl<'input> FromJson<'input> for std::time::Duration {
+        #[allow(clippy::cast_precision_loss)]
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            let secs_f = f64::from_lex(lex)?;
+            // `Duration::from_secs_f64` panics on these inputs; convert
+            // to typed errors before calling.
+            if !secs_f.is_finite() || secs_f < 0.0 || secs_f >= (u64::MAX as f64) {
+                return Err(type_error(lex, ErrorKind::NumberOutOfRange));
+            }
+            Ok(Self::from_secs_f64(secs_f))
+        }
+    }
+
+    /// Generic adapter for any type whose canonical text form is parseable
+    /// via `FromStr`. Used below for `IpAddr`, `Ipv4Addr`, `Ipv6Addr`,
+    /// `SocketAddr`, and `PathBuf`. Failures map to `TypeMismatch`.
+    #[cfg(feature = "std")]
+    fn parse_from_str<'input, T>(lex: &mut Lexer<'input>) -> Result<T, Error>
+    where
+        T: ::core::str::FromStr,
+    {
+        let cow: Cow<'input, str> = Cow::<'input, str>::from_lex(lex)?;
+        cow.parse::<T>()
+            .map_err(|_| type_error(lex, ErrorKind::TypeMismatch))
+    }
+
+    #[cfg(feature = "std")]
+    impl<'input> FromJson<'input> for std::net::IpAddr {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            parse_from_str(lex)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl<'input> FromJson<'input> for std::net::Ipv4Addr {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            parse_from_str(lex)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl<'input> FromJson<'input> for std::net::Ipv6Addr {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            parse_from_str(lex)
+        }
+    }
+
+    #[cfg(feature = "std")]
+    impl<'input> FromJson<'input> for std::net::SocketAddr {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            parse_from_str(lex)
+        }
+    }
+
+    /// `PathBuf::from` is infallible on every byte sequence that round-
+    /// trips through UTF-8, so this never fails after string decode.
+    /// Use `parse_from_str` anyway for symmetry with the other adapters.
+    #[cfg(feature = "std")]
+    impl<'input> FromJson<'input> for std::path::PathBuf {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            let s: String = String::from_lex(lex)?;
+            Ok(Self::from(s))
+        }
+    }
+
+    /// Transparent wrapper: parses an inner `T` and boxes it. The JSON
+    /// shape is identical to `T`'s — there is no JSON construct that
+    /// "owns" a value the way a `Box` does, and serde's convention is
+    /// the same.
+    impl<'input, T: FromJson<'input>> FromJson<'input> for alloc::boxed::Box<T> {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            T::from_lex(lex).map(Self::new)
+        }
+    }
+
+    /// Transparent wrapper, same as `Box<T>`. `Rc` is single-threaded;
+    /// users that need cross-thread sharing should use `Arc<T>` instead.
+    impl<'input, T: FromJson<'input>> FromJson<'input> for alloc::rc::Rc<T> {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            T::from_lex(lex).map(Self::new)
+        }
+    }
+
+    /// Transparent wrapper. `Arc` requires `target_has_atomic = "ptr"`
+    /// transitively via `alloc::sync`; we don't gate it explicitly because
+    /// `bourne`'s supported targets all have it.
+    impl<'input, T: FromJson<'input>> FromJson<'input> for alloc::sync::Arc<T> {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            T::from_lex(lex).map(Self::new)
+        }
+    }
+
+    /// Returns `Some(c)` iff `s` consists of exactly one Unicode scalar.
+    #[inline]
+    fn single_char(s: &str) -> Option<char> {
+        let mut it = s.chars();
+        let c = it.next()?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some(c)
     }
 
     /// Owned-`String` decode given a `JsonStr`. Branches on `has_escapes`:

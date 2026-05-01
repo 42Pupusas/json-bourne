@@ -155,12 +155,42 @@ impl JsonNum {
         parse_u64(bytes).ok_or(ErrorKind::NumberOutOfRange)
     }
 
+    /// Decode the literal as `i128`. Routes through `str::parse` — 128-bit
+    /// JSON integers are rare enough that the bespoke fast paths used for
+    /// `i64`/`u64` are not justified.
+    #[inline]
+    pub fn as_i128(&self, input: &[u8]) -> Result<i128, ErrorKind> {
+        self.as_str(input)
+            .parse::<i128>()
+            .map_err(|_| ErrorKind::NumberOutOfRange)
+    }
+
+    /// Decode the literal as `u128`.
+    #[inline]
+    pub fn as_u128(&self, input: &[u8]) -> Result<u128, ErrorKind> {
+        self.as_str(input)
+            .parse::<u128>()
+            .map_err(|_| ErrorKind::NumberOutOfRange)
+    }
+
     pub fn as_f64(&self, input: &[u8]) -> Result<f64, ErrorKind> {
         // v1: route through core's str::parse. Replace with our own
         // dtoa-grade decoder later. Correctness now, performance later.
-        self.as_str(input)
+        //
+        // The lexer guarantees the literal matches JSON's number grammar,
+        // so `inf`/`NaN`/`Infinity` can never reach this function as
+        // input text. The non-finite check below catches the *output*
+        // case: literals whose magnitude exceeds `f64::MAX` (e.g.
+        // `1e400`) decode to `±inf`, which JSON disallows.
+        let v: f64 = self
+            .as_str(input)
             .parse::<f64>()
-            .map_err(|_| ErrorKind::InvalidNumber)
+            .map_err(|_| ErrorKind::InvalidNumber)?;
+        if v.is_finite() {
+            Ok(v)
+        } else {
+            Err(ErrorKind::NumberOutOfRange)
+        }
     }
 }
 

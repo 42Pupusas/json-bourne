@@ -72,4 +72,62 @@ fn zero_alloc_guarantees() {
         assert_eq!(v, None);
         assert_eq!(delta.allocs, 0, "Option<&str> None parse allocated {delta:?}");
     }
+
+    // Vec<f64> — locks in that the fused `parse_f64_value` fast path
+    // does not allocate per element. The only allocations should be
+    // the Vec's growth steps (push-driven amortized doubling), which
+    // for 1024 elements is ~10 reallocations starting from 0. Pin the
+    // exact count against `Vec<i64>` over the same shape — they share
+    // the same `vec_from_lex` scaffold and must allocate identically.
+    {
+        let f_input = b"[0.0,1.5,2.7,3.14,4.2,5.0,6.28,7.5,8.0,9.9]";
+        let i_input = b"[0,1,2,3,4,5,6,7,8,9]";
+        let (vf, df) = measure(|| parse::<Vec<f64>>(f_input).unwrap());
+        let (vi, di) = measure(|| parse::<Vec<i64>>(i_input).unwrap());
+        assert_eq!(vf.len(), 10);
+        assert_eq!(vi.len(), 10);
+        assert_eq!(
+            df.allocs, di.allocs,
+            "Vec<f64> alloc count {df:?} should match Vec<i64> {di:?} \
+             — both go through fused vec_from_lex and pay only Vec growth",
+        );
+    }
+
+    // Larger Vec<f64> — confirm the per-element zero-alloc property
+    // scales. With 1024 elements, the only allocations should be the
+    // Vec growth chain (capacity 4 → 8 → 16 → … → 1024 = 9 reallocs
+    // plus the initial alloc, so 10 total). If `parse_f64_value`
+    // accidentally allocates per element, this jumps to 1024+.
+    {
+        // Inline mini-fixture so this test crate doesn't pick up the
+        // whole bench dep tree just for a corpus-builder helper. Mix
+        // covers integer, fractional, and exponent forms so every
+        // branch of `parse_f64_value` is touched.
+        let big = build_float_array(1024);
+        let (v, delta) = measure(|| parse::<Vec<f64>>(big.as_bytes()).unwrap());
+        assert_eq!(v.len(), 1024);
+        assert!(
+            delta.allocs <= 16,
+            "Vec<f64>/1024 allocated {delta:?} — expected only Vec growth (≤16), \
+             a higher count means parse_f64_value is leaking a per-element alloc",
+        );
+    }
+}
+
+/// Build a JSON array of `n` floats covering the integer / fractional /
+/// exponent / signed-exponent shapes. Mirrors `bourne_bench::float_array`
+/// but lives here so this crate avoids the bench-side dep tree.
+fn build_float_array(n: usize) -> String {
+    use std::fmt::Write as _;
+    const SAMPLES: [&str; 5] = ["1.5e10", "-2.7e-5", "3.14159", "0.0", "1e100"];
+    let mut s = String::with_capacity(n * 8);
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(&mut s, "{}", SAMPLES[i % SAMPLES.len()]);
+    }
+    s.push(']');
+    s
 }

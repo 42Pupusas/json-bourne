@@ -19,6 +19,8 @@ mod de;
 
 pub use bourne_core::{Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position, ValueKind};
 pub use de::{FromJson, parse, parse_str};
+#[cfg(feature = "alloc")]
+pub use de::{MapKey, key_to_cow};
 
 mod macros;
 
@@ -213,6 +215,226 @@ mod tests {
     /// accumulated as `i64`, so the unsigned magnitude (= `i64::MAX + 1`)
     /// overflowed before the negation step and the input was rejected as
     /// `NumberOutOfRange`. Pin both the value and the boundary +/- 1.
+    #[cfg(feature = "std")]
+    #[test]
+    fn duration_round_trips_fractional_seconds() {
+        use std::time::Duration;
+        let d: Duration = parse_str("1.5").unwrap();
+        assert_eq!(d, Duration::new(1, 500_000_000));
+        let d: Duration = parse_str("0").unwrap();
+        assert_eq!(d, Duration::ZERO);
+        // Negative is rejected.
+        assert!(parse_str::<Duration>("-1").is_err());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn ip_and_socket_addrs_parse_from_strings() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+        let v4: Ipv4Addr = parse_str(r#""127.0.0.1""#).unwrap();
+        assert_eq!(v4, Ipv4Addr::LOCALHOST);
+        let v6: Ipv6Addr = parse_str(r#""::1""#).unwrap();
+        assert_eq!(v6, Ipv6Addr::LOCALHOST);
+        let ip: IpAddr = parse_str(r#""10.0.0.1""#).unwrap();
+        assert!(matches!(ip, IpAddr::V4(_)));
+        let sa: SocketAddr = parse_str(r#""127.0.0.1:8080""#).unwrap();
+        assert_eq!(sa.port(), 8080);
+        // Garbage rejected.
+        assert!(parse_str::<Ipv4Addr>(r#""not-an-ip""#).is_err());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn pathbuf_parses_from_string() {
+        use std::path::PathBuf;
+        let p: PathBuf = parse_str(r#""/etc/hosts""#).unwrap();
+        assert_eq!(p, PathBuf::from("/etc/hosts"));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashmap_string_key() {
+        use std::collections::HashMap;
+        let m: HashMap<String, i32> = parse_str(r#"{"a":1,"b":2}"#).unwrap();
+        assert_eq!(m.get("a"), Some(&1));
+        assert_eq!(m.get("b"), Some(&2));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashmap_borrowed_key_zero_copy() {
+        use std::collections::HashMap;
+        let input = String::from(r#"{"alpha":1,"beta":2}"#);
+        let m: HashMap<&str, i32> = parse_str(&input).unwrap();
+        // Both keys must point inside the input buffer.
+        let input_start = input.as_ptr() as usize;
+        let input_end = input_start + input.len();
+        for k in m.keys() {
+            let p = k.as_ptr() as usize;
+            assert!((input_start..input_end).contains(&p), "key was copied");
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn btreemap_round_trips() {
+        use std::collections::BTreeMap;
+        let m: BTreeMap<String, Vec<i32>> = parse_str(r#"{"x":[1,2],"y":[3]}"#).unwrap();
+        assert_eq!(m["x"], vec![1, 2]);
+        assert_eq!(m["y"], vec![3]);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn map_rejects_duplicate_key() {
+        use std::collections::HashMap;
+        let r: Result<HashMap<String, i32>, _> = parse_str(r#"{"a":1,"a":2}"#);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::DuplicateKey);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn map_rejects_non_object() {
+        use std::collections::HashMap;
+        let r: Result<HashMap<String, i32>, _> = parse_str("[1,2]");
+        assert!(r.is_err());
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashset_round_trips() {
+        use std::collections::HashSet;
+        let s: HashSet<i32> = parse_str("[1,2,3,2,1]").unwrap();
+        assert_eq!(s.len(), 3);
+        assert!(s.contains(&1));
+        assert!(s.contains(&2));
+        assert!(s.contains(&3));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn btreeset_round_trips() {
+        use std::collections::BTreeSet;
+        let s: BTreeSet<i32> = parse_str("[3,1,2]").unwrap();
+        assert_eq!(s.into_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn box_rc_arc_are_transparent_wrappers() {
+        let b: Box<u32> = parse_str("42").unwrap();
+        assert_eq!(*b, 42);
+        let r: std::rc::Rc<&str> = parse_str(r#""hello""#).unwrap();
+        assert_eq!(*r, "hello");
+        let a: std::sync::Arc<Vec<i32>> = parse_str("[1,2,3]").unwrap();
+        assert_eq!(*a, vec![1, 2, 3]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn char_accepts_single_scalar() {
+        assert_eq!(parse_str::<char>(r#""a""#).unwrap(), 'a');
+        assert_eq!(parse_str::<char>(r#""中""#).unwrap(), '中');
+        // Escape that decodes to a single scalar.
+        assert_eq!(parse_str::<char>(r#""\n""#).unwrap(), '\n');
+        // Surrogate pair → single char above the BMP.
+        assert_eq!(parse_str::<char>(r#""😀""#).unwrap(), '😀');
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    #[allow(clippy::unicode_not_nfc)] // intentional: tests NFD input
+    fn char_rejects_empty_or_multiple() {
+        assert!(parse_str::<char>(r#""""#).is_err());
+        assert!(parse_str::<char>(r#""ab""#).is_err());
+        // Combining mark sequence is multiple scalars even though it
+        // renders as one grapheme — char is a Unicode scalar, not a
+        // grapheme cluster.
+        assert!(parse_str::<char>(r#""é""#).is_err());
+        // Wrong type.
+        assert!(parse_str::<char>("42").is_err());
+    }
+
+    #[test]
+    fn i128_round_trips_full_range() {
+        assert_eq!(parse_str::<i128>("0").unwrap(), 0);
+        assert_eq!(
+            parse_str::<i128>("170141183460469231731687303715884105727").unwrap(),
+            i128::MAX,
+        );
+        assert_eq!(
+            parse_str::<i128>("-170141183460469231731687303715884105728").unwrap(),
+            i128::MIN,
+        );
+        assert!(parse_str::<i128>("170141183460469231731687303715884105728").is_err());
+    }
+
+    #[test]
+    fn u128_round_trips_full_range() {
+        assert_eq!(parse_str::<u128>("0").unwrap(), 0);
+        assert_eq!(
+            parse_str::<u128>("340282366920938463463374607431768211455").unwrap(),
+            u128::MAX,
+        );
+        assert!(parse_str::<u128>("340282366920938463463374607431768211456").is_err());
+        // Negative literals are not valid u128 input.
+        assert!(parse_str::<u128>("-1").is_err());
+    }
+
+    /// Pin the 38/39-digit boundary in `parse_i128_value` /
+    /// `parse_u128_value`. The fast path skips overflow checks for the
+    /// first 38 digits; the 39th switches to checked arithmetic. A
+    /// regression that off-by-ones the boundary would either accept an
+    /// out-of-range 39-digit literal or wrongly reject the largest
+    /// in-range one.
+    #[test]
+    fn i128_38_vs_39_digit_boundary() {
+        // 38 nines = 10^38 - 1. Comfortably inside i128 range.
+        let thirty_eight_nines = "9".repeat(38);
+        let v: i128 = parse_str(&thirty_eight_nines).unwrap();
+        assert_eq!(v.to_string(), thirty_eight_nines);
+
+        // 10^38 — the smallest 39-digit value. Inside i128 range.
+        let ten_pow_38 = format!("1{}", "0".repeat(38));
+        let v: i128 = parse_str(&ten_pow_38).unwrap();
+        assert_eq!(v.to_string(), ten_pow_38);
+
+        // 39 nines = 10^39 - 1, larger than i128::MAX. Must reject.
+        let thirty_nine_nines = "9".repeat(39);
+        assert!(parse_str::<i128>(&thirty_nine_nines).is_err());
+    }
+
+    #[test]
+    fn vec_i128_round_trips() {
+        // Exercises the new `vec_from_lex` override on the wide-int impl.
+        let v: Vec<i128> = parse_str(
+            "[0,1,-1,170141183460469231731687303715884105727,-170141183460469231731687303715884105728]",
+        )
+        .unwrap();
+        assert_eq!(v, vec![0, 1, -1, i128::MAX, i128::MIN]);
+    }
+
+    #[test]
+    fn vec_u128_round_trips() {
+        let v: Vec<u128> = parse_str("[0,1,2,340282366920938463463374607431768211455]").unwrap();
+        assert_eq!(v, vec![0, 1, 2, u128::MAX]);
+    }
+
+    /// JSON's grammar excludes non-finite floats. The lexer prevents
+    /// `inf`/`NaN`/`Infinity` from ever appearing as input text (the
+    /// number opener must be `-` or a digit), so the failure mode that
+    /// matters is *finite* literals whose magnitude overflows `f64` —
+    /// `str::parse::<f64>` silently returns `±inf` on those, and we
+    /// must reject them.
+    #[test]
+    fn f64_rejects_overflow_to_infinity() {
+        let r = parse_str::<f64>("1e400");
+        assert_eq!(r.unwrap_err().kind, ErrorKind::NumberOutOfRange);
+        let r = parse_str::<f64>("-1e400");
+        assert_eq!(r.unwrap_err().kind, ErrorKind::NumberOutOfRange);
+    }
+
     #[test]
     fn i64_min_is_parseable() {
         assert_eq!(parse_str::<i64>("-9223372036854775808").unwrap(), i64::MIN);
@@ -415,6 +637,231 @@ mod tests {
             }
             Cow::Owned(_) => panic!("expected Borrowed for un-escaped input"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Escaped object keys.
+    //
+    // The lexer's `_lex`-suffixed key methods carry escapes through to
+    // the typed layer, which decodes them via `key_to_cow`. Pin both
+    // simple and \uXXXX-escape forms in struct dispatch, enum dispatch,
+    // and map deserialization.
+    // -----------------------------------------------------------------
+
+    from_json! {
+        #[derive(Debug, PartialEq)]
+        struct EscKey {
+            #[bourne(rename = "user-id")]
+            user_id: u32,
+            #[bourne(rename = "x\ny")]
+            x_newline_y: u32,
+        }
+    }
+
+    #[test]
+    fn struct_dispatch_handles_escaped_key() {
+        // The JSON key `x\ny` (backslash + n in the wire bytes) decodes
+        // to `"x\ny"` (literal newline). The renamed Rust field matches
+        // that decoded form.
+        let j = r#"{"user-id":1,"x\ny":2}"#;
+        let r: EscKey = parse_str(j).unwrap();
+        assert_eq!(r, EscKey { user_id: 1, x_newline_y: 2 });
+    }
+
+    #[test]
+    fn struct_dispatch_handles_unicode_escape_in_key() {
+        // id = "id". Decoded match should hit the renamed
+        // `user_id` arm because we renamed it to `"user-id"`. Use a
+        // fresh struct that doesn't have a rename to keep the assertion
+        // simple.
+        from_json! {
+            #[derive(Debug, PartialEq)]
+            struct PlainId { id: u32 }
+        }
+        let j = r#"{"id":7}"#;
+        let r: PlainId = parse_str(j).unwrap();
+        assert_eq!(r, PlainId { id: 7 });
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashmap_handles_escaped_key() {
+        use std::collections::HashMap;
+        let m: HashMap<String, i32> = parse_str(r#"{"a\nb":1,"c":2}"#).unwrap();
+        assert_eq!(m.get("a\nb"), Some(&1));
+        assert_eq!(m.get("c"), Some(&2));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashmap_borrowed_key_rejects_escapes() {
+        // &str keys can't represent decoded escape output (the buffer
+        // doesn't live inside the input), so an escaped key errors
+        // with InvalidEscape.
+        use std::collections::HashMap;
+        let r: Result<HashMap<&str, i32>, _> = parse_str(r#"{"a\nb":1}"#);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidEscape);
+    }
+
+    from_json! {
+        #[derive(Debug, PartialEq)]
+        enum Tagged {
+            Plain(u32),
+            #[bourne(rename = "with\nbreak")]
+            WithBreak(u32),
+        }
+    }
+
+    #[test]
+    fn enum_dispatch_handles_escaped_tag() {
+        // The renamed variant tag contains a literal newline in its
+        // decoded form. Wire form: backslash-n in JSON.
+        let r: Tagged = parse_str(r#"{"with\nbreak":42}"#).unwrap();
+        assert_eq!(r, Tagged::WithBreak(42));
+        // Plain still works.
+        let r: Tagged = parse_str(r#"{"Plain":1}"#).unwrap();
+        assert_eq!(r, Tagged::Plain(1));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn hashmap_cow_key_borrows_or_owns_per_entry() {
+        use std::borrow::Cow;
+        use std::collections::HashMap;
+        let input = String::from(r#"{"plain":1,"esc\nape":2}"#);
+        let m: HashMap<Cow<'_, str>, i32> = parse_str(&input).unwrap();
+        // "plain" should borrow from the input.
+        let plain = m.iter().find(|(k, _)| k.as_ref() == "plain").unwrap().0;
+        assert!(matches!(plain, Cow::Borrowed(_)));
+        // "esc\nape" must be owned (decoded).
+        let esc = m.iter().find(|(k, _)| k.as_ref() == "esc\nape").unwrap().0;
+        assert!(matches!(esc, Cow::Owned(_)));
+    }
+
+    // -----------------------------------------------------------------
+    // from_json! macro field attributes.
+    // -----------------------------------------------------------------
+
+    from_json! {
+        #[derive(Debug, PartialEq)]
+        struct Renamed {
+            #[bourne(rename = "user-id")]
+            user_id: u32,
+            #[bourne(rename = "displayName")]
+            display_name: u32,
+        }
+    }
+
+    #[test]
+    fn macro_field_rename_uses_renamed_key() {
+        let j = r#"{"user-id":1,"displayName":2}"#;
+        let r: Renamed = parse_str(j).unwrap();
+        assert_eq!(r, Renamed { user_id: 1, display_name: 2 });
+    }
+
+    #[test]
+    fn macro_field_rename_rejects_original_name() {
+        let j = r#"{"user_id":1,"display_name":2}"#;
+        assert!(parse_str::<Renamed>(j).is_err());
+    }
+
+    from_json! {
+        #[derive(Debug, PartialEq)]
+        struct WithDefaults {
+            id: u32,
+            #[bourne(default)]
+            count: u32,
+            #[bourne(default)]
+            label: String,
+        }
+    }
+
+    #[test]
+    fn macro_field_default_fills_missing_keys() {
+        let r: WithDefaults = parse_str(r#"{"id":42}"#).unwrap();
+        assert_eq!(
+            r,
+            WithDefaults {
+                id: 42,
+                count: 0,
+                label: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn macro_field_default_overridden_by_present_value() {
+        let r: WithDefaults = parse_str(r#"{"id":1,"count":7,"label":"hi"}"#).unwrap();
+        assert_eq!(r.count, 7);
+        assert_eq!(r.label, "hi");
+    }
+
+    from_json! {
+        #[derive(Debug, PartialEq)]
+        struct WithSkip {
+            id: u32,
+            #[bourne(skip)]
+            cached: String,
+            value: u32,
+        }
+    }
+
+    #[test]
+    fn macro_field_skip_omits_from_dispatch() {
+        // The skipped field is never read — it's always Default::default().
+        let r: WithSkip = parse_str(r#"{"id":1,"value":2}"#).unwrap();
+        assert_eq!(
+            r,
+            WithSkip {
+                id: 1,
+                cached: String::new(),
+                value: 2,
+            }
+        );
+    }
+
+    #[test]
+    fn macro_field_skip_rejects_key_in_input() {
+        // Strict mode: presenting the skipped field as a key is an
+        // unknown field, since the dispatch arm was omitted.
+        let j = r#"{"id":1,"cached":"oops","value":2}"#;
+        let err = parse_str::<WithSkip>(j).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnknownField);
+    }
+
+    from_json! {
+        #[derive(Debug, PartialEq)]
+        struct SkipAtTail {
+            id: u32,
+            #[bourne(skip)]
+            trailing: u32,
+        }
+    }
+
+    #[test]
+    fn macro_field_skip_at_last_position() {
+        let r: SkipAtTail = parse_str(r#"{"id":7}"#).unwrap();
+        assert_eq!(r, SkipAtTail { id: 7, trailing: 0 });
+    }
+
+    from_json! {
+        #[derive(Debug, PartialEq)]
+        struct RenameAndDefault {
+            #[bourne(rename = "max-retries", default)]
+            max_retries: u32,
+        }
+    }
+
+    #[test]
+    fn macro_compound_rename_default() {
+        // Missing → default.
+        let r: RenameAndDefault = parse_str("{}").unwrap();
+        assert_eq!(r.max_retries, 0);
+        // Present under the renamed key.
+        let r: RenameAndDefault = parse_str(r#"{"max-retries":5}"#).unwrap();
+        assert_eq!(r.max_retries, 5);
+        // Original name does not work — strict mode rejects unknown.
+        assert!(parse_str::<RenameAndDefault>(r#"{"max_retries":5}"#).is_err());
     }
 
     #[cfg(feature = "alloc")]

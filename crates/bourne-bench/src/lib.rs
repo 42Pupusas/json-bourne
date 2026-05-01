@@ -95,6 +95,80 @@ pub fn escaped_string_array(n: usize) -> String {
     s
 }
 
+/// A flat array of N 128-bit integer literals near the i128 limit.
+///
+/// Picks a value wider than `u64::MAX` so the parser cannot fall back to
+/// the `as_i64` fast path; every element exercises the bespoke
+/// `as_i128` decode.
+#[must_use]
+pub fn i128_array(n: usize) -> String {
+    // ~31 decimal digits — well past 64-bit but inside i128 range.
+    const SAMPLE: &str = "1234567890123456789012345678";
+    let mut s = String::with_capacity(n * (SAMPLE.len() + 1));
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(SAMPLE);
+    }
+    s.push(']');
+    s
+}
+
+/// An object of N entries: `{"k0":0,"k1":1,…}` — stable, escape-free
+/// keys. Measures map-build throughput on the borrowed-key fast path.
+#[must_use]
+pub fn small_keyed_object(n: usize) -> String {
+    let mut s = String::with_capacity(n * 16);
+    s.push('{');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        let _ = write!(&mut s, "\"k{i}\":{i}");
+    }
+    s.push('}');
+    s
+}
+
+/// An object whose keys all carry a `\n` escape sequence — exercises
+/// the decode-on-key path. Pairs with `small_keyed_object` to quantify
+/// the escape-decode overhead per key.
+#[must_use]
+pub fn small_object_escaped_keys(n: usize) -> String {
+    let mut s = String::with_capacity(n * 24);
+    s.push('{');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        // Wire form contains backslash-n; decoded key is "k\n0", "k\n1", ...
+        let _ = write!(&mut s, "\"k\\n{i}\":{i}");
+    }
+    s.push('}');
+    s
+}
+
+/// A flat array of N float-seconds suitable for `Duration` decode.
+/// Mixes integer, fractional, and large values to keep the slow paths
+/// honest.
+#[must_use]
+pub fn duration_seconds_array(n: usize) -> String {
+    // Mix avoids degenerate optimization on a single shape.
+    const SAMPLES: [&str; 5] = ["0.0", "1.5", "60.25", "3600.123", "86400"];
+    let mut s = String::with_capacity(n * 8);
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(SAMPLES[i % SAMPLES.len()]);
+    }
+    s.push(']');
+    s
+}
+
 /// `[[[…]]]` `depth` levels deep with a single `1` at the bottom. Stresses the nesting stack.
 #[must_use]
 pub fn deep_nesting(depth: usize) -> String {

@@ -27,6 +27,18 @@ use crate::event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 /// is legal even though `+9223372036854775808` is not.
 const I64_MIN_MAGNITUDE: u64 = (i64::MAX as u64) + 1;
 
+/// `i128::MIN`'s magnitude as a `u128`. Same trick as `I64_MIN_MAGNITUDE`,
+/// scaled up. `parse_i128_value` accumulates into `u128` so the negative
+/// edge case (`-170141183460469231731687303715884105728`) is representable
+/// during the lex pass before the sign-aware bounds check.
+const I128_MIN_MAGNITUDE: u128 = (i128::MAX as u128) + 1;
+
+/// `u128::MAX` is `2^128 - 1` ≈ 3.4 × 10^38, so 38 decimal digits always
+/// fit a `u128` without overflow check. The 39-digit boundary is exactly
+/// `10^38`–`u128::MAX`; from digit 39 onward we have to use checked
+/// arithmetic. Mirrors the 19-digit fast path in `parse_i64_value`.
+const U128_FAST_DIGITS: u32 = 38;
+
 /// Default maximum container nesting depth.
 ///
 /// Guards against pathological inputs (e.g. millions of `[`s) that would
@@ -447,6 +459,198 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         Ok(0)
     }
 
+    /// Parse a JSON integer directly into `i128`, fusing lex and conversion.
+    ///
+    /// Same shape as [`parse_i64_value`] but scaled to 128-bit. On profile,
+    /// routing `Vec<i128>` through `JsonNum::as_i128` (which calls
+    /// `str::parse::<i128>`) was 60% of the workload; the generic
+    /// `str::parse` path uses checked arithmetic on every digit. The
+    /// fast path here skips overflow checks for the first 38 digits
+    /// (which always fit a `u128`) and only pays them on the 39-digit
+    /// boundary case.
+    ///
+    /// Caller must position the lexer at the first byte of the value.
+    /// Rejects fractional and exponent forms.
+    ///
+    /// [`parse_i64_value`]: Self::parse_i64_value
+    pub fn parse_i128_value(&mut self) -> Result<i128, Error> {
+        let start = self.offset;
+        let bytes = self.input;
+        let end = bytes.len();
+        let mut i = start;
+
+        let negative = matches!(bytes.get(i), Some(&b'-'));
+        if negative {
+            i += 1;
+        }
+
+        let digits_start = i;
+        match bytes.get(i).copied() {
+            Some(b'0') => i += 1,
+            Some(b'1'..=b'9') => {
+                // Accumulate as u128 so the negative edge case
+                // (i128::MIN's magnitude = i128::MAX + 1) fits during
+                // the lex pass; sign-aware bounds check at the end.
+                let mut acc: u128 = 0;
+                let mut count: u32 = 0;
+                while i < end {
+                    let d = bytes[i].wrapping_sub(b'0');
+                    if d >= 10 {
+                        break;
+                    }
+                    if count < U128_FAST_DIGITS {
+                        acc = acc * 10 + u128::from(d);
+                    } else {
+                        acc = acc
+                            .checked_mul(10)
+                            .and_then(|v| v.checked_add(u128::from(d)))
+                            .ok_or_else(|| {
+                                self.offset = i;
+                                self.err(ErrorKind::NumberOutOfRange)
+                            })?;
+                    }
+                    i += 1;
+                    count += 1;
+                }
+                if i == digits_start {
+                    self.offset = i;
+                    return Err(self.err(ErrorKind::InvalidNumber));
+                }
+                self.offset = i;
+                if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+                    return Err(self.err(ErrorKind::ExpectedNumber));
+                }
+                if negative {
+                    if acc <= I128_MIN_MAGNITUDE {
+                        // Same wrapping_sub_unsigned trick as the i64
+                        // path — produces i128::MIN at the boundary,
+                        // correct negative i128 below it.
+                        return Ok(0i128.wrapping_sub_unsigned(acc));
+                    }
+                    return Err(self.err(ErrorKind::NumberOutOfRange));
+                }
+                if let Ok(n) = i128::try_from(acc) {
+                    return Ok(n);
+                }
+                return Err(self.err(ErrorKind::NumberOutOfRange));
+            }
+            Some(b) => {
+                self.offset = i;
+                return Err(self.err(ErrorKind::UnexpectedByte(b)));
+            }
+            None => {
+                self.offset = i;
+                return Err(self.err(ErrorKind::UnexpectedEof));
+            }
+        }
+        self.offset = i;
+        if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+            return Err(self.err(ErrorKind::ExpectedNumber));
+        }
+        Ok(0)
+    }
+
+    /// Parse a JSON unsigned integer directly into `u128`, fusing lex
+    /// and conversion. Rejects negative literals, fractional, and
+    /// exponent forms.
+    ///
+    /// Caller must position the lexer at the first byte of the value.
+    pub fn parse_u128_value(&mut self) -> Result<u128, Error> {
+        let start = self.offset;
+        let bytes = self.input;
+        let end = bytes.len();
+        let mut i = start;
+
+        // Unsigned: a leading `-` is rejected outright.
+        if matches!(bytes.get(i), Some(&b'-')) {
+            self.offset = i;
+            return Err(self.err(ErrorKind::NumberOutOfRange));
+        }
+
+        let digits_start = i;
+        match bytes.get(i).copied() {
+            Some(b'0') => i += 1,
+            Some(b'1'..=b'9') => {
+                let mut acc: u128 = 0;
+                let mut count: u32 = 0;
+                while i < end {
+                    let d = bytes[i].wrapping_sub(b'0');
+                    if d >= 10 {
+                        break;
+                    }
+                    if count < U128_FAST_DIGITS {
+                        acc = acc * 10 + u128::from(d);
+                    } else {
+                        acc = acc
+                            .checked_mul(10)
+                            .and_then(|v| v.checked_add(u128::from(d)))
+                            .ok_or_else(|| {
+                                self.offset = i;
+                                self.err(ErrorKind::NumberOutOfRange)
+                            })?;
+                    }
+                    i += 1;
+                    count += 1;
+                }
+                if i == digits_start {
+                    self.offset = i;
+                    return Err(self.err(ErrorKind::InvalidNumber));
+                }
+                self.offset = i;
+                if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+                    return Err(self.err(ErrorKind::ExpectedNumber));
+                }
+                return Ok(acc);
+            }
+            Some(b) => {
+                self.offset = i;
+                return Err(self.err(ErrorKind::UnexpectedByte(b)));
+            }
+            None => {
+                self.offset = i;
+                return Err(self.err(ErrorKind::UnexpectedEof));
+            }
+        }
+        self.offset = i;
+        if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+            return Err(self.err(ErrorKind::ExpectedNumber));
+        }
+        Ok(0)
+    }
+
+    /// Parse a JSON number directly into `f64`, fusing lex and decode.
+    ///
+    /// Caller must position the lexer at the first byte of the value
+    /// (after any whitespace). Skips the `JsonNum` middle layer that
+    /// `read_number()` + `JsonNum::as_f64` would build — saves one
+    /// `Option`-wrapped slice and the per-element struct construction.
+    /// On profile, `Vec<f64>` was ~50% slower than `Vec<i64>` largely
+    /// because of this missing fast path.
+    ///
+    /// Rejects non-finite results (out-of-range literals like `1e400`
+    /// decode to `±inf` from `str::parse::<f64>`, which JSON disallows).
+    pub fn parse_f64_value(&mut self) -> Result<f64, Error> {
+        let start = self.offset;
+        // Reuse the byte-walk of `read_number` (it already handles the
+        // `-?` integer + optional `.frac` + optional `e[+-]?digits`
+        // grammar correctly). Then slice the run we just walked and
+        // hand it to libcore's `str::parse::<f64>` — the same routine
+        // `JsonNum::as_f64` calls, just without the JsonNum struct.
+        let _span = self.read_number()?;
+        let end = self.offset;
+        // SAFETY: `read_number` only advances over the JSON number
+        // grammar's ASCII subset (`-`, digits, `.`, `e`, `E`, `+`).
+        // Always valid UTF-8.
+        #[allow(unsafe_code)]
+        let s = unsafe { core::str::from_utf8_unchecked(&self.input[start..end]) };
+        let v: f64 = s.parse().map_err(|_| self.err(ErrorKind::InvalidNumber))?;
+        if v.is_finite() {
+            Ok(v)
+        } else {
+            Err(self.err(ErrorKind::NumberOutOfRange))
+        }
+    }
+
     /// Read a JSON string and return it as a borrowed `&'input str`. Errors
     /// if the string contains escape sequences — those require a caller-owned
     /// decode buffer, which `bourne` does not allocate.
@@ -536,6 +740,37 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         }
     }
 
+    /// Like [`object_first_key`], but returns the key as a raw [`JsonStr`]
+    /// span — borrowed if escape-free, recording `has_escapes()` if not.
+    /// Callers can decode escapes (typically into a [`alloc::borrow::Cow`])
+    /// when they may be present.
+    ///
+    /// [`object_first_key`]: Self::object_first_key
+    #[inline]
+    pub fn object_first_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'}') => {
+                self.bump();
+                self.pop_frame(Frame::Object)?;
+                Ok(None)
+            }
+            Some(b'"') => {
+                let key = self.read_string_no_validate()?;
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b':') => self.bump(),
+                    Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
+                    None => return Err(self.err(ErrorKind::UnexpectedEof)),
+                }
+                self.skip_whitespace();
+                Ok(Some(key))
+            }
+            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
     /// After a field's value, advance to the next key or close the
     /// object. Returns `Some(key)` for the next field or `None` if the
     /// object closed (`}` consumed and stack popped).
@@ -554,6 +789,45 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
                 match self.peek() {
                     Some(b'"') => {
                         let key = self.parse_str_value()?;
+                        self.skip_whitespace();
+                        match self.peek() {
+                            Some(b':') => self.bump(),
+                            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
+                            None => return Err(self.err(ErrorKind::UnexpectedEof)),
+                        }
+                        self.skip_whitespace();
+                        Ok(Some(key))
+                    }
+                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                }
+            }
+            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    /// Like [`object_next_key`], but returns the key as a raw [`JsonStr`]
+    /// span. See [`object_first_key_lex`] for the escape-decoding pattern
+    /// callers should follow.
+    ///
+    /// [`object_next_key`]: Self::object_next_key
+    /// [`object_first_key_lex`]: Self::object_first_key_lex
+    #[inline]
+    pub fn object_next_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'}') => {
+                self.bump();
+                self.pop_frame(Frame::Object)?;
+                Ok(None)
+            }
+            Some(b',') => {
+                self.bump();
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b'"') => {
+                        let key = self.read_string_no_validate()?;
                         self.skip_whitespace();
                         match self.peek() {
                             Some(b':') => self.bump(),

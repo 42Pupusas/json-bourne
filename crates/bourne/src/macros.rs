@@ -535,6 +535,20 @@ macro_rules! __from_json_strip_walk {
             input: ($($rest)*)
         );
     };
+    // bourne(skip) attribute: drop it.
+    (
+        done: $done:tt,
+        kept: { $($kept:tt)* },
+        cur: [ $($cur:tt)* ],
+        input: ( #[bourne(skip)] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_strip_walk!(
+            done: $done,
+            kept: { $($kept)* },
+            cur: [ $($cur)* ],
+            input: ($($rest)*)
+        );
+    };
     // bourne(rename = "x", default) compound: drop it.
     (
         done: $done:tt,
@@ -903,16 +917,17 @@ macro_rules! __from_json_enum_walk {
             }
             $crate::ValueKind::Object => {
                 $lex.object_start()?;
-                let __key = $lex.object_first_key()?.ok_or_else(|| {
+                let __key_js = $lex.object_first_key_lex()?.ok_or_else(|| {
                     $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position())
                 })?;
-                let __value = match __key {
+                let __key_cow = $crate::key_to_cow(__key_js, $lex)?;
+                let __value = match __key_cow.as_ref() {
                     $($tagged)*
                     _ => return ::core::result::Result::Err(
                         $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
                     ),
                 };
-                if $lex.object_next_key()?.is_some() {
+                if $lex.object_next_key_lex()?.is_some() {
                     return ::core::result::Result::Err(
                         $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
                     );
@@ -1375,18 +1390,56 @@ macro_rules! __from_json_walk {
     ) => {{
         $lex.object_start()?;
         $($decls)*
-        let mut __maybe_key = $lex.object_first_key()?;
-        while let ::core::option::Option::Some(__key) = __maybe_key {
-            match __key {
+        let mut __maybe_key = $lex.object_first_key_lex()?;
+        while let ::core::option::Option::Some(__key_js) = __maybe_key {
+            let __key_cow = $crate::key_to_cow(__key_js, $lex)?;
+            match __key_cow.as_ref() {
                 $($arms)*
                 _ => {
                     $crate::__from_json_unknown_arm!($u, $lex);
                 }
             }
-            __maybe_key = $lex.object_next_key()?;
+            __maybe_key = $lex.object_next_key_lex()?;
         }
         ::core::result::Result::Ok($($self_ctor)+ { $($assigns)* })
     }};
+
+    // ---------- Phase 1b-skip: terminal commit for #[bourne(skip)] field. ----------
+    //
+    // Skipped fields contribute nothing to `decls` or `arms`; the
+    // assignment is `Default::default()`. The only thing we still
+    // consume is the field's type tokens (kept on the struct def by
+    // the strip walker, but here we just discard them).
+    (
+        lex: $lex:ident,
+        ctor: ($($self_ctor:tt)+),
+        unknown: $u:ident,
+        decls: { $($decls:tt)* },
+        arms: { $($arms:tt)* },
+        assigns: { $($assigns:tt)* },
+        ftokens: [ $($fty:tt)+ ],
+        cur_name: ($fname:ident),
+        cur_rename: ($($rename:tt)?),
+        cur_default: (skip),
+        input: ()
+    ) => {
+        $crate::__from_json_walk!(
+            lex: $lex,
+            ctor: ($($self_ctor)+),
+            unknown: $u,
+            decls: { $($decls)* },
+            arms: { $($arms)* },
+            assigns: {
+                $($assigns)*
+                $fname: <$($fty)+ as ::core::default::Default>::default(),
+            },
+            ftokens: [],
+            cur_name: (),
+            cur_rename: (),
+            cur_default: (),
+            input: ()
+        )
+    };
 
     // ---------- Phase 1b: terminal — last field, no trailing comma. ----------
     (
@@ -1462,6 +1515,41 @@ macro_rules! __from_json_walk {
             cur_name: (),
             cur_rename: ($renamed),
             cur_default: ($($default)?),
+            input: ($($rest)*)
+        )
+    };
+
+    // ---------- bourne(skip) attribute on the next field. ----------
+    //
+    // A skipped field is never read from JSON. The slot decl and key
+    // dispatch arm are omitted entirely; the final assignment uses
+    // `Default::default()`. This is encoded as a third value on the
+    // `cur_default` slot — `(skip)` — which the dedicated commit arms
+    // below match before the regular `(trait_default)` / `()` arms.
+    (
+        lex: $lex:ident,
+        ctor: ($($self_ctor:tt)+),
+        unknown: $u:ident,
+        decls: $decls:tt,
+        arms: $arms:tt,
+        assigns: $assigns:tt,
+        ftokens: [],
+        cur_name: (),
+        cur_rename: ($($rename:tt)?),
+        cur_default: (),
+        input: ( #[bourne(skip)] $($rest:tt)* )
+    ) => {
+        $crate::__from_json_walk!(
+            lex: $lex,
+            ctor: ($($self_ctor)+),
+            unknown: $u,
+            decls: $decls,
+            arms: $arms,
+            assigns: $assigns,
+            ftokens: [],
+            cur_name: (),
+            cur_rename: ($($rename)?),
+            cur_default: (skip),
             input: ($($rest)*)
         )
     };
@@ -1602,6 +1690,38 @@ macro_rules! __from_json_walk {
             cur_name: ($fname),
             cur_rename: ($($rename)?),
             cur_default: ($($default)?),
+            input: ($($rest)*)
+        )
+    };
+
+    // ---------- Phase 2-skip: commit on `,` for #[bourne(skip)] field. ----------
+    (
+        lex: $lex:ident,
+        ctor: ($($self_ctor:tt)+),
+        unknown: $u:ident,
+        decls: { $($decls:tt)* },
+        arms: { $($arms:tt)* },
+        assigns: { $($assigns:tt)* },
+        ftokens: [ $($fty:tt)+ ],
+        cur_name: ($fname:ident),
+        cur_rename: ($($rename:tt)?),
+        cur_default: (skip),
+        input: ( , $($rest:tt)* )
+    ) => {
+        $crate::__from_json_walk!(
+            lex: $lex,
+            ctor: ($($self_ctor)+),
+            unknown: $u,
+            decls: { $($decls)* },
+            arms: { $($arms)* },
+            assigns: {
+                $($assigns)*
+                $fname: <$($fty)+ as ::core::default::Default>::default(),
+            },
+            ftokens: [],
+            cur_name: (),
+            cur_rename: (),
+            cur_default: (),
             input: ($($rest)*)
         )
     };

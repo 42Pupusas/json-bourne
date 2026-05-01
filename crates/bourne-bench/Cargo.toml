@@ -80,5 +80,9 @@ harness = false
 name = "malformed"
 harness = false
 
+[[bench]]
+name = "compare_features"
+harness = false
+
 [lints]
 workspace = true
