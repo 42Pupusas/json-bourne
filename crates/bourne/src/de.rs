@@ -54,6 +54,12 @@ pub trait EventSource<'input> {
     /// Parse one signed-integer value, fusing the lex pass with the
     /// digit-to-i64 conversion. Cursor must be at a digit (or `-`).
     fn parse_i64_value(&mut self) -> Result<i64, Error>;
+
+    /// Parse one borrowed-string value, returning a `&'input str` directly
+    /// from the input bytes. Errors on escaped strings (those need a
+    /// caller-owned decode buffer; bourne does not allocate). Cursor must
+    /// be at the opening `"`.
+    fn parse_str_value(&mut self) -> Result<&'input str, Error>;
 }
 
 impl<'input, const MAX_DEPTH: usize> EventSource<'input> for Parser<'input, MAX_DEPTH> {
@@ -79,6 +85,10 @@ impl<'input, const MAX_DEPTH: usize> EventSource<'input> for Parser<'input, MAX_
 
     fn parse_i64_value(&mut self) -> Result<i64, Error> {
         Self::parse_i64_value(self)
+    }
+
+    fn parse_str_value(&mut self) -> Result<&'input str, Error> {
+        Self::parse_str_value(self)
     }
 }
 
@@ -201,6 +211,41 @@ impl<'input> FromJson<'input> for &'input str {
                 .as_str(source.input())
                 .ok_or_else(|| type_error(source, ErrorKind::InvalidEscape)),
             _ => Err(type_error(source, ErrorKind::ExpectedString)),
+        }
+    }
+
+    /// Fused-pass fast path for `Vec<&str>`. Same shape as the integer
+    /// overrides: skip the per-element `next_event` / `Event::String` /
+    /// `from_event` chain and hand the parser straight from the input
+    /// bytes to a borrowed `&str`. Falls back to the streaming path if
+    /// any element contains escape sequences (those need a decode buffer
+    /// the parser doesn't own).
+    #[cfg(feature = "alloc")]
+    fn vec_from_event<S: EventSource<'input>>(
+        source: &mut S,
+        start: Event,
+    ) -> Result<alloc::vec::Vec<Self>, Error> {
+        if !matches!(start, Event::StartArray) {
+            return Err(type_error(source, ErrorKind::ExpectedArray));
+        }
+        let mut out: alloc::vec::Vec<&'input str> = alloc::vec::Vec::new();
+        // First element via the streaming path so we can detect immediate
+        // `]` (empty array) without re-implementing whitespace handling
+        // for that one case.
+        let first_ev = next_or_eof(source)?;
+        match first_ev {
+            Event::EndArray => return Ok(out),
+            ev => {
+                let v = <&'input str>::from_event(source, ev)?;
+                out.push(v);
+            }
+        }
+        loop {
+            if source.array_continue(b']')? {
+                return Ok(out);
+            }
+            let s = source.parse_str_value()?;
+            out.push(s);
         }
     }
 }

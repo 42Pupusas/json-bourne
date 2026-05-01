@@ -560,6 +560,50 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         Ok(0)
     }
 
+    /// Parse a JSON string, returning a borrowed `&'input str`. Errors if
+    /// the string contains escape sequences — those require a caller-owned
+    /// decode buffer, which `bourne` does not allocate.
+    ///
+    /// Caller must position the parser at the opening `"`. On return the
+    /// cursor is past the closing `"`. The returned slice points into the
+    /// original input — zero copy.
+    ///
+    /// Used by the typed `Vec<&'input str>` fast path to skip the
+    /// per-element `next_event` / `Event::String` / `from_event` chain and
+    /// dispatch directly from the input bytes to the borrowed slice.
+    pub fn parse_str_value(&mut self) -> Result<&'input str, Error> {
+        match self.peek() {
+            Some(b'"') => self.bump(),
+            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
+            None => return Err(self.err(ErrorKind::UnexpectedEof)),
+        }
+        let start = self.offset;
+        loop {
+            let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
+            match b {
+                b'"' => {
+                    let end = self.offset;
+                    self.bump();
+                    let raw = &self.input[start..end];
+                    // SAFETY: every byte was validated against the RFC 3629
+                    // ranges by the byte walk above (ASCII fast arm or
+                    // `consume_utf8_multibyte`). Same argument as
+                    // `JsonStr::as_str`.
+                    return Ok(unsafe { core::str::from_utf8_unchecked(raw) });
+                }
+                b'\\' => {
+                    // Escaped strings need a decode buffer; fast path can't
+                    // produce a borrowed `&str`. Surface the dedicated error
+                    // so consumers fall back to the streaming decode path.
+                    return Err(self.err(ErrorKind::InvalidEscape));
+                }
+                0..=0x1F => return Err(self.err(ErrorKind::ControlCharInString)),
+                0x20..=0x7F => self.scan_ascii_string_run(),
+                _ => self.consume_utf8_multibyte()?,
+            }
+        }
+    }
+
     /// Skip whitespace then expect `,` or the array-end byte. Returns
     /// `true` if at end (caller should stop), `false` to continue with
     /// another element. Used by the typed `Vec<i64>` fast path.
