@@ -106,28 +106,31 @@ fn bench_realistic(c: &mut Criterion) {
     });
 
     // Same length distribution, but with ~1 escape per 50 bytes so neither
-    // library can use its borrow-everything fast path. The point is not
-    // typed deserialization — `Vec<String>` would need bourne's escape-
-    // decoding milestone which is still pending — but to measure raw
-    // validation throughput on strings with escapes, which is where most
-    // production text fields actually live.
+    // library can use its borrow-everything fast path. The headline number
+    // for the case most production string fields actually hit: strings
+    // with embedded newlines, quotes, or unicode escapes.
     //
-    // Compared against `serde_json::from_slice::<serde_json::Value>` so
-    // both sides produce a usable shape. This is the comparison the no-
-    // escape `mixed_length_strings` head-to-head deliberately can't make:
-    // serde_json's borrowed-`&str` fast path doesn't apply to escaped
-    // bodies, so the existing bench understates serde_json's typical cost
-    // on real string-heavy JSON. This corpus closes that gap.
+    // Apples-to-apples: same input, same output type. Both libraries
+    // allocate one String per element, decode escapes into it, and own
+    // the result. The no-escape `mixed_length_strings` comparison runs
+    // serde_json's borrowed-`&str` fast path which doesn't apply once
+    // there are escapes; this corpus closes that gap.
     let mixed_esc = mixed_length_string_array_with_escapes(1_000);
     group.throughput(Throughput::Bytes(mixed_esc.len() as u64));
     group.bench_function("mixed_length_strings_with_escapes/1000/stream", |b| {
         b.iter(|| drain(black_box(mixed_esc.as_bytes())));
     });
+    group.bench_function("mixed_length_strings_with_escapes/1000/typed_owned", |b| {
+        b.iter(|| {
+            let v: Vec<String> = parse(black_box(mixed_esc.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
     group.bench_function(
-        "mixed_length_strings_with_escapes/1000/serde_json_value",
+        "mixed_length_strings_with_escapes/1000/typed_owned/serde_json",
         |b| {
             b.iter(|| {
-                let v: serde_json::Value =
+                let v: Vec<String> =
                     serde_json::from_slice(black_box(mixed_esc.as_bytes())).unwrap();
                 black_box(v);
             });
