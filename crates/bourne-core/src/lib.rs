@@ -19,7 +19,7 @@ pub use parser::{DEFAULT_MAX_DEPTH, Parser};
 mod tests {
     use super::*;
 
-    fn collect(input: &str) -> Result<alloc::vec::Vec<Event<'_>>, Error> {
+    fn collect(input: &str) -> Result<alloc::vec::Vec<Event>, Error> {
         let mut p: Parser<'_> = Parser::new(input.as_bytes());
         let mut out = alloc::vec::Vec::new();
         while let Some(ev) = p.next_event()? {
@@ -37,16 +37,18 @@ mod tests {
 
     #[test]
     fn numbers() {
+        let input = b"123";
         let evs = collect("123").unwrap();
         match &evs[..] {
-            [Event::Number(n)] => assert_eq!(n.as_i64().unwrap(), 123),
+            [Event::Number(n)] => assert_eq!(n.as_i64(input).unwrap(), 123),
             _ => panic!("{evs:?}"),
         }
+        let input2 = b"-1.5e2";
         let evs = collect("-1.5e2").unwrap();
         match &evs[..] {
             [Event::Number(n)] => {
-                assert!(n.is_float());
-                assert!((n.as_f64().unwrap() - -150.0).abs() < f64::EPSILON);
+                assert!(n.is_float(input2));
+                assert!((n.as_f64(input2).unwrap() - -150.0).abs() < f64::EPSILON);
             }
             _ => panic!("{evs:?}"),
         }
@@ -54,28 +56,31 @@ mod tests {
 
     #[test]
     fn empty_string_and_borrowed() {
+        let input = br#""""#;
         let evs = collect(r#""""#).unwrap();
         match &evs[..] {
             [Event::String(s)] => {
-                assert_eq!(s.as_str(), Some(""));
+                assert_eq!(s.as_str(input), Some(""));
                 assert!(!s.has_escapes());
             }
             _ => panic!("{evs:?}"),
         }
+        let input2 = br#""hello""#;
         let evs = collect(r#""hello""#).unwrap();
         match &evs[..] {
-            [Event::String(s)] => assert_eq!(s.as_str(), Some("hello")),
+            [Event::String(s)] => assert_eq!(s.as_str(input2), Some("hello")),
             _ => panic!("{evs:?}"),
         }
     }
 
     #[test]
     fn escaped_string_marked() {
+        let input = br#""a\nb""#;
         let evs = collect(r#""a\nb""#).unwrap();
         match &evs[..] {
             [Event::String(s)] => {
                 assert!(s.has_escapes());
-                assert_eq!(s.as_str(), None);
+                assert_eq!(s.as_str(input), None);
             }
             _ => panic!("{evs:?}"),
         }

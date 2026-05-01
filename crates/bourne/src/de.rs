@@ -28,21 +28,27 @@ use bourne_core::{Error, ErrorKind, Event, Parser, Position};
 
 /// A pull source of [`Event`]s.
 ///
-/// Just `next_event` + position — the previous one-event peek capability
-/// is no longer needed because the trait passes the first event of each
-/// value to the impl directly.
+/// `Event` no longer carries a lifetime — string and number variants store
+/// `(start, end)` offsets into the parser's input. Consumers materialize
+/// the actual `&str`/`&[u8]` via `JsonStr::as_str(input)` etc., so the
+/// trait exposes `input()` to provide that slice.
 pub trait EventSource<'input> {
-    fn next_event(&mut self) -> Result<Option<Event<'input>>, Error>;
+    fn next_event(&mut self) -> Result<Option<Event>, Error>;
     fn position(&self) -> Position;
+    fn input(&self) -> &'input [u8];
 }
 
 impl<'input, const MAX_DEPTH: usize> EventSource<'input> for Parser<'input, MAX_DEPTH> {
-    fn next_event(&mut self) -> Result<Option<Event<'input>>, Error> {
+    fn next_event(&mut self) -> Result<Option<Event>, Error> {
         Self::next_event(self)
     }
 
     fn position(&self) -> Position {
         Self::position(self)
+    }
+
+    fn input(&self) -> &'input [u8] {
+        Self::input(self)
     }
 }
 
@@ -81,7 +87,7 @@ pub trait FromJson<'input>: Sized {
     /// `StartObject` / `StartArray` and the impl consumes the rest.
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error>;
 }
 
@@ -93,7 +99,7 @@ fn type_error<'input, S: EventSource<'input>>(source: &S, kind: ErrorKind) -> Er
     Error::new(kind, source.position())
 }
 
-fn next_or_eof<'input, S: EventSource<'input>>(source: &mut S) -> Result<Event<'input>, Error> {
+fn next_or_eof<'input, S: EventSource<'input>>(source: &mut S) -> Result<Event, Error> {
     source
         .next_event()?
         .ok_or_else(|| type_error(source, ErrorKind::UnexpectedEof))
@@ -106,7 +112,7 @@ fn next_or_eof<'input, S: EventSource<'input>>(source: &mut S) -> Result<Event<'
 impl<'input> FromJson<'input> for bool {
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         match start {
             Event::Bool(b) => Ok(b),
@@ -118,7 +124,7 @@ impl<'input> FromJson<'input> for bool {
 impl<'input> FromJson<'input> for () {
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         match start {
             Event::Null => Ok(()),
@@ -130,11 +136,11 @@ impl<'input> FromJson<'input> for () {
 impl<'input> FromJson<'input> for &'input str {
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         match start {
             Event::String(s) => s
-                .as_str()
+                .as_str(source.input())
                 .ok_or_else(|| type_error(source, ErrorKind::InvalidEscape)),
             _ => Err(type_error(source, ErrorKind::ExpectedString)),
         }
@@ -147,13 +153,14 @@ macro_rules! impl_int {
             impl<'input> FromJson<'input> for $t {
                 fn from_event<S: EventSource<'input>>(
                     source: &mut S,
-                    start: Event<'input>,
+                    start: Event,
                 ) -> Result<Self, Error> {
                     match start {
                         Event::Number(n) => {
-                            let big = n.$accessor()?;
+                            let big = n.$accessor(source.input())
+                                .map_err(|kind| Error::new(kind, source.position()))?;
                             <$t>::try_from(big).map_err(|_| {
-                                Error::new(ErrorKind::NumberOutOfRange, n.position())
+                                Error::new(ErrorKind::NumberOutOfRange, source.position())
                             })
                         }
                         _ => Err(type_error(source, ErrorKind::ExpectedNumber)),
@@ -170,10 +177,12 @@ impl_int!(u8 => as_u64, u16 => as_u64, u32 => as_u64, u64 => as_u64, usize => as
 impl<'input> FromJson<'input> for f64 {
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         match start {
-            Event::Number(n) => n.as_f64(),
+            Event::Number(n) => n
+                .as_f64(source.input())
+                .map_err(|kind| Error::new(kind, source.position())),
             _ => Err(type_error(source, ErrorKind::ExpectedNumber)),
         }
     }
@@ -183,7 +192,7 @@ impl<'input> FromJson<'input> for f32 {
     #[allow(clippy::cast_possible_truncation)]
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         f64::from_event(source, start).map(|v| v as Self)
     }
@@ -196,7 +205,7 @@ impl<'input> FromJson<'input> for f32 {
 impl<'input, T: FromJson<'input>> FromJson<'input> for Option<T> {
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         match start {
             Event::Null => Ok(None),
@@ -208,15 +217,12 @@ impl<'input, T: FromJson<'input>> FromJson<'input> for Option<T> {
 impl<'input, T: FromJson<'input>, const N: usize> FromJson<'input> for [T; N] {
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         if !matches!(start, Event::StartArray) {
             return Err(type_error(source, ErrorKind::ExpectedArray));
         }
 
-        // Build into Option<T> slots so we can drop already-initialized
-        // elements on error without MaybeUninit (forbidden by the
-        // workspace-wide unsafe_code = "deny" + per-crate "forbid").
         let mut slots: [Option<T>; N] = core::array::from_fn(|_| None);
 
         for slot in &mut slots {
@@ -243,7 +249,7 @@ macro_rules! impl_tuple {
         impl<'input, $($T: FromJson<'input>),+> FromJson<'input> for ($($T,)+) {
             fn from_event<S: EventSource<'input>>(
                 source: &mut S,
-                start: Event<'input>,
+                start: Event,
             ) -> Result<Self, Error> {
                 if !matches!(start, Event::StartArray) {
                     return Err(type_error(source, ErrorKind::ExpectedArray));
@@ -285,10 +291,10 @@ mod alloc_impls {
     impl<'input> FromJson<'input> for String {
         fn from_event<S: EventSource<'input>>(
             source: &mut S,
-            start: Event<'input>,
+            start: Event,
         ) -> Result<Self, Error> {
             match start {
-                Event::String(s) => s.as_str().map_or_else(
+                Event::String(s) => s.as_str(source.input()).map_or_else(
                     // Decoding escapes into a buffer is the next milestone.
                     || Err(type_error(source, ErrorKind::InvalidEscape)),
                     |borrowed| Ok(Self::from(borrowed)),
@@ -301,7 +307,7 @@ mod alloc_impls {
     impl<'input, T: FromJson<'input>> FromJson<'input> for Vec<T> {
         fn from_event<S: EventSource<'input>>(
             source: &mut S,
-            start: Event<'input>,
+            start: Event,
         ) -> Result<Self, Error> {
             if !matches!(start, Event::StartArray) {
                 return Err(type_error(source, ErrorKind::ExpectedArray));

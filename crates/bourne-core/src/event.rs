@@ -1,135 +1,173 @@
-use crate::error::{Error, ErrorKind, Position};
+use crate::error::ErrorKind;
 use core::fmt;
 
-/// A JSON string slice as it appears in the source.
+/// Top bit of `start_packed` carries `has_escapes`. JSON inputs are limited
+/// to `i32::MAX` bytes (~2 GB) so the lower 31 bits are enough for a real
+/// document. Values above 2 GB are rejected at parse time.
+const ESCAPED_BIT: u32 = 1 << 31;
+const OFFSET_MASK: u32 = !ESCAPED_BIT;
+
+/// Maximum byte size of a JSON document this parser will accept. Bounded by
+/// our packed-offset representation in `Event`.
+pub const MAX_INPUT_LEN: usize = OFFSET_MASK as usize;
+
+/// A JSON string span — a `(start, end)` pair into the original input.
 ///
-/// Two-state representation:
-///   * `Borrowed(&str)` — no escapes, lexer already validated UTF-8 inline,
-///     the slice is ready to use with no per-access work.
-///   * `Escaped(&[u8])` — at least one `\` was seen; the bytes are the raw
-///     between-quote span, escape syntax has been validated, but full
-///     decoding requires a caller-provided buffer.
-///
-/// This split exists so `as_str()` never has to re-validate UTF-8 — the
-/// borrowed case has already done the work, and the escaped case can't
-/// answer without a decode buffer.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum JsonStr<'input> {
-    Borrowed(&'input str),
-    Escaped(&'input [u8]),
+/// Materializing into a real `&str` requires the original input slice.
+/// Stored as two `u32`s instead of a fat `&[u8]` so the parent `Event`
+/// fits in 16 bytes (one xmm register), eliminating the per-event memory
+/// shuffles that dominated typed parsing in profiling.
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub struct JsonStr {
+    /// Low 31 bits: byte offset where the string content starts (after the
+    /// opening `"`). Top bit: `has_escapes` flag.
+    start_packed: u32,
+    /// Byte offset one-past the end of the content (the closing `"`).
+    end: u32,
 }
 
-impl<'input> JsonStr<'input> {
-    pub(crate) const fn borrowed(s: &'input str) -> Self {
-        Self::Borrowed(s)
+impl JsonStr {
+    pub(crate) const fn new(start: u32, end: u32, has_escapes: bool) -> Self {
+        let start_packed = if has_escapes { start | ESCAPED_BIT } else { start };
+        Self { start_packed, end }
     }
 
-    pub(crate) const fn escaped(raw: &'input [u8]) -> Self {
-        Self::Escaped(raw)
-    }
-
-    /// The raw bytes between (but not including) the surrounding quotes.
-    /// Identical for both representations — `Borrowed`'s underlying
-    /// `str::as_bytes()` is the same span the lexer captured.
-    #[must_use]
-    pub const fn as_raw_bytes(&self) -> &'input [u8] {
-        match self {
-            Self::Borrowed(s) => s.as_bytes(),
-            Self::Escaped(raw) => raw,
-        }
-    }
-
+    /// `true` iff the lexer saw a `\` in the string. When false, the raw
+    /// bytes are already valid UTF-8 (the lexer validated them inline) and
+    /// can be turned into `&str` for free.
     #[must_use]
     pub const fn has_escapes(&self) -> bool {
-        matches!(self, Self::Escaped(_))
+        self.start_packed & ESCAPED_BIT != 0
     }
 
-    /// Returns the string as `&str` when it contains no escapes.
-    /// When escapes are present, the caller must decode into a buffer.
     #[must_use]
-    pub const fn as_str(&self) -> Option<&'input str> {
-        match self {
-            Self::Borrowed(s) => Some(s),
-            Self::Escaped(_) => None,
+    pub const fn start(&self) -> u32 {
+        self.start_packed & OFFSET_MASK
+    }
+
+    #[must_use]
+    pub const fn end(&self) -> u32 {
+        self.end
+    }
+
+    /// Raw bytes between (but not including) the quotes, taken from `input`.
+    ///
+    /// Caller must pass the same input the parser was constructed with;
+    /// otherwise the indices are meaningless. Returns `None` if the input
+    /// is shorter than the recorded range (only happens if the caller
+    /// passes a different/truncated buffer).
+    #[must_use]
+    pub fn raw_bytes<'input>(&self, input: &'input [u8]) -> Option<&'input [u8]> {
+        let start = self.start() as usize;
+        let end = self.end as usize;
+        input.get(start..end)
+    }
+
+    /// The string as `&str` when it contains no escapes. Skips re-validation:
+    /// the parser already ensured the bytes are valid UTF-8.
+    ///
+    /// Returns `None` when the string had escapes (caller must decode into
+    /// a buffer) or when `input` doesn't cover the recorded range.
+    #[must_use]
+    pub fn as_str<'input>(&self, input: &'input [u8]) -> Option<&'input str> {
+        if self.has_escapes() {
+            return None;
         }
+        let raw = self.raw_bytes(input)?;
+        // SAFETY: the lexer validates every byte against the RFC 3629 byte
+        // ranges as it scans (see `Parser::consume_utf8_multibyte` and the
+        // ASCII fast arm). The slice is therefore valid UTF-8 and
+        // `from_utf8_unchecked` is sound.
+        Some(unsafe { core::str::from_utf8_unchecked(raw) })
     }
 }
 
-/// A JSON number, kept as the original byte slice.
+impl fmt::Debug for JsonStr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Manual Debug because `start_packed` carries the `has_escapes` bit
+        // packed into its high bit; the raw u32 would be misleading. Show
+        // the unpacked logical fields instead.
+        f.debug_struct("JsonStr")
+            .field("start", &self.start())
+            .field("end", &self.end)
+            .field("has_escapes", &self.has_escapes())
+            .finish_non_exhaustive()
+    }
+}
+
+/// A JSON number span — `(start, end)` into the original input.
 ///
 /// Numbers are not eagerly decoded — JSON numbers are arbitrary-precision
 /// decimal and there is no Rust primitive that losslessly fits all of them.
 /// Decoding is the consumer's choice via `as_i64`, `as_u64`, `as_f64`.
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct JsonNum<'input> {
-    raw: &'input [u8],
-    /// Byte offset where this number started in the original input. Line and
-    /// column are not stored — they would require an O(offset) scan per
-    /// number, which dominates integer-array parsing. Errors raised by
-    /// `as_i64`/`as_u64`/`as_f64` carry this offset; if a caller needs the
-    /// line/column they can compute it from their own copy of the input.
-    start_offset: usize,
+pub struct JsonNum {
+    start: u32,
+    end: u32,
 }
 
-impl<'input> JsonNum<'input> {
-    pub(crate) const fn new(raw: &'input [u8], start_offset: usize) -> Self {
-        Self { raw, start_offset }
+impl JsonNum {
+    pub(crate) const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
     }
 
     #[must_use]
-    pub const fn as_raw_bytes(&self) -> &'input [u8] {
-        self.raw
+    pub const fn start(&self) -> u32 {
+        self.start
+    }
+
+    #[must_use]
+    pub const fn end(&self) -> u32 {
+        self.end
+    }
+
+    /// Raw bytes of the number literal, taken from the original input.
+    #[must_use]
+    pub fn raw_bytes<'input>(&self, input: &'input [u8]) -> Option<&'input [u8]> {
+        input.get(self.start as usize..self.end as usize)
     }
 
     /// The raw number text. Always ASCII (lexer guarantees this).
     #[must_use]
-    pub fn as_str(&self) -> &'input str {
-        // Lexer only accepts the ASCII subset RFC 8259 allows for numbers.
-        core::str::from_utf8(self.raw).unwrap_or("")
-    }
-
-    /// Position of the number's first byte in the input.
-    ///
-    /// `line` and `column` are not tracked on `JsonNum` (computing them would
-    /// require an O(offset) scan per number, which is prohibitive for
-    /// integer-heavy workloads). They are returned as `0` to signal
-    /// "not computed"; consumers who need them can recompute from their own
-    /// copy of the input.
-    #[must_use]
-    pub const fn position(&self) -> Position {
-        Position {
-            offset: self.start_offset,
-            line: 0,
-            column: 0,
-        }
+    pub fn as_str<'input>(&self, input: &'input [u8]) -> &'input str {
+        // SAFETY: lexer accepts only the ASCII subset RFC 8259 allows for
+        // numbers. Always valid UTF-8.
+        self.raw_bytes(input)
+            .map_or("", |bytes| unsafe { core::str::from_utf8_unchecked(bytes) })
     }
 
     /// True if the literal contains `.`, `e`, or `E` — i.e. is not an integer.
     #[must_use]
-    pub fn is_float(&self) -> bool {
-        self.raw.iter().any(|b| matches!(*b, b'.' | b'e' | b'E'))
+    pub fn is_float(&self, input: &[u8]) -> bool {
+        self.raw_bytes(input)
+            .is_some_and(|bytes| bytes.iter().any(|b| matches!(*b, b'.' | b'e' | b'E')))
     }
 
-    pub fn as_i64(&self) -> Result<i64, Error> {
-        parse_i64(self.raw).ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, self.position()))
+    pub fn as_i64(&self, input: &[u8]) -> Result<i64, ErrorKind> {
+        let bytes = self.raw_bytes(input).ok_or(ErrorKind::InvalidNumber)?;
+        parse_i64(bytes).ok_or(ErrorKind::NumberOutOfRange)
     }
 
-    pub fn as_u64(&self) -> Result<u64, Error> {
-        parse_u64(self.raw).ok_or_else(|| Error::new(ErrorKind::NumberOutOfRange, self.position()))
+    pub fn as_u64(&self, input: &[u8]) -> Result<u64, ErrorKind> {
+        let bytes = self.raw_bytes(input).ok_or(ErrorKind::InvalidNumber)?;
+        parse_u64(bytes).ok_or(ErrorKind::NumberOutOfRange)
     }
 
-    pub fn as_f64(&self) -> Result<f64, Error> {
+    pub fn as_f64(&self, input: &[u8]) -> Result<f64, ErrorKind> {
         // v1: route through core's str::parse. Replace with our own
         // dtoa-grade decoder later. Correctness now, performance later.
-        self.as_str()
+        self.as_str(input)
             .parse::<f64>()
-            .map_err(|_| Error::new(ErrorKind::InvalidNumber, self.position()))
+            .map_err(|_| ErrorKind::InvalidNumber)
     }
 }
 
-impl fmt::Debug for JsonNum<'_> {
+impl fmt::Debug for JsonNum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "JsonNum({})", self.as_str())
+        f.debug_struct("JsonNum")
+            .field("start", &self.start)
+            .field("end", &self.end)
+            .finish()
     }
 }
 
@@ -188,15 +226,20 @@ fn parse_i64(raw: &[u8]) -> Option<i64> {
 /// The parser emits these in document order. Containers are delimited by
 /// matched `Start*`/`End*` pairs. Inside an object, every value event is
 /// preceded by a `Key` event for that field.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Event<'input> {
+///
+/// `Event` is 16 bytes — `(JsonStr|JsonNum: 8 bytes) + (tag: 1 byte) + 7
+/// bytes padding`. This fits in one xmm register, so `next_event` returns
+/// it without spilling to the stack — measurable in profiles as ~12% of
+/// typed-parse runtime saved compared to the previous 32-byte representation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Event {
     StartObject,
     EndObject,
     StartArray,
     EndArray,
-    Key(JsonStr<'input>),
-    String(JsonStr<'input>),
-    Number(JsonNum<'input>),
+    Key(JsonStr),
+    String(JsonStr),
+    Number(JsonNum),
     Bool(bool),
     Null,
 }

@@ -1,5 +1,5 @@
 use crate::error::{Error, ErrorKind, Position};
-use crate::event::{Event, JsonNum, JsonStr};
+use crate::event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 
 /// Default maximum container nesting depth.
 ///
@@ -106,8 +106,18 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
 }
 
 impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
+    /// Construct a parser over `input`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input.len() > MAX_INPUT_LEN` (~2 GB). The packed offset
+    /// representation in `JsonStr`/`JsonNum` reserves the top bit of a `u32`
+    /// for `has_escapes`, so positions are limited to 31 bits. Real-world
+    /// JSON documents are far smaller than this; consumers needing larger
+    /// streams should chunk and parse incrementally.
     #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
+        assert!(input.len() <= MAX_INPUT_LEN, "input exceeds MAX_INPUT_LEN");
         Self {
             input,
             offset: 0,
@@ -121,10 +131,19 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         compute_position(self.input, self.offset)
     }
 
+    /// The input slice the parser was constructed with. Consumers use this
+    /// to materialize `&str`/`&[u8]` from `JsonStr` and `JsonNum`, which
+    /// store offsets rather than fat pointers (so the `Event` enum fits in
+    /// one xmm register).
+    #[must_use]
+    pub const fn input(&self) -> &'input [u8] {
+        self.input
+    }
+
     // The state machine is intrinsically large — splitting it would scatter
     // dispatch across one private fn per state and obscure the grammar walk.
     #[allow(clippy::too_many_lines)]
-    pub fn next_event(&mut self) -> Result<Option<Event<'input>>, Error> {
+    pub fn next_event(&mut self) -> Result<Option<Event>, Error> {
         loop {
             self.skip_whitespace();
             return match self.state {
@@ -252,7 +271,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         }
     }
 
-    fn close_container(&mut self, expected: Frame) -> Result<Event<'input>, Error> {
+    fn close_container(&mut self, expected: Frame) -> Result<Event, Error> {
         let popped = self.stack.pop().ok_or_else(|| self.err(ErrorKind::UnexpectedByte(b']')))?;
         if popped != expected {
             return Err(self.err(ErrorKind::TypeMismatch));
@@ -269,7 +288,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     }
 
     #[inline]
-    fn parse_value(&mut self) -> Result<Event<'input>, Error> {
+    fn parse_value(&mut self) -> Result<Event, Error> {
         let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
         match b {
             b'{' => {
@@ -299,7 +318,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
             .map_err(|()| self.err(ErrorKind::DepthLimitExceeded))
     }
 
-    fn parse_keyword(&mut self, kw: &[u8], event: Event<'input>) -> Result<Event<'input>, Error> {
+    fn parse_keyword(&mut self, kw: &[u8], event: Event) -> Result<Event, Error> {
         for &expected in kw {
             match self.peek() {
                 Some(b) if b == expected => self.bump(),
@@ -310,7 +329,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         Ok(event)
     }
 
-    fn parse_string(&mut self) -> Result<JsonStr<'input>, Error> {
+    fn parse_string(&mut self) -> Result<JsonStr, Error> {
         debug_assert_eq!(self.peek(), Some(b'"'));
         self.bump(); // opening quote
         let start = self.offset;
@@ -319,26 +338,24 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
             let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
             match b {
                 b'"' => {
-                    let raw = &self.input[start..self.offset];
+                    let end = self.offset;
                     self.bump(); // closing quote
                     if has_escapes {
                         // Escape syntax (and the surrogate pairing rules) is
                         // not part of the byte-walk above; validate it once
                         // here. Full decode is still the consumer's job.
+                        let raw = &self.input[start..end];
                         validate_escapes(raw)
                             .map_err(|kind| self.err(kind))?;
-                        return Ok(JsonStr::escaped(raw));
                     }
-                    // SAFETY: every byte in `raw` was checked as we scanned:
-                    // the ASCII fast arm only accepts 0x20..=0x7F minus `"`
-                    // and `\\`, and `consume_utf8_multibyte` enforces the
-                    // RFC 3629 byte ranges (no overlongs, no surrogates,
-                    // capped at U+10FFFF). The slice is therefore valid
-                    // UTF-8 and `from_utf8_unchecked` is sound. The safe
-                    // `from_utf8` re-walks every byte and was ~48% of
-                    // `vec_borrowed_str` runtime in profiling.
-                    let s = unsafe { core::str::from_utf8_unchecked(raw) };
-                    return Ok(JsonStr::borrowed(s));
+                    // The JsonStr just stores offsets; consumers materialize
+                    // a `&str`/`&[u8]` lazily via `as_str(input)`. The
+                    // unsafe `from_utf8_unchecked` lives there now (with
+                    // the same RFC 3629 inline-validation safety argument).
+                    // `Parser::new` capped input at MAX_INPUT_LEN, so the
+                    // offsets fit in 31 bits and the `as u32` is lossless.
+                    #[allow(clippy::cast_possible_truncation)]
+                    return Ok(JsonStr::new(start as u32, end as u32, has_escapes));
                 }
                 b'\\' => {
                     has_escapes = true;
@@ -446,7 +463,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     }
 
     #[inline]
-    fn parse_number(&mut self) -> Result<JsonNum<'input>, Error> {
+    fn parse_number(&mut self) -> Result<JsonNum, Error> {
         let start = self.offset;
 
         if self.peek() == Some(b'-') {
@@ -489,8 +506,10 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
             }
         }
 
-        let raw = &self.input[start..self.offset];
-        Ok(JsonNum::new(raw, start))
+        // Same `as u32` lossless argument as parse_string — see Parser::new.
+        #[allow(clippy::cast_possible_truncation)]
+        let result = JsonNum::new(start as u32, self.offset as u32);
+        Ok(result)
     }
 
     /// Advance over a run of ASCII digits without per-byte position tracking.

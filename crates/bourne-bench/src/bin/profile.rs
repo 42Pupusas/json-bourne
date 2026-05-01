@@ -35,7 +35,7 @@ struct UserBourne<'input> {
 impl<'input> FromJson<'input> for UserBourne<'input> {
     fn from_event<S: EventSource<'input>>(
         source: &mut S,
-        start: Event<'input>,
+        start: Event,
     ) -> Result<Self, Error> {
         if !matches!(start, Event::StartObject) {
             return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
@@ -56,7 +56,7 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
                 _ => return Err(Error::new(ErrorKind::TypeMismatch, source.position())),
             };
             let key_str = key
-                .as_str()
+                .as_str(source.input())
                 .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, source.position()))?;
             let val_ev = source
                 .next_event()?

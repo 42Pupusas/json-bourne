@@ -40,7 +40,7 @@ mod tests {
     impl<'input> FromJson<'input> for User<'input> {
         fn from_event<S: EventSource<'input>>(
             source: &mut S,
-            start: Event<'input>,
+            start: Event,
         ) -> Result<Self, Error> {
             if !matches!(start, Event::StartObject) {
                 return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
@@ -60,7 +60,7 @@ mod tests {
                     Event::Key(k) => k,
                     _ => return Err(Error::new(ErrorKind::TypeMismatch, source.position())),
                 };
-                let key_str = key.as_str().ok_or_else(|| {
+                let key_str = key.as_str(source.input()).ok_or_else(|| {
                     // Until we have a string-decoding API, escaped field names
                     // can't be matched by value. v1 limitation, documented.
                     Error::new(ErrorKind::InvalidEscape, source.position())
