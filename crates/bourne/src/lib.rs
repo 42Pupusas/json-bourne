@@ -315,4 +315,112 @@ mod tests {
             "name was copied, not borrowed",
         );
     }
+
+    // -----------------------------------------------------------------
+    // Escape decoding into String / Cow<str>.
+    // -----------------------------------------------------------------
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_decodes_simple_escapes() {
+        let s: String = parse_str(r#""line1\nline2\ttab\"quote\\back\/slash""#).unwrap();
+        assert_eq!(s, "line1\nline2\ttab\"quote\\back/slash");
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_decodes_b_and_f_escapes() {
+        // \b = U+0008, \f = U+000C — the rarely-used pair.
+        let s: String = parse_str(r#""\b\f""#).unwrap();
+        assert_eq!(s, "\u{0008}\u{000C}");
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_decodes_unicode_bmp_escape() {
+        // Latin-1 (1-byte codepoint), Latin-Extended (2-byte UTF-8),
+        // and CJK (3-byte UTF-8) — covers each BMP encoding length.
+        let s: String = parse_str(r#""café 中文 ~""#).unwrap();
+        assert_eq!(s, "café 中文 ~");
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_decodes_surrogate_pair() {
+        // U+1F600 (😀, GRINNING FACE) encodes as the surrogate pair
+        // 😀 in JSON. Decoded form is 4 bytes of UTF-8.
+        let s: String = parse_str(r#""hi 😀 there""#).unwrap();
+        assert_eq!(s, "hi 😀 there");
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_rejects_lone_surrogate() {
+        let r = parse_str::<String>(r#""\uD800""#);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::UnpairedSurrogate);
+        let r = parse_str::<String>(r#""\uDC00""#);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::UnpairedSurrogate);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_rejects_high_surrogate_then_non_low() {
+        // \uD800 followed by a non-surrogate \u escape.
+        let r = parse_str::<String>(r#""\uD800A""#);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::UnpairedSurrogate);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn string_decodes_long_mixed_input() {
+        // Mix literal stretches and several escapes — exercises the literal-
+        // run fast path and verifies the cursor advances correctly across
+        // multiple escapes in one string.
+        let json = r#""one\ttwo\nthreeAfour\\five\"six""#;
+        let s: String = parse_str(json).unwrap();
+        assert_eq!(s, "one\ttwo\nthreeAfour\\five\"six");
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn vec_string_with_escapes_roundtrips() {
+        // Regression: this is the case `Vec<String>` could not parse
+        // before the decoder landed. Pin both empty-string and
+        // multi-escape-per-element forms.
+        let json = r#"["","a","\n","mixéd","\\\"\/"]"#;
+        let v: Vec<String> = parse_str(json).unwrap();
+        assert_eq!(v, vec!["", "a", "\n", "mixéd", "\\\"/"]);
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn cow_borrows_when_no_escapes() {
+        use std::borrow::Cow;
+        let input = String::from(r#""borrowed""#);
+        let c: Cow<'_, str> = parse_str(&input).unwrap();
+        assert_eq!(c, "borrowed");
+        // Borrowed variant means the pointer lies inside the input buffer.
+        // A copy would land outside it.
+        match c {
+            Cow::Borrowed(s) => {
+                let input_start = input.as_ptr() as usize;
+                let input_end = input_start + input.len();
+                let s_ptr = s.as_ptr() as usize;
+                assert!(
+                    (input_start..input_end).contains(&s_ptr),
+                    "Cow::Borrowed pointer should be inside input",
+                );
+            }
+            Cow::Owned(_) => panic!("expected Borrowed for un-escaped input"),
+        }
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn cow_owns_when_escapes_present() {
+        use std::borrow::Cow;
+        let c: Cow<'_, str> = parse_str(r#""line\nwrap""#).unwrap();
+        assert_eq!(c, "line\nwrap");
+        assert!(matches!(c, Cow::Owned(_)));
+    }
 }

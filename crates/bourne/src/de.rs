@@ -280,21 +280,57 @@ impl_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 mod alloc_impls {
     extern crate alloc;
     use super::{FromJson, type_error};
+    use alloc::borrow::Cow;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use bourne_core::{Error, ErrorKind, Event, Lexer};
+    use bourne_core::{Error, ErrorKind, Event, JsonStr, Lexer};
 
     impl<'input> FromJson<'input> for String {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
             match lex.read_value()? {
-                Event::String(s) => s.as_str(lex.input()).map_or_else(
-                    // Decoding escapes into a buffer is the next milestone.
-                    || Err(type_error(lex, ErrorKind::InvalidEscape)),
-                    |borrowed| Ok(Self::from(borrowed)),
-                ),
+                Event::String(s) => {
+                    if let Some(borrowed) = s.as_str(lex.input()) {
+                        // No escapes — copy the validated UTF-8 directly.
+                        return Ok(Self::from(borrowed));
+                    }
+                    Ok(decode_owned(s, lex)?)
+                }
                 _ => Err(type_error(lex, ErrorKind::ExpectedString)),
             }
         }
+    }
+
+    /// Borrow-when-you-can, allocate-when-you-must. The right default for
+    /// most string fields: ~95% of production JSON has no escapes, so this
+    /// avoids the per-element allocation that `String` pays. When escapes
+    /// are present the cost is identical to `String`.
+    impl<'input> FromJson<'input> for Cow<'input, str> {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            match lex.read_value()? {
+                Event::String(s) => {
+                    if let Some(borrowed) = s.as_str(lex.input()) {
+                        return Ok(Cow::Borrowed(borrowed));
+                    }
+                    Ok(Cow::Owned(decode_owned(s, lex)?))
+                }
+                _ => Err(type_error(lex, ErrorKind::ExpectedString)),
+            }
+        }
+    }
+
+    /// Shared owned-decode path for `String` and `Cow::Owned`. Pulled out
+    /// so the two impls cannot drift on capacity hint, error mapping, or
+    /// the (subtle) raw-bytes-missing case.
+    fn decode_owned(s: JsonStr, lex: &Lexer<'_>) -> Result<String, Error> {
+        // Capacity hint is the raw byte length: the decoded form is never
+        // longer than the encoded form (every escape sequence produces at
+        // most as many UTF-8 bytes as it occupies on the wire).
+        let raw = s
+            .raw_bytes(lex.input())
+            .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, lex.position()))?;
+        let mut out = String::with_capacity(raw.len());
+        decode_escapes(raw, &mut out).map_err(|kind| Error::new(kind, lex.position()))?;
+        Ok(out)
     }
 
     impl<'input, T: FromJson<'input>> FromJson<'input> for Vec<T> {
@@ -303,4 +339,118 @@ mod alloc_impls {
         }
     }
 
+    /// Decode a JSON string body into `dst`, expanding escape sequences.
+    ///
+    /// `raw` is the bytes between (but not including) the surrounding `"`s.
+    /// The lexer has already validated that every escape is well-formed
+    /// (see `validate_escapes` in `bourne-core`), so this path can decode
+    /// without re-checking surrogate pairing — but we re-check anyway,
+    /// because the cost is small and the alternative is an `unwrap` we
+    /// don't want to be wrong about.
+    ///
+    /// Output is always valid UTF-8: the non-escape bytes are validated by
+    /// the lexer's inline UTF-8 walk, and `\u`-derived bytes come from
+    /// `encode_utf8` on a checked `char`.
+    fn decode_escapes(raw: &[u8], dst: &mut String) -> Result<(), ErrorKind> {
+        let mut i = 0;
+        while i < raw.len() {
+            let b = raw[i];
+            if b != b'\\' {
+                // Literal byte run: find the next `\` (or end) and append the
+                // whole stretch in one push. This is the hot path for strings
+                // with sparse escapes (most production payloads).
+                //
+                // The lexer already validated these bytes as UTF-8 inline,
+                // so `from_utf8` cannot actually fail. Calling the safe
+                // version anyway keeps `unsafe` out of this crate (the
+                // `bourne` workspace lint denies it; only `bourne-core` has
+                // a localized exception). If this re-validation shows up on
+                // a profile, lift the call into `JsonStr` itself where the
+                // lexer's invariant is already trusted.
+                let start = i;
+                while i < raw.len() && raw[i] != b'\\' {
+                    i += 1;
+                }
+                let chunk = core::str::from_utf8(&raw[start..i])
+                    .map_err(|_| ErrorKind::InvalidUtf8)?;
+                dst.push_str(chunk);
+                continue;
+            }
+            // At a backslash. Need at least one more byte.
+            i += 1;
+            if i >= raw.len() {
+                return Err(ErrorKind::InvalidEscape);
+            }
+            match raw[i] {
+                b'"' => dst.push('"'),
+                b'\\' => dst.push('\\'),
+                b'/' => dst.push('/'),
+                b'b' => dst.push('\u{0008}'),
+                b'f' => dst.push('\u{000C}'),
+                b'n' => dst.push('\n'),
+                b'r' => dst.push('\r'),
+                b't' => dst.push('\t'),
+                b'u' => {
+                    if i + 5 > raw.len() {
+                        return Err(ErrorKind::InvalidUnicodeEscape);
+                    }
+                    let cp = parse_hex4(&raw[i + 1..i + 5])?;
+                    i += 4; // advance past the four hex digits; the +1 below covers `u`
+                    if (0xD800..=0xDBFF).contains(&cp) {
+                        // High surrogate — must be followed by `\uXXXX` low.
+                        // After the four hex digits, i points one before
+                        // the next byte; bump past it then check for `\u`.
+                        if i + 7 > raw.len() || raw[i + 1] != b'\\' || raw[i + 2] != b'u' {
+                            return Err(ErrorKind::UnpairedSurrogate);
+                        }
+                        let low = parse_hex4(&raw[i + 3..i + 7])?;
+                        if !(0xDC00..=0xDFFF).contains(&low) {
+                            return Err(ErrorKind::UnpairedSurrogate);
+                        }
+                        // Combine surrogate pair into a codepoint.
+                        let high_off = cp - 0xD800;
+                        let low_off = low - 0xDC00;
+                        let scalar = 0x1_0000 + (high_off << 10) + low_off;
+                        let ch = char::from_u32(scalar)
+                            .ok_or(ErrorKind::InvalidUnicodeEscape)?;
+                        dst.push(ch);
+                        i += 6; // skip `\uXXXX`
+                    } else if (0xDC00..=0xDFFF).contains(&cp) {
+                        return Err(ErrorKind::UnpairedSurrogate);
+                    } else {
+                        // BMP scalar — char::from_u32 always succeeds for
+                        // values outside the surrogate range.
+                        let ch = char::from_u32(cp)
+                            .ok_or(ErrorKind::InvalidUnicodeEscape)?;
+                        dst.push(ch);
+                    }
+                }
+                _ => return Err(ErrorKind::InvalidEscape),
+            }
+            i += 1;
+        }
+        Ok(())
+    }
+
+    /// Same digit-walk as `bourne-core`'s `parse_hex4`. Duplicated here
+    /// because it is a four-line helper and re-exposing it from `bourne-core`
+    /// would widen the public API of a crate that's deliberately small.
+    fn parse_hex4(bytes: &[u8]) -> Result<u32, ErrorKind> {
+        let mut v: u32 = 0;
+        for &b in bytes {
+            let d = match b {
+                b'0'..=b'9' => b - b'0',
+                b'a'..=b'f' => b - b'a' + 10,
+                b'A'..=b'F' => b - b'A' + 10,
+                _ => return Err(ErrorKind::InvalidUnicodeEscape),
+            };
+            v = (v << 4) | u32::from(d);
+        }
+        Ok(v)
+    }
+
+    // Ensure JsonStr stays imported even if a future refactor drops the
+    // direct reference. The trait impl above uses it transitively.
+    #[allow(dead_code)]
+    type _UseJsonStr = JsonStr;
 }
