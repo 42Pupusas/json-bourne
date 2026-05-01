@@ -13,7 +13,7 @@
 //! See `PROFILING.md` for the full runbook and notes on flamegraphs.
 
 use bourne::{FromJson, parse};
-use bourne_bench::realistic::unicode_string_array;
+use bourne_bench::realistic::{mixed_length_string_array_with_escapes, unicode_string_array};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use std::hint::black_box;
@@ -137,6 +137,7 @@ fn workloads() -> &'static [&'static str] {
         "vec_borrowed_str_10k",
         "vec_string_10k",
         "vec_borrowed_unicode_10k",
+        "vec_string_escaped_1k",
     ]
 }
 
@@ -176,6 +177,13 @@ fn run(name: &str) {
         "vec_borrowed_unicode_10k" => {
             let input = unicode_string_array(10_000);
             run_vec_borrowed_unicode(input.as_bytes(), 50_000);
+        }
+        "vec_string_escaped_1k" => {
+            // The case the bench surfaced: bourne is ~2.8x slower than
+            // serde_json on Vec<String> when the input has escapes. This
+            // workload is shaped to exercise the decoder hot path.
+            let input = mixed_length_string_array_with_escapes(1_000);
+            run_vec_string(input.as_bytes(), 8_000);
         }
         other => {
             eprintln!("unknown workload: {other}");

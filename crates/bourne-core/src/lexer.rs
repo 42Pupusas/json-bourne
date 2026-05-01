@@ -235,7 +235,33 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 
     /// Read a JSON string token. Cursor must be at the opening `"`. Returns
     /// a `JsonStr` covering the bytes between the quotes (exclusive).
+    ///
+    /// When the body contains escape sequences, the deferred `validate_escapes`
+    /// pass runs before returning — every escape is checked for syntactic
+    /// validity (escape kind, hex digits, surrogate pairing). The contract
+    /// for stream/Event consumers: a returned `JsonStr` with
+    /// `has_escapes() == true` means the escapes are well-formed.
     pub fn read_string(&mut self) -> Result<JsonStr, Error> {
+        self.read_string_inner(true)
+    }
+
+    /// Like [`read_string`], but skip the deferred `validate_escapes` pass.
+    /// The caller commits to performing equivalent validation as part of
+    /// decoding (the typed `String` / `Cow<str>` impls do exactly this).
+    ///
+    /// This exists because `validate_escapes` and an eager decoder do
+    /// overlapping work: the deferred validation walks the body checking
+    /// every escape; the decoder walks the body to actually emit the
+    /// decoded form, and naturally has to inspect every escape anyway.
+    /// On profile, the redundant `validate_escapes` walk was 42% of total
+    /// time on the `mixed_length_strings_with_escapes` corpus when going
+    /// to `Vec<String>`. Skipping it here gives the typed path a faster
+    /// route without weakening the stream-consumer contract.
+    pub fn read_string_no_validate(&mut self) -> Result<JsonStr, Error> {
+        self.read_string_inner(false)
+    }
+
+    fn read_string_inner(&mut self, validate: bool) -> Result<JsonStr, Error> {
         debug_assert_eq!(self.peek(), Some(b'"'));
         self.bump(); // opening quote
         let start = self.offset;
@@ -246,7 +272,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
                 b'"' => {
                     let end = self.offset;
                     self.bump(); // closing quote
-                    if has_escapes {
+                    if validate && has_escapes {
                         let raw = &self.input[start..end];
                         validate_escapes(raw).map_err(|kind| self.err(kind))?;
                     }
