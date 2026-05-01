@@ -171,15 +171,39 @@ impl fmt::Debug for JsonNum {
     }
 }
 
+/// `u64::MAX` has 20 decimal digits. Up to 19 digits, the loop body
+/// `acc * 10 + d` cannot overflow a `u64`, so we skip `checked_*` entirely
+/// — the only `imul` plus `jo` pair per digit dominated profiles for
+/// integer-array workloads. The 20-digit case retakes the slow path.
+const U64_FAST_DIGITS: usize = 19;
+
+/// `i64::MAX` has 19 decimal digits. The fast path handles up to 18 digits
+/// (also covers all 18-or-fewer-digit negatives, since `i64::MIN` has 19
+/// digits including the sign and we strip the sign first).
+const I64_FAST_DIGITS: usize = 18;
+
 fn parse_u64(raw: &[u8]) -> Option<u64> {
     if raw.is_empty() {
         return None;
     }
+    if raw.len() <= U64_FAST_DIGITS {
+        // Wide enough that overflow is impossible — skip checked arithmetic.
+        // Each digit becomes `mul + add + cmp + jb` instead of
+        // `mul + jo + cmp + jb`, removing the `jo` dependency on `mul`'s
+        // overflow flag and shortening the critical path.
+        let mut acc: u64 = 0;
+        for &b in raw {
+            let d = b.wrapping_sub(b'0');
+            if d >= 10 {
+                return None;
+            }
+            acc = acc * 10 + u64::from(d);
+        }
+        return Some(acc);
+    }
+    // 20+ digits: must check overflow on every step. u64 fits at most 20.
     let mut acc: u64 = 0;
     for &b in raw {
-        // ASCII-digit fast path: `b.wrapping_sub(b'0')` lands in 0..=9 only
-        // for `b'0'..=b'9'`. Any other byte (including `.`, `e`, `E`, `-`)
-        // gives a value >= 10 and aborts. One pass instead of two.
         let d = b.wrapping_sub(b'0');
         if d >= 10 {
             return None;
@@ -197,9 +221,20 @@ fn parse_i64(raw: &[u8]) -> Option<i64> {
     if digits.is_empty() {
         return None;
     }
-    // Two specialized loops keeps each iteration branch-free aside from the
-    // overflow checks. Rustc usually hoists the `negative` test on its own,
-    // but spelling it out leaves nothing to chance and reads as the intent.
+    if digits.len() <= I64_FAST_DIGITS {
+        // 18 or fewer digits — both signs fit in i64 without overflow.
+        let mut acc: i64 = 0;
+        for &b in digits {
+            let d = b.wrapping_sub(b'0');
+            if d >= 10 {
+                return None;
+            }
+            acc = acc * 10 + i64::from(d);
+        }
+        return Some(if negative { -acc } else { acc });
+    }
+    // 19+ digits: i64::MIN has 19 digits ("-9223372036854775808"), so we
+    // must check at every step. Two loops to specialize add vs sub.
     let mut acc: i64 = 0;
     if negative {
         for &b in digits {
