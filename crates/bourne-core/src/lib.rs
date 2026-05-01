@@ -9,11 +9,13 @@
 
 mod error;
 mod event;
+mod lexer;
 mod parser;
 
-pub use error::{Error, ErrorKind, Position};
-pub use event::{Event, JsonNum, JsonStr};
-pub use parser::{DEFAULT_MAX_DEPTH, Parser};
+pub use error::{Error, ErrorKind, LineColumn, Position};
+pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
+pub use lexer::{DEFAULT_MAX_DEPTH, Lexer, ValueKind};
+pub use parser::Parser;
 
 #[cfg(test)]
 mod tests {

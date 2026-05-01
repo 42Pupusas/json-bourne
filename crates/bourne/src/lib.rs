@@ -17,8 +17,8 @@ extern crate alloc;
 
 mod de;
 
-pub use bourne_core::{Error, ErrorKind, Event, JsonNum, JsonStr, Parser, Position};
-pub use de::{EventSource, FromJson, parse, parse_str};
+pub use bourne_core::{Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position};
+pub use de::{FromJson, parse, parse_str};
 
 #[cfg(test)]
 mod tests {
@@ -38,77 +38,53 @@ mod tests {
     }
 
     impl<'input> FromJson<'input> for User<'input> {
-        fn from_event<S: EventSource<'input>>(
-            source: &mut S,
-            start: Event,
-        ) -> Result<Self, Error> {
-            if !matches!(start, Event::StartObject) {
-                return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
-            }
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            lex.object_start()?;
 
             let mut id: Option<u64> = None;
             let mut name: Option<&'input str> = None;
             let mut active: Option<bool> = None;
             let mut nickname: Option<&'input str> = None;
 
-            loop {
-                let ev = source
-                    .next_event()?
-                    .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-                let key = match ev {
-                    Event::EndObject => break,
-                    Event::Key(k) => k,
-                    _ => return Err(Error::new(ErrorKind::TypeMismatch, source.position())),
-                };
-                let key_str = key.as_str(source.input()).ok_or_else(|| {
-                    // Until we have a string-decoding API, escaped field names
-                    // can't be matched by value. v1 limitation, documented.
-                    Error::new(ErrorKind::InvalidEscape, source.position())
-                })?;
-
-                // Pull the value's first event up front; each branch then
-                // dispatches via T::from_event without going back to the
-                // source for it.
-                let val_ev = source.next_event()?.ok_or_else(|| {
-                    Error::new(ErrorKind::UnexpectedEof, source.position())
-                })?;
-
-                match key_str {
+            let mut maybe_key = lex.object_first_key()?;
+            while let Some(key) = maybe_key {
+                match key {
                     "id" => {
                         if id.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
+                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
                         }
-                        id = Some(u64::from_event(source, val_ev)?);
+                        id = Some(u64::from_lex(lex)?);
                     }
                     "name" => {
                         if name.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
+                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
                         }
-                        name = Some(<&str>::from_event(source, val_ev)?);
+                        name = Some(<&str>::from_lex(lex)?);
                     }
                     "active" => {
                         if active.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
+                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
                         }
-                        active = Some(bool::from_event(source, val_ev)?);
+                        active = Some(bool::from_lex(lex)?);
                     }
                     "nickname" => {
                         if nickname.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, source.position()));
+                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
                         }
-                        nickname = Option::<&str>::from_event(source, val_ev)?;
+                        nickname = Option::<&str>::from_lex(lex)?;
                     }
                     _ => {
-                        return Err(Error::new(ErrorKind::UnknownField, source.position()));
+                        return Err(Error::new(ErrorKind::UnknownField, lex.position()));
                     }
                 }
+                maybe_key = lex.object_next_key()?;
             }
 
             Ok(Self {
-                id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
-                name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+                name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
                 active: active
-                    .ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                    .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
                 nickname,
             })
         }

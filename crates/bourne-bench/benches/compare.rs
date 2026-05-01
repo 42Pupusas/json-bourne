@@ -17,9 +17,9 @@
 //!      path (where we should win biggest); the third is fair-fight
 //!      allocation-bound territory where the gap should be smaller.
 
-use bourne::{EventSource, FromJson, parse};
+use bourne::{FromJson, parse};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
-use bourne_core::{Error, ErrorKind, Event, Parser};
+use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use serde::Deserialize;
 
@@ -57,13 +57,8 @@ struct UserSerde<'a> {
 }
 
 impl<'input> FromJson<'input> for UserBourne<'input> {
-    fn from_event<S: EventSource<'input>>(
-        source: &mut S,
-        start: Event,
-    ) -> Result<Self, Error> {
-        if !matches!(start, Event::StartObject) {
-            return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
-        }
+    fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+        lex.object_start()?;
 
         let mut id: Option<u64> = None;
         let mut name: Option<&'input str> = None;
@@ -72,53 +67,38 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
         let mut bio: Option<&'input str> = None;
         let mut links: Option<Vec<&'input str>> = None;
 
-        // Fast path: drive the parser with `object_first_key` /
+        // Fast path: drive the lexer with `object_first_key` /
         // `object_next_key`, which lex the key as a borrowed `&str` and
         // leave the cursor at the field's value. For each known field we
-        // call a typed `parse_*_value` directly, skipping the `Event`
-        // streaming detour.
-        let mut maybe_key = source.object_first_key()?;
+        // call a typed `parse_*_value` (or the corresponding `from_lex`)
+        // directly — there is no streaming-event detour at all anymore.
+        let mut maybe_key = lex.object_first_key()?;
         while let Some(key) = maybe_key {
             match key {
-                "id" => id = Some(u64::try_from(source.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, source.position())
+                "id" => id = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
                 })?),
-                "name" => name = Some(source.parse_str_value()?),
-                "verified" => {
-                    let ev = source.next_event()?
-                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-                    verified = Some(bool::from_event(source, ev)?);
-                }
-                "followers" => followers = Some(u32::try_from(source.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, source.position())
+                "name" => name = Some(lex.parse_str_value()?),
+                "verified" => verified = Some(bool::from_lex(lex)?),
+                "followers" => followers = Some(u32::try_from(lex.parse_i64_value()?).map_err(|_| {
+                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
                 })?),
-                "bio" => {
-                    // Optional<&str>: peek for `null` vs string. The value
-                    // path doesn't go through Event so we hand-roll the
-                    // distinguish here.
-                    let ev = source.next_event()?
-                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-                    bio = Option::<&str>::from_event(source, ev)?;
-                }
-                "links" => {
-                    let ev = source.next_event()?
-                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-                    links = Some(Vec::<&str>::from_event(source, ev)?);
-                }
-                _ => return Err(Error::new(ErrorKind::UnknownField, source.position())),
+                "bio" => bio = Option::<&str>::from_lex(lex)?,
+                "links" => links = Some(Vec::<&str>::from_lex(lex)?),
+                _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
             }
-            maybe_key = source.object_next_key()?;
+            maybe_key = lex.object_next_key()?;
         }
 
         Ok(Self {
-            id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
-            name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+            id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             verified: verified
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             followers: followers
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             bio,
-            links: links.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+            links: links.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
         })
     }
 }

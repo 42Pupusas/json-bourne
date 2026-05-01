@@ -1,18 +1,6 @@
-use crate::error::{Error, ErrorKind, Position};
-use crate::event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
-
-/// Default maximum container nesting depth.
-///
-/// Guards against pathological inputs (e.g. millions of `[`s) that would
-/// otherwise drive recursive consumers into stack overflow. Override at
-/// compile time by parameterizing [`Parser`] with a different `MAX_DEPTH`.
-pub const DEFAULT_MAX_DEPTH: usize = 128;
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Frame {
-    Array,
-    Object,
-}
+use crate::error::{Error, ErrorKind};
+use crate::event::Event;
+use crate::lexer::{DEFAULT_MAX_DEPTH, Frame, Lexer};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum State {
@@ -28,10 +16,7 @@ enum State {
     ObjectKeyOrEnd,
     /// Inside an object, just emitted a key, expecting `:`. The streaming
     /// fast-path fuses `:` consumption with the value parse so this state
-    /// rarely surfaces in `next_event`. The fast-path object API
-    /// (`object_first_key` / `object_next_key`) consumes `:` itself and
-    /// leaves the parser in `ObjectValue` so a subsequent `next_event`
-    /// call (for a heterogeneous value) parses the value correctly.
+    /// rarely surfaces in `next_event`.
     ObjectColon,
     /// Inside an object, after `:`, expecting a value. Used by the
     /// fast-path object API as a handoff point when the caller falls back
@@ -47,69 +32,21 @@ enum State {
 /// returns one [`Event`]. Returns `Ok(None)` once the document has been fully
 /// consumed (and any trailing whitespace has been validated).
 ///
+/// `Parser` is the streaming API. It owns a [`Lexer`] (the byte walker) plus
+/// a small grammar state machine that enforces JSON's "value, then comma,
+/// then value" structure when emitting events serially. Typed consumers
+/// (`bourne::FromJson`) drive the lexer directly and bypass this state
+/// machine — for them, the type's recursive structure already enforces the
+/// grammar, and the dispatch through `match self.state` is pure overhead.
+///
 /// `MAX_DEPTH` is the maximum nesting depth of containers the parser will
 /// accept. It is also the size of the inline nesting stack, so picking a
 /// small value reduces the parser's stack footprint as well as bounding
 /// untrusted input. The default is [`DEFAULT_MAX_DEPTH`].
 #[derive(Debug)]
 pub struct Parser<'input, const MAX_DEPTH: usize = DEFAULT_MAX_DEPTH> {
-    input: &'input [u8],
-    /// Byte offset of the next-to-read byte. Line and column are reconstructed
-    /// lazily from `input[..offset]` whenever a `Position` is needed (errors,
-    /// public `position()` calls). The hot path never touches them, which is
-    /// what lets `bump()` compile to a single increment.
-    offset: usize,
+    lex: Lexer<'input, MAX_DEPTH>,
     state: State,
-    stack: Stack<MAX_DEPTH>,
-}
-
-/// Fixed-capacity nesting stack. Avoids `alloc` for the parser itself.
-///
-/// Capacity is fixed at compile time by `Parser`'s `MAX_DEPTH` parameter,
-/// so the inline array sized to it is also the depth bound.
-#[derive(Debug)]
-struct Stack<const MAX_DEPTH: usize> {
-    frames: [Frame; MAX_DEPTH],
-    len: usize,
-}
-
-impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
-    const fn new() -> Self {
-        Self {
-            frames: [Frame::Array; MAX_DEPTH],
-            len: 0,
-        }
-    }
-
-    const fn push(&mut self, frame: Frame) -> Result<(), ()> {
-        if self.len >= MAX_DEPTH {
-            return Err(());
-        }
-        self.frames[self.len] = frame;
-        self.len += 1;
-        Ok(())
-    }
-
-    const fn pop(&mut self) -> Option<Frame> {
-        if self.len == 0 {
-            None
-        } else {
-            self.len -= 1;
-            Some(self.frames[self.len])
-        }
-    }
-
-    const fn top(&self) -> Option<Frame> {
-        if self.len == 0 {
-            None
-        } else {
-            Some(self.frames[self.len - 1])
-        }
-    }
-
-    const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
 }
 
 impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
@@ -117,34 +54,32 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     ///
     /// # Panics
     ///
-    /// Panics if `input.len() > MAX_INPUT_LEN` (~2 GB). The packed offset
-    /// representation in `JsonStr`/`JsonNum` reserves the top bit of a `u32`
-    /// for `has_escapes`, so positions are limited to 31 bits. Real-world
-    /// JSON documents are far smaller than this; consumers needing larger
-    /// streams should chunk and parse incrementally.
+    /// Panics if `input.len()` exceeds `MAX_INPUT_LEN`. See
+    /// [`Lexer::new`].
     #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
-        assert!(input.len() <= MAX_INPUT_LEN, "input exceeds MAX_INPUT_LEN");
         Self {
-            input,
-            offset: 0,
+            lex: Lexer::new(input),
             state: State::Start,
-            stack: Stack::new(),
         }
     }
 
-    #[must_use]
-    pub const fn position(&self) -> Position {
-        compute_position(self.input, self.offset)
+    /// Borrow the underlying lexer mutably. Typed consumers use this to
+    /// drive parsing directly without going through the `next_event`
+    /// state machine.
+    pub const fn lexer(&mut self) -> &mut Lexer<'input, MAX_DEPTH> {
+        &mut self.lex
     }
 
-    /// The input slice the parser was constructed with. Consumers use this
-    /// to materialize `&str`/`&[u8]` from `JsonStr` and `JsonNum`, which
-    /// store offsets rather than fat pointers (so the `Event` enum fits in
-    /// one xmm register).
+    #[must_use]
+    pub const fn position(&self) -> crate::error::Position {
+        self.lex.position()
+    }
+
+    /// The input slice the parser was constructed with.
     #[must_use]
     pub const fn input(&self) -> &'input [u8] {
-        self.input
+        self.lex.input()
     }
 
     // The state machine is intrinsically large — splitting it would scatter
@@ -152,173 +87,110 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     #[allow(clippy::too_many_lines)]
     pub fn next_event(&mut self) -> Result<Option<Event>, Error> {
         loop {
-            self.skip_whitespace();
+            self.lex.skip_whitespace();
             return match self.state {
-                State::Start => match self.peek() {
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                State::Start => match self.lex.peek() {
+                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
                     Some(_) => {
-                        let ev = self.parse_value()?;
-                        // If the value opened a container, we stay inside it;
-                        // otherwise the document is done.
-                        if self.stack.is_empty() {
-                            self.state = State::DocumentEnd;
-                        }
+                        let ev = self.lex.read_value()?;
+                        self.state = match ev {
+                            Event::StartObject => State::ObjectKeyOrEnd,
+                            Event::StartArray => State::ArrayValueOrEnd,
+                            _ => State::DocumentEnd,
+                        };
                         Ok(Some(ev))
                     }
                 },
                 State::DocumentEnd => {
-                    if self.peek().is_some() {
-                        Err(self.err(ErrorKind::TrailingData))
+                    if self.lex.peek().is_some() {
+                        Err(self.lex.err(ErrorKind::TrailingData))
                     } else {
                         Ok(None)
                     }
                 }
-                State::ArrayValueOrEnd => match self.peek() {
+                State::ArrayValueOrEnd => match self.lex.peek() {
                     Some(b']') => {
-                        self.bump();
+                        self.lex.bump();
                         Ok(Some(self.close_container(Frame::Array)?))
                     }
                     Some(_) => {
-                        let ev = self.parse_value()?;
-                        if matches!(
-                            ev,
-                            Event::String(_)
-                                | Event::Number(_)
-                                | Event::Bool(_)
-                                | Event::Null
-                                | Event::EndArray
-                                | Event::EndObject
-                        ) {
-                            // Scalar (or just-closed container) → expect `,` or `]` next.
-                            self.state = State::ArrayCommaOrEnd;
-                        }
+                        let ev = self.lex.read_value()?;
+                        self.state = state_after_value(&ev, State::ArrayCommaOrEnd);
                         Ok(Some(ev))
                     }
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
                 },
-                State::ArrayCommaOrEnd => match self.peek() {
+                State::ArrayCommaOrEnd => match self.lex.peek() {
                     Some(b',') => {
-                        // After `,` inside an array we already know the next
-                        // token must be a value (or an error for `,]`). Skip
-                        // the loop-continue + state-table re-dispatch and go
-                        // straight to parse_value here. For integer-array
-                        // workloads this collapses 6+ jumps per element into
-                        // a single fused path.
-                        self.bump();
-                        self.skip_whitespace();
-                        if self.peek() == Some(b']') {
-                            return Err(self.err(ErrorKind::UnexpectedByte(b']')));
+                        self.lex.bump();
+                        self.lex.skip_whitespace();
+                        if self.lex.peek() == Some(b']') {
+                            return Err(self.lex.err(ErrorKind::UnexpectedByte(b']')));
                         }
-                        let ev = self.parse_value()?;
-                        if matches!(
-                            ev,
-                            Event::String(_)
-                                | Event::Number(_)
-                                | Event::Bool(_)
-                                | Event::Null
-                                | Event::EndArray
-                                | Event::EndObject
-                        ) {
-                            self.state = State::ArrayCommaOrEnd;
-                        }
+                        let ev = self.lex.read_value()?;
+                        self.state = state_after_value(&ev, State::ArrayCommaOrEnd);
                         Ok(Some(ev))
                     }
                     Some(b']') => {
-                        self.bump();
+                        self.lex.bump();
                         Ok(Some(self.close_container(Frame::Array)?))
                     }
-                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
                 },
-                State::ObjectKeyOrEnd => match self.peek() {
+                State::ObjectKeyOrEnd => match self.lex.peek() {
                     Some(b'}') => {
-                        self.bump();
+                        self.lex.bump();
                         Ok(Some(self.close_container(Frame::Object)?))
                     }
                     Some(b'"') => {
-                        let s = self.parse_string()?;
+                        let s = self.lex.read_string()?;
                         self.state = State::ObjectColon;
                         Ok(Some(Event::Key(s)))
                     }
-                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
                 },
-                State::ObjectColon => match self.peek() {
+                State::ObjectColon => match self.lex.peek() {
                     Some(b':') => {
-                        // Same fusion as ArrayCommaOrEnd's `,` arm: after `:`
-                        // we know the next event is a value, so parse it here
-                        // instead of falling back into the state-table loop.
-                        self.bump();
-                        self.skip_whitespace();
-                        let ev = self.parse_value()?;
-                        if matches!(
-                            ev,
-                            Event::String(_)
-                                | Event::Number(_)
-                                | Event::Bool(_)
-                                | Event::Null
-                                | Event::EndArray
-                                | Event::EndObject
-                        ) {
-                            self.state = State::ObjectCommaOrEnd;
-                        }
+                        self.lex.bump();
+                        self.lex.skip_whitespace();
+                        let ev = self.lex.read_value()?;
+                        self.state = state_after_value(&ev, State::ObjectCommaOrEnd);
                         Ok(Some(ev))
                     }
-                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
                 },
-                // Reached when the fast-path object API (`object_first_key`
-                // / `object_next_key`) consumed `:` itself and handed off
-                // to `next_event` for the value. Same body as the second
-                // half of `ObjectColon`'s `:` arm above.
                 State::ObjectValue => {
-                    let ev = self.parse_value()?;
-                    if matches!(
-                        ev,
-                        Event::String(_)
-                            | Event::Number(_)
-                            | Event::Bool(_)
-                            | Event::Null
-                            | Event::EndArray
-                            | Event::EndObject
-                    ) {
-                        self.state = State::ObjectCommaOrEnd;
-                    }
+                    let ev = self.lex.read_value()?;
+                    self.state = state_after_value(&ev, State::ObjectCommaOrEnd);
                     Ok(Some(ev))
                 }
-                State::ObjectCommaOrEnd => match self.peek() {
+                State::ObjectCommaOrEnd => match self.lex.peek() {
                     Some(b',') => {
-                        self.bump();
-                        // After `,` inside an object, only a key is valid (no trailing comma).
+                        self.lex.bump();
                         self.state = State::ObjectKeyOrEnd;
-                        // But `,` followed by `}` is *not* allowed, so we need
-                        // to actually require a key here, not "key or end".
-                        // Re-enter the loop; ObjectKeyOrEnd will reject `}` for us
-                        // by... actually it accepts `}`. Fix: distinguish the two.
-                        // We use ObjectColon-style trick: peek ahead.
-                        self.skip_whitespace();
-                        if self.peek() == Some(b'}') {
-                            return Err(self.err(ErrorKind::UnexpectedByte(b'}')));
+                        self.lex.skip_whitespace();
+                        if self.lex.peek() == Some(b'}') {
+                            return Err(self.lex.err(ErrorKind::UnexpectedByte(b'}')));
                         }
                         continue;
                     }
                     Some(b'}') => {
-                        self.bump();
+                        self.lex.bump();
                         Ok(Some(self.close_container(Frame::Object)?))
                     }
-                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
                 },
             };
         }
     }
 
     fn close_container(&mut self, expected: Frame) -> Result<Event, Error> {
-        let popped = self.stack.pop().ok_or_else(|| self.err(ErrorKind::UnexpectedByte(b']')))?;
-        if popped != expected {
-            return Err(self.err(ErrorKind::TypeMismatch));
-        }
-        self.state = match self.stack.top() {
+        self.lex.pop_frame(expected)?;
+        self.state = match self.lex.stack.top() {
             None => State::DocumentEnd,
             Some(Frame::Array) => State::ArrayCommaOrEnd,
             Some(Frame::Object) => State::ObjectCommaOrEnd,
@@ -329,604 +201,82 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         })
     }
 
-    #[inline]
-    fn parse_value(&mut self) -> Result<Event, Error> {
-        let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
-        match b {
-            b'{' => {
-                self.bump();
-                self.push_frame(Frame::Object)?;
-                self.state = State::ObjectKeyOrEnd;
-                Ok(Event::StartObject)
-            }
-            b'[' => {
-                self.bump();
-                self.push_frame(Frame::Array)?;
-                self.state = State::ArrayValueOrEnd;
-                Ok(Event::StartArray)
-            }
-            b'"' => self.parse_string().map(Event::String),
-            b't' => self.parse_keyword(b"true", Event::Bool(true)),
-            b'f' => self.parse_keyword(b"false", Event::Bool(false)),
-            b'n' => self.parse_keyword(b"null", Event::Null),
-            b'-' | b'0'..=b'9' => self.parse_number().map(Event::Number),
-            other => Err(self.err(ErrorKind::UnexpectedByte(other))),
-        }
-    }
+    // -----------------------------------------------------------------
+    // Fast-path methods for typed consumers.
+    //
+    // These mirror the methods on `Lexer` but additionally synchronize
+    // `self.state` so a subsequent `next_event` call resumes correctly.
+    // Typed consumers that drive the lexer directly via `Parser::lexer()`
+    // skip these and avoid the state writes entirely.
+    // -----------------------------------------------------------------
 
-    fn push_frame(&mut self, frame: Frame) -> Result<(), Error> {
-        self.stack
-            .push(frame)
-            .map_err(|()| self.err(ErrorKind::DepthLimitExceeded))
-    }
-
-    fn parse_keyword(&mut self, kw: &[u8], event: Event) -> Result<Event, Error> {
-        for &expected in kw {
-            match self.peek() {
-                Some(b) if b == expected => self.bump(),
-                Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                None => return Err(self.err(ErrorKind::UnexpectedEof)),
-            }
-        }
-        Ok(event)
-    }
-
-    fn parse_string(&mut self) -> Result<JsonStr, Error> {
-        debug_assert_eq!(self.peek(), Some(b'"'));
-        self.bump(); // opening quote
-        let start = self.offset;
-        let mut has_escapes = false;
-        loop {
-            let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
-            match b {
-                b'"' => {
-                    let end = self.offset;
-                    self.bump(); // closing quote
-                    if has_escapes {
-                        // Escape syntax (and the surrogate pairing rules) is
-                        // not part of the byte-walk above; validate it once
-                        // here. Full decode is still the consumer's job.
-                        let raw = &self.input[start..end];
-                        validate_escapes(raw)
-                            .map_err(|kind| self.err(kind))?;
-                    }
-                    // The JsonStr just stores offsets; consumers materialize
-                    // a `&str`/`&[u8]` lazily via `as_str(input)`. The
-                    // unsafe `from_utf8_unchecked` lives there now (with
-                    // the same RFC 3629 inline-validation safety argument).
-                    // `Parser::new` capped input at MAX_INPUT_LEN, so the
-                    // offsets fit in 31 bits and the `as u32` is lossless.
-                    #[allow(clippy::cast_possible_truncation)]
-                    return Ok(JsonStr::new(start as u32, end as u32, has_escapes));
-                }
-                b'\\' => {
-                    has_escapes = true;
-                    self.bump();
-                    // Consume one escape so the closing quote isn't mistaken.
-                    match self.peek() {
-                        Some(b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't') => {
-                            self.bump();
-                        }
-                        Some(b'u') => {
-                            self.bump();
-                            for _ in 0..4 {
-                                match self.peek() {
-                                    Some(b) if b.is_ascii_hexdigit() => self.bump(),
-                                    Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                                    None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                                }
-                            }
-                        }
-                        Some(_) => return Err(self.err(ErrorKind::InvalidEscape)),
-                        None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                    }
-                }
-                0..=0x1F => return Err(self.err(ErrorKind::ControlCharInString)),
-                0x20..=0x7F => {
-                    // Plain ASCII inside the string — scan the run all at once
-                    // so the inner loop is just a memchr-style "find next
-                    // interesting byte" rather than per-byte bump/peek.
-                    self.scan_ascii_string_run();
-                }
-                // High-bit byte: start of a multi-byte UTF-8 sequence.
-                // Consume the leading byte and the correct number of
-                // continuation bytes, validating each as we go. Avoids the
-                // separate `from_utf8` pass over the whole string at the end.
-                _ => self.consume_utf8_multibyte()?,
-            }
-        }
-    }
-
-    /// Advance past a run of plain ASCII bytes (0x20..=0x7F minus `"` and `\`).
-    ///
-    /// Stops when the next byte is `"`, `\`, a control char (<0x20), or a
-    /// high-bit byte. The caller's outer loop then dispatches on what we left.
-    fn scan_ascii_string_run(&mut self) {
-        // Stop conditions: `"` (0x22), `\` (0x5C), control char (<0x20),
-        // or high-bit byte (>=0x80). Frame this as "subtract 0x20, then
-        // any byte that lands outside 0x00..=0x5F (i.e. in 0x60..) is
-        // either a high-bit byte or a control char (which wrapped through
-        // 0). Combined with the two specific-byte checks, the per-byte
-        // test compiles to two compares + one mask, no table lookup."
-        let bytes = self.input;
-        let mut i = self.offset;
-        let end = bytes.len();
-        while i < end {
-            let b = bytes[i];
-            if b == b'"' || b == b'\\' || !(0x20..0x80).contains(&b) {
-                break;
-            }
-            i += 1;
-        }
-        self.offset = i;
-    }
-
-    /// Consume a UTF-8 multi-byte sequence starting at the current position.
-    ///
-    /// Called only when `peek()` has returned a byte >= 0x80. Validates
-    /// length-encoding against the byte ranges allowed by RFC 3629
-    /// (no overlongs, no surrogates, no codepoints above U+10FFFF) so
-    /// the resulting slice is guaranteed valid UTF-8.
-    fn consume_utf8_multibyte(&mut self) -> Result<(), Error> {
-        // SAFETY of correctness: this mirrors the table in RFC 3629
-        // section 4 — same bounds, same rejected ranges. Codepoints
-        // outside U+10FFFF and the surrogate range U+D800..=U+DFFF are
-        // rejected by the per-byte range checks below.
-        let leading = self
-            .peek()
-            .ok_or_else(|| self.err(ErrorKind::InvalidUtf8))?;
-
-        // Per RFC 3629: legal leading byte ranges and the ranges their
-        // continuations may take.
-        let (extra, second_lo, second_hi) = match leading {
-            0xC2..=0xDF => (1, 0x80, 0xBF),
-            0xE0 => (2, 0xA0, 0xBF),       // disallow overlong 3-byte
-            0xE1..=0xEC | 0xEE..=0xEF => (2, 0x80, 0xBF),
-            0xED => (2, 0x80, 0x9F),       // exclude surrogates
-            0xF0 => (3, 0x90, 0xBF),       // disallow overlong 4-byte
-            0xF1..=0xF3 => (3, 0x80, 0xBF),
-            0xF4 => (3, 0x80, 0x8F),       // cap at U+10FFFF
-            _ => return Err(self.err(ErrorKind::InvalidUtf8)),
-        };
-        self.bump();
-
-        // Second byte has tighter bounds; remaining bytes are plain 0x80..=0xBF.
-        match self.peek() {
-            Some(b) if b >= second_lo && b <= second_hi => self.bump(),
-            _ => return Err(self.err(ErrorKind::InvalidUtf8)),
-        }
-        for _ in 1..extra {
-            match self.peek() {
-                Some(0x80..=0xBF) => self.bump(),
-                _ => return Err(self.err(ErrorKind::InvalidUtf8)),
-            }
-        }
-        Ok(())
-    }
-
-    /// Parse a JSON integer directly into `i64`, fusing lex and conversion.
-    ///
-    /// The streaming path goes byte → `JsonNum` offsets → second walk in
-    /// `as_i64` to compute the value — every digit gets touched twice.
-    /// This method walks the digits once, accumulating in step.
-    ///
-    /// Caller must position the parser at the first byte of the value
-    /// (after any whitespace). Returns the parsed `i64` and leaves the
-    /// cursor at the byte after the number. Rejects fractional and
-    /// exponent forms — those are not integers.
     pub fn parse_i64_value(&mut self) -> Result<i64, Error> {
-        let start = self.offset;
-        let bytes = self.input;
-        let end = bytes.len();
-        let mut i = start;
-
-        let negative = matches!(bytes.get(i), Some(&b'-'));
-        if negative {
-            i += 1;
-        }
-
-        // Integer part: leading `0` alone, or `1-9` followed by digits.
-        // Same grammar as parse_number's lex pass.
-        let digits_start = i;
-        match bytes.get(i).copied() {
-            Some(b'0') => i += 1,
-            Some(b'1'..=b'9') => {
-                // Walk the run while accumulating. Up to 18 digits is
-                // safe without overflow checks (fits in i64 unsigned).
-                // Beyond 18, fall back to checked arithmetic.
-                let mut acc: i64 = 0;
-                let mut count: u32 = 0;
-                while i < end {
-                    let d = bytes[i].wrapping_sub(b'0');
-                    if d >= 10 {
-                        break;
-                    }
-                    if count < 18 {
-                        acc = acc * 10 + i64::from(d);
-                    } else {
-                        acc = acc
-                            .checked_mul(10)
-                            .and_then(|v| v.checked_add(i64::from(d)))
-                            .ok_or_else(|| {
-                                self.offset = i;
-                                self.err(ErrorKind::NumberOutOfRange)
-                            })?;
-                    }
-                    i += 1;
-                    count += 1;
-                }
-                if i == digits_start {
-                    self.offset = i;
-                    return Err(self.err(ErrorKind::InvalidNumber));
-                }
-                self.offset = i;
-                // Reject fraction / exponent — those aren't integers.
-                if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
-                    return Err(self.err(ErrorKind::ExpectedNumber));
-                }
-                if negative {
-                    return Ok(-acc);
-                }
-                return Ok(acc);
-            }
-            Some(b) => {
-                self.offset = i;
-                return Err(self.err(ErrorKind::UnexpectedByte(b)));
-            }
-            None => {
-                self.offset = i;
-                return Err(self.err(ErrorKind::UnexpectedEof));
-            }
-        }
-        // Lone `0` case (or `-0`).
-        self.offset = i;
-        if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
-            return Err(self.err(ErrorKind::ExpectedNumber));
-        }
-        Ok(0)
+        self.lex.parse_i64_value()
     }
 
-    /// Parse a JSON string, returning a borrowed `&'input str`. Errors if
-    /// the string contains escape sequences — those require a caller-owned
-    /// decode buffer, which `bourne` does not allocate.
-    ///
-    /// Caller must position the parser at the opening `"`. On return the
-    /// cursor is past the closing `"`. The returned slice points into the
-    /// original input — zero copy.
-    ///
-    /// Used by the typed `Vec<&'input str>` fast path to skip the
-    /// per-element `next_event` / `Event::String` / `from_event` chain and
-    /// dispatch directly from the input bytes to the borrowed slice.
     pub fn parse_str_value(&mut self) -> Result<&'input str, Error> {
-        match self.peek() {
-            Some(b'"') => self.bump(),
-            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => return Err(self.err(ErrorKind::UnexpectedEof)),
-        }
-        let start = self.offset;
-        loop {
-            let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
-            match b {
-                b'"' => {
-                    let end = self.offset;
-                    self.bump();
-                    let raw = &self.input[start..end];
-                    // SAFETY: every byte was validated against the RFC 3629
-                    // ranges by the byte walk above (ASCII fast arm or
-                    // `consume_utf8_multibyte`). Same argument as
-                    // `JsonStr::as_str`.
-                    return Ok(unsafe { core::str::from_utf8_unchecked(raw) });
-                }
-                b'\\' => {
-                    // Escaped strings need a decode buffer; fast path can't
-                    // produce a borrowed `&str`. Surface the dedicated error
-                    // so consumers fall back to the streaming decode path.
-                    return Err(self.err(ErrorKind::InvalidEscape));
-                }
-                0..=0x1F => return Err(self.err(ErrorKind::ControlCharInString)),
-                0x20..=0x7F => self.scan_ascii_string_run(),
-                _ => self.consume_utf8_multibyte()?,
-            }
-        }
+        self.lex.parse_str_value()
     }
 
-    /// Skip whitespace then expect `,` or the array-end byte. Returns
-    /// `true` if at end (caller should stop), `false` to continue with
-    /// another element. Used by the typed `Vec<i64>` fast path.
-    ///
-    /// On `]` this also runs the same stack/state bookkeeping as
-    /// `next_event` would have, so the parser is left in a state where
-    /// a subsequent `next_event` call resumes correctly (returns `None`
-    /// at document end, or the next sibling event in a nested context).
-    #[inline]
-    pub fn array_continue(&mut self, end_byte: u8) -> Result<bool, Error> {
-        self.skip_whitespace();
-        match self.peek() {
-            Some(b) if b == end_byte => {
-                self.bump();
-                let frame = if end_byte == b']' { Frame::Array } else { Frame::Object };
-                let _ = self.close_container(frame)?;
-                Ok(true)
-            }
-            Some(b',') => {
-                self.bump();
-                self.skip_whitespace();
-                Ok(false)
-            }
-            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => Err(self.err(ErrorKind::UnexpectedEof)),
-        }
-    }
-
-    /// After a `StartObject` event, return the next key as a borrowed
-    /// `&'input str`, or `None` if the object closes immediately. The
-    /// cursor is left positioned at the byte after the key's `:`, ready
-    /// for the caller to parse the field's value.
-    ///
-    /// On the closing `}` this also runs the stack/state bookkeeping
-    /// `next_event` would have run. On a returned key, `state` is set to
-    /// `ObjectValue` so the caller can call `next_event` to consume the
-    /// value through the streaming path if no fast-path method fits.
-    #[inline]
-    pub fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
-        self.skip_whitespace();
-        match self.peek() {
-            Some(b'}') => {
-                self.bump();
-                let _ = self.close_container(Frame::Object)?;
-                Ok(None)
-            }
-            Some(b'"') => {
-                let key = self.parse_str_value()?;
-                self.skip_whitespace();
-                match self.peek() {
-                    Some(b':') => self.bump(),
-                    Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                }
-                self.skip_whitespace();
-                self.state = State::ObjectValue;
-                Ok(Some(key))
-            }
-            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => Err(self.err(ErrorKind::UnexpectedEof)),
-        }
-    }
-
-    /// After a field's value, advance to the next key or close the
-    /// object. Returns `Some(key)` for the next field or `None` if the
-    /// object closed (`}` consumed and stack popped). Caller must have
-    /// just finished consuming a value.
-    #[inline]
-    pub fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
-        self.skip_whitespace();
-        match self.peek() {
-            Some(b'}') => {
-                self.bump();
-                let _ = self.close_container(Frame::Object)?;
-                Ok(None)
-            }
-            Some(b',') => {
-                self.bump();
-                self.skip_whitespace();
-                match self.peek() {
-                    Some(b'"') => {
-                        let key = self.parse_str_value()?;
-                        self.skip_whitespace();
-                        match self.peek() {
-                            Some(b':') => self.bump(),
-                            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                            None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                        }
-                        self.skip_whitespace();
-                        self.state = State::ObjectValue;
-                        Ok(Some(key))
-                    }
-                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
-                }
-            }
-            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => Err(self.err(ErrorKind::UnexpectedEof)),
-        }
-    }
-
-    /// Expect the byte that opens an array (`[`), advance past it, and
-    /// skip whitespace to the first element (or `]`). Returns `true` if
-    /// the array is empty (the caller saw a closing `]` immediately).
-    #[inline]
+    /// On `[` push a frame and, for empty arrays, pop and synchronize state.
     pub fn array_start(&mut self) -> Result<bool, Error> {
-        self.skip_whitespace();
-        match self.peek() {
-            Some(b'[') => {
-                self.bump();
-                self.skip_whitespace();
-                if self.peek() == Some(b']') {
-                    self.bump();
-                    Ok(true)
-                } else {
-                    Ok(false)
-                }
-            }
-            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => Err(self.err(ErrorKind::UnexpectedEof)),
-        }
-    }
-
-    #[inline]
-    fn parse_number(&mut self) -> Result<JsonNum, Error> {
-        let start = self.offset;
-
-        if self.peek() == Some(b'-') {
-            self.bump();
-        }
-
-        // integer part
-        match self.peek() {
-            Some(b'0') => {
-                self.bump();
-            }
-            Some(b'1'..=b'9') => {
-                self.bump();
-                self.scan_digit_run();
-            }
-            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => return Err(self.err(ErrorKind::UnexpectedEof)),
-        }
-
-        // optional fraction
-        if self.peek() == Some(b'.') {
-            self.bump();
-            let frac_start = self.offset;
-            self.scan_digit_run();
-            if self.offset == frac_start {
-                return Err(self.err(ErrorKind::InvalidNumber));
-            }
-        }
-
-        // optional exponent
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            self.bump();
-            if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.bump();
-            }
-            let exp_start = self.offset;
-            self.scan_digit_run();
-            if self.offset == exp_start {
-                return Err(self.err(ErrorKind::InvalidNumber));
-            }
-        }
-
-        // Same `as u32` lossless argument as parse_string — see Parser::new.
-        #[allow(clippy::cast_possible_truncation)]
-        let result = JsonNum::new(start as u32, self.offset as u32);
-        Ok(result)
-    }
-
-    /// Advance over a run of ASCII digits without per-byte position tracking.
-    ///
-    /// This is the inner loop of integer-array parsing. By scanning a slice
-    /// directly and writing `self.offset` once at the end, the per-byte
-    /// store-pos.offset / store-pos.column traffic that dominated the old
-    /// `peek/bump` version is eliminated.
-    fn scan_digit_run(&mut self) {
-        let bytes = self.input;
-        let mut i = self.offset;
-        let end = bytes.len();
-        while i < end {
-            let b = bytes[i];
-            // ASCII-digit fast path: `b - b'0' < 10` only for digits.
-            if b.wrapping_sub(b'0') >= 10 {
-                break;
-            }
-            i += 1;
-        }
-        self.offset = i;
-    }
-
-    fn skip_whitespace(&mut self) {
-        let bytes = self.input;
-        let mut i = self.offset;
-        let end = bytes.len();
-        while i < end {
-            let b = bytes[i];
-            if b == b' ' || b == b'\t' || b == b'\n' || b == b'\r' {
-                i += 1;
-            } else {
-                break;
-            }
-        }
-        self.offset = i;
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.input.get(self.offset).copied()
-    }
-
-    /// Advance one byte. Caller must have verified there is one (e.g. via a
-    /// prior `peek()` returning `Some`). The hot path only ever calls this
-    /// after a successful peek, so the bounds check is redundant — keep it
-    /// as a debug assertion to catch any future caller mistakes without
-    /// paying for it in release.
-    fn bump(&mut self) {
-        debug_assert!(self.offset < self.input.len());
-        self.offset += 1;
-    }
-
-    const fn err(&self, kind: ErrorKind) -> Error {
-        Error::new(kind, compute_position(self.input, self.offset))
-    }
-}
-
-/// Build a `Position` for a given byte offset.
-///
-/// Trivial now — the position is just the offset. Line/column are
-/// reconstructed lazily via `Position::resolve(input)` only when an error
-/// is actually rendered or the consumer explicitly asks. Capping input
-/// length at `Parser::new` means the `as u32` is lossless.
-#[allow(clippy::cast_possible_truncation)]
-const fn compute_position(_input: &[u8], offset: usize) -> Position {
-    Position::new(offset as u32)
-}
-
-/// Validate that all `\` escapes inside `raw` are well-formed.
-///
-/// Walks the slice without decoding into an output buffer. Surrogate
-/// pairing rules (high surrogate must be followed by low surrogate) are
-/// enforced here so consumers don't need to redo the work.
-fn validate_escapes(raw: &[u8]) -> Result<(), ErrorKind> {
-    let mut i = 0;
-    while i < raw.len() {
-        let b = raw[i];
-        if b == b'\\' {
-            i += 1;
-            if i >= raw.len() {
-                return Err(ErrorKind::InvalidEscape);
-            }
-            match raw[i] {
-                b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => i += 1,
-                b'u' => {
-                    if i + 5 > raw.len() {
-                        return Err(ErrorKind::InvalidUnicodeEscape);
-                    }
-                    let cp = parse_hex4(&raw[i + 1..i + 5])?;
-                    i += 5;
-                    if (0xD800..=0xDBFF).contains(&cp) {
-                        // High surrogate — must be followed by \uDC00..=\uDFFF.
-                        if i + 6 > raw.len() || raw[i] != b'\\' || raw[i + 1] != b'u' {
-                            return Err(ErrorKind::UnpairedSurrogate);
-                        }
-                        let low = parse_hex4(&raw[i + 2..i + 6])?;
-                        if !(0xDC00..=0xDFFF).contains(&low) {
-                            return Err(ErrorKind::UnpairedSurrogate);
-                        }
-                        i += 6;
-                    } else if (0xDC00..=0xDFFF).contains(&cp) {
-                        // Lone low surrogate.
-                        return Err(ErrorKind::UnpairedSurrogate);
-                    }
-                }
-                _ => return Err(ErrorKind::InvalidEscape),
-            }
-        } else if b < 0x20 {
-            return Err(ErrorKind::ControlCharInString);
+        let empty = self.lex.array_start()?;
+        if empty {
+            self.state = match self.lex.stack.top() {
+                None => State::DocumentEnd,
+                Some(Frame::Array) => State::ArrayCommaOrEnd,
+                Some(Frame::Object) => State::ObjectCommaOrEnd,
+            };
         } else {
-            i += 1;
+            self.state = State::ArrayValueOrEnd;
         }
+        Ok(empty)
     }
-    Ok(())
+
+    pub fn array_continue(&mut self, end_byte: u8) -> Result<bool, Error> {
+        let closed = self.lex.array_continue(end_byte)?;
+        if closed {
+            self.state = match self.lex.stack.top() {
+                None => State::DocumentEnd,
+                Some(Frame::Array) => State::ArrayCommaOrEnd,
+                Some(Frame::Object) => State::ObjectCommaOrEnd,
+            };
+        }
+        Ok(closed)
+    }
+
+    pub fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
+        let key = self.lex.object_first_key()?;
+        self.state = match key {
+            None => match self.lex.stack.top() {
+                None => State::DocumentEnd,
+                Some(Frame::Array) => State::ArrayCommaOrEnd,
+                Some(Frame::Object) => State::ObjectCommaOrEnd,
+            },
+            Some(_) => State::ObjectValue,
+        };
+        Ok(key)
+    }
+
+    pub fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
+        let key = self.lex.object_next_key()?;
+        self.state = match key {
+            None => match self.lex.stack.top() {
+                None => State::DocumentEnd,
+                Some(Frame::Array) => State::ArrayCommaOrEnd,
+                Some(Frame::Object) => State::ObjectCommaOrEnd,
+            },
+            Some(_) => State::ObjectValue,
+        };
+        Ok(key)
+    }
 }
 
-fn parse_hex4(bytes: &[u8]) -> Result<u32, ErrorKind> {
-    let mut v: u32 = 0;
-    for &b in bytes {
-        let d = match b {
-            b'0'..=b'9' => b - b'0',
-            b'a'..=b'f' => b - b'a' + 10,
-            b'A'..=b'F' => b - b'A' + 10,
-            _ => return Err(ErrorKind::InvalidUnicodeEscape),
-        };
-        v = (v << 4) | u32::from(d);
+#[inline]
+const fn state_after_value(ev: &Event, scalar_next: State) -> State {
+    match ev {
+        Event::StartObject => State::ObjectKeyOrEnd,
+        Event::StartArray => State::ArrayValueOrEnd,
+        _ => scalar_next,
     }
-    Ok(v)
 }

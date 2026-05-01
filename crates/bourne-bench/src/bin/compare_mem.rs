@@ -12,10 +12,10 @@
 //! Run:
 //!   cargo run --release --features compare-mem --bin compare_mem
 
-use bourne::{EventSource, FromJson, parse};
+use bourne::{FromJson, parse};
 use bourne_alloctest::measure;
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
-use bourne_core::{Error, ErrorKind, Event, Parser};
+use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
@@ -47,53 +47,36 @@ struct UserSerde<'a> {
 }
 
 impl<'input> FromJson<'input> for UserBourne<'input> {
-    fn from_event<S: EventSource<'input>>(
-        source: &mut S,
-        start: Event,
-    ) -> Result<Self, Error> {
-        if !matches!(start, Event::StartObject) {
-            return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
-        }
+    fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+        lex.object_start()?;
         let mut id: Option<u64> = None;
         let mut name: Option<&'input str> = None;
         let mut verified: Option<bool> = None;
         let mut followers: Option<u32> = None;
         let mut bio: Option<&'input str> = None;
         let mut links: Option<Vec<&'input str>> = None;
-        loop {
-            let ev = source
-                .next_event()?
-                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-            let key = match ev {
-                Event::EndObject => break,
-                Event::Key(k) => k,
-                _ => return Err(Error::new(ErrorKind::TypeMismatch, source.position())),
-            };
-            let key_str = key
-                .as_str(source.input())
-                .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, source.position()))?;
-            let val_ev = source
-                .next_event()?
-                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-            match key_str {
-                "id" => id = Some(u64::from_event(source, val_ev)?),
-                "name" => name = Some(<&str>::from_event(source, val_ev)?),
-                "verified" => verified = Some(bool::from_event(source, val_ev)?),
-                "followers" => followers = Some(u32::from_event(source, val_ev)?),
-                "bio" => bio = Option::<&str>::from_event(source, val_ev)?,
-                "links" => links = Some(Vec::<&str>::from_event(source, val_ev)?),
-                _ => return Err(Error::new(ErrorKind::UnknownField, source.position())),
+        let mut maybe_key = lex.object_first_key()?;
+        while let Some(key) = maybe_key {
+            match key {
+                "id" => id = Some(u64::from_lex(lex)?),
+                "name" => name = Some(<&str>::from_lex(lex)?),
+                "verified" => verified = Some(bool::from_lex(lex)?),
+                "followers" => followers = Some(u32::from_lex(lex)?),
+                "bio" => bio = Option::<&str>::from_lex(lex)?,
+                "links" => links = Some(Vec::<&str>::from_lex(lex)?),
+                _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
             }
+            maybe_key = lex.object_next_key()?;
         }
         Ok(Self {
-            id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
-            name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+            id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             verified: verified
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             followers: followers
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             bio,
-            links: links.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+            links: links.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
         })
     }
 }

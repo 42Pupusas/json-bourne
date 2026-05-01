@@ -12,9 +12,9 @@
 //!
 //! See `PROFILING.md` for the full runbook and notes on flamegraphs.
 
-use bourne::{EventSource, FromJson, parse};
+use bourne::{FromJson, parse};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
-use bourne_core::{Error, ErrorKind, Event, Parser};
+use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use std::hint::black_box;
 
 // ---------------------------------------------------------------------------
@@ -33,57 +33,40 @@ struct UserBourne<'input> {
 }
 
 impl<'input> FromJson<'input> for UserBourne<'input> {
-    fn from_event<S: EventSource<'input>>(
-        source: &mut S,
-        start: Event,
-    ) -> Result<Self, Error> {
-        if !matches!(start, Event::StartObject) {
-            return Err(Error::new(ErrorKind::ExpectedObject, source.position()));
-        }
+    fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+        lex.object_start()?;
         let mut id: Option<u64> = None;
         let mut name: Option<&'input str> = None;
         let mut verified: Option<bool> = None;
         let mut followers: Option<u32> = None;
         let mut bio: Option<&'input str> = None;
         let mut links: Option<Vec<&'input str>> = None;
-        let mut maybe_key = source.object_first_key()?;
+        let mut maybe_key = lex.object_first_key()?;
         while let Some(key) = maybe_key {
             match key {
-                "id" => id = Some(u64::try_from(source.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, source.position())
+                "id" => id = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
                 })?),
-                "name" => name = Some(source.parse_str_value()?),
-                "verified" => {
-                    let ev = source.next_event()?
-                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-                    verified = Some(bool::from_event(source, ev)?);
-                }
-                "followers" => followers = Some(u32::try_from(source.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, source.position())
+                "name" => name = Some(lex.parse_str_value()?),
+                "verified" => verified = Some(bool::from_lex(lex)?),
+                "followers" => followers = Some(u32::try_from(lex.parse_i64_value()?).map_err(|_| {
+                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
                 })?),
-                "bio" => {
-                    let ev = source.next_event()?
-                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-                    bio = Option::<&str>::from_event(source, ev)?;
-                }
-                "links" => {
-                    let ev = source.next_event()?
-                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-                    links = Some(Vec::<&str>::from_event(source, ev)?);
-                }
-                _ => return Err(Error::new(ErrorKind::UnknownField, source.position())),
+                "bio" => bio = Option::<&str>::from_lex(lex)?,
+                "links" => links = Some(Vec::<&str>::from_lex(lex)?),
+                _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
             }
-            maybe_key = source.object_next_key()?;
+            maybe_key = lex.object_next_key()?;
         }
         Ok(Self {
-            id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
-            name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+            id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             verified: verified
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             followers: followers
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             bio,
-            links: links.ok_or_else(|| Error::new(ErrorKind::MissingField, source.position()))?,
+            links: links.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
         })
     }
 }
