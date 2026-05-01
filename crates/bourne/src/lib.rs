@@ -17,8 +17,10 @@ extern crate alloc;
 
 mod de;
 
-pub use bourne_core::{Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position};
+pub use bourne_core::{Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position, ValueKind};
 pub use de::{FromJson, parse, parse_str};
+
+mod macros;
 
 #[cfg(test)]
 mod tests {
