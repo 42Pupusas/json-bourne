@@ -143,11 +143,13 @@ impl JsonNum {
             .is_some_and(|bytes| bytes.iter().any(|b| matches!(*b, b'.' | b'e' | b'E')))
     }
 
+    #[inline]
     pub fn as_i64(&self, input: &[u8]) -> Result<i64, ErrorKind> {
         let bytes = self.raw_bytes(input).ok_or(ErrorKind::InvalidNumber)?;
         parse_i64(bytes).ok_or(ErrorKind::NumberOutOfRange)
     }
 
+    #[inline]
     pub fn as_u64(&self, input: &[u8]) -> Result<u64, ErrorKind> {
         let bytes = self.raw_bytes(input).ok_or(ErrorKind::InvalidNumber)?;
         parse_u64(bytes).ok_or(ErrorKind::NumberOutOfRange)
@@ -182,6 +184,7 @@ const U64_FAST_DIGITS: usize = 19;
 /// digits including the sign and we strip the sign first).
 const I64_FAST_DIGITS: usize = 18;
 
+#[inline]
 fn parse_u64(raw: &[u8]) -> Option<u64> {
     if raw.is_empty() {
         return None;
@@ -213,6 +216,7 @@ fn parse_u64(raw: &[u8]) -> Option<u64> {
     Some(acc)
 }
 
+#[inline]
 fn parse_i64(raw: &[u8]) -> Option<i64> {
     let (negative, digits) = match raw.split_first() {
         Some((&b'-', rest)) => (true, rest),
