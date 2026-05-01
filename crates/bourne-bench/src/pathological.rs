@@ -21,7 +21,7 @@ use core::fmt::Write as _;
 /// IDs, or 64-bit u64 monotonic IDs.
 ///
 /// Mix of widths: half are 13-digit (millisecond timestamps), half are 19
-/// digits (i64::MAX-ish). All positive, no exponent.
+/// digits (`i64::MAX-ish`). All positive, no exponent.
 #[must_use]
 pub fn wide_int_array(n: usize) -> alloc::string::String {
     let mut s = alloc::string::String::with_capacity(n * 22);
@@ -44,7 +44,9 @@ pub fn wide_int_array(n: usize) -> alloc::string::String {
 }
 
 /// A single JSON document containing one integer literal with `digits`
-/// decimal digits. Tests the lexer's handling of arbitrary-precision
+/// decimal digits.
+///
+/// Tests the lexer's handling of arbitrary-precision
 /// integer text — `parse_i64_value` rejects anything wider than i64 with
 /// `NumberOutOfRange`, but `read_number` still has to walk the full
 /// literal. 1000 digits surfaces any quadratic behavior.
@@ -59,8 +61,8 @@ pub fn huge_int_literal(digits: usize) -> alloc::string::String {
     s
 }
 
-/// Array of N empty objects: `[{},{},…,{}]`. Stress-tests StartObject /
-/// EndObject dispatch and frame push/pop without giving the value-parsing
+/// Array of N empty objects: `[{},{},…,{}]`. Stress-tests `StartObject` /
+/// `EndObject` dispatch and frame push/pop without giving the value-parsing
 /// path anything to do.
 #[must_use]
 pub fn empty_object_array(n: usize) -> alloc::string::String {
@@ -93,7 +95,9 @@ pub fn null_array(n: usize) -> alloc::string::String {
 }
 
 /// Maximum-legal nested array: `[ [ … [1] … ] ]` exactly at the parser's
-/// `DEFAULT_MAX_DEPTH = 128` limit. One past this would be rejected as
+/// `DEFAULT_MAX_DEPTH = 128` limit.
+///
+/// One past this would be rejected as
 /// `DepthLimitExceeded`. Verifies the depth-check itself isn't a bottleneck
 /// at the boundary.
 #[must_use]
@@ -102,7 +106,9 @@ pub fn max_depth_legal() -> alloc::string::String {
 }
 
 /// The longest legal i64 literal: `i64::MIN` text is `-9223372036854775808`
-/// (20 chars including the sign). Wraps it in a single-element array so
+/// (20 chars including the sign).
+///
+/// Wraps it in a single-element array so
 /// the typed `Vec<i64>` fast path handles it. Exercises the slow-path
 /// arithmetic in `parse_i64_value` (the count >= 18 branch with
 /// `checked_*` arithmetic).
@@ -111,7 +117,8 @@ pub fn longest_legal_i64_array() -> alloc::string::String {
     "[-9223372036854775808]".to_string()
 }
 
-/// Array with a mix of legal i64 widths spanning the full range:
+/// Array with a mix of legal i64 widths spanning the full range.
+///
 /// 1-digit, ~10-digit (32-bit boundary), 19-digit (i64 boundary). One of
 /// each per group of 3, repeated. The regression we want to catch: any
 /// path that's fast for one width and slow for another.

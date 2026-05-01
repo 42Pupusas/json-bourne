@@ -1,6 +1,6 @@
-//! Memory comparison: bourne vs serde_json.
+//! Memory comparison: bourne vs `serde_json`.
 //!
-//! Each workload runs once through bourne and once through serde_json with
+//! Each workload runs once through bourne and once through `serde_json` with
 //! a process-wide counting allocator installed. We report:
 //!   - allocs: number of trips to the allocator
 //!   - total : cumulative bytes requested across the parse
@@ -10,7 +10,7 @@
 //! complementary memory story. A library can win one and lose the other.
 //!
 //! Run:
-//!   cargo run --release --features compare-mem --bin compare_mem
+//!   cargo run --release --features compare-mem --bin `compare_mem`
 
 use bourne::{FromJson, parse};
 use bourne_alloctest::measure;
@@ -175,7 +175,7 @@ fn run_bourne_drain(input: &[u8]) -> Report {
     let (_, snap) = measure(|| {
         let mut p: Parser<'_> = Parser::new(input);
         let mut count = 0usize;
-        while let Some(_) = p.next_event().expect("valid input") {
+        while p.next_event().expect("valid input").is_some() {
             count += 1;
         }
         count
@@ -311,6 +311,8 @@ fn header() {
     println!("  {}", "-".repeat(89));
 }
 
+// bench main is a sequential walk; extracting helpers would obscure the runbook nature of the file
+#[allow(clippy::too_many_lines)]
 fn main() {
     // Touch the allocator a couple of times before measuring; the very first
     // `format!` / `String::new` call in a process can pull in lazy-init

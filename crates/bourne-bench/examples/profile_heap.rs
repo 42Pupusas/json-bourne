@@ -1,10 +1,10 @@
 //! DHAT-instrumented workload for heap profiling.
 //!
 //! Run:
-//!   cargo run --release --features dhat-heap --example profile_heap
+//!   cargo run --release --features dhat-heap --example `profile_heap`
 //!
 //! Produces `dhat-heap.json` next to the binary. View at:
-//!   https://nnethercote.github.io/dh_view/dh_view.html
+//!   <https://nnethercote.github.io/dh_view/dh_view.html>
 //!
 //! What we want to *see* in the output:
 //!   - the streaming-only loop is at zero bytes / zero allocations
@@ -26,7 +26,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 fn drain_streaming(input: &[u8]) {
     let mut p: Parser<'_> = Parser::new(input);
-    while let Some(_) = p.next_event().expect("valid input") {}
+    while p.next_event().expect("valid input").is_some() {}
 }
 
 fn main() {

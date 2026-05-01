@@ -11,6 +11,14 @@
 //!   - [`malformed`] — adversarial / malformed inputs the parser must
 //!     reject without panicking. Used to measure rejection latency.
 
+// Fixture-generation casts. This crate produces test inputs from
+// synthetic indices like `i % 360` cast to f64 / u32; the casts are
+// the *numeric content* of the corpus, and the loss the lint warns
+// about cannot occur for the `i % small_constant` shape used here.
+// Allowing crate-wide is more honest than per-line `#[allow]`s on
+// every fixture builder.
+#![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+
 extern crate alloc;
 
 pub mod malformed;

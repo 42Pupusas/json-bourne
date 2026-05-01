@@ -7,7 +7,7 @@
 //! Run:
 //!   cargo build --profile profiling --features profile --bin profile
 //!   perf record -g --call-graph=dwarf \
-//!       ./target/profiling/profile vec_i64_10k
+//!       ./target/profiling/profile `vec_i64_10k`
 //!   perf report
 //!
 //! See `PROFILING.md` for the full runbook and notes on flamegraphs.
@@ -78,7 +78,7 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
 
 /// A single workload's tight loop. Each `run_*` accepts a pre-built input
 /// slice (so input construction isn't part of the profile) and an iteration
-/// count tuned so the whole call takes ~5s on a modern x86_64.
+/// count tuned so the whole call takes ~5s on a modern `x86_64`.
 fn run_stream(input: &[u8], iters: u64) {
     for _ in 0..iters {
         let mut p: Parser<'_> = Parser::new(black_box(input));
@@ -127,7 +127,7 @@ fn run_vec_borrowed_unicode(input: &[u8], iters: u64) {
 // Workload registry
 // ---------------------------------------------------------------------------
 
-fn workloads() -> &'static [&'static str] {
+const fn workloads() -> &'static [&'static str] {
     &[
         "stream_small",
         "stream_ints_10k",

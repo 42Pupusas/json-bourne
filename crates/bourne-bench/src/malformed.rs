@@ -3,7 +3,7 @@
 //! Each entry is a `(name, bytes, expected_kind)` triple. The bench
 //! harness asserts that every input is rejected (no panics, no UB) and
 //! measures rejection latency. A parser that takes 100× longer to reject
-//! malformed input than to accept valid input is a DoS vector — slow
+//! malformed input than to accept valid input is a `DoS` vector — slow
 //! rejection is itself a vulnerability.
 //!
 //! The expected `ErrorKind` is part of the fixture so this doubles as a
@@ -175,7 +175,7 @@ pub const CORPUS: &[Bad] = &[
     },
     Bad {
         name: "object_with_non_string_key",
-        bytes: br#"{1:2}"#,
+        bytes: br"{1:2}",
         kind: Some(ErrorKind::UnexpectedByte(b'1')),
     },
     Bad {

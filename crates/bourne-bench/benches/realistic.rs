@@ -21,6 +21,8 @@ fn drain(input: &[u8]) {
     }
 }
 
+// bench main is a sequential walk; extracting helpers would obscure the runbook nature of the file
+#[allow(clippy::too_many_lines)]
 fn bench_realistic(c: &mut Criterion) {
     let mut group = c.benchmark_group("realistic");
 

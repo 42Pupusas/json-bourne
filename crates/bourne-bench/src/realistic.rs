@@ -16,7 +16,9 @@ use core::fmt::Write as _;
 extern crate alloc;
 use alloc::string::String;
 
-/// Array of N "GitHub event"-shaped objects. Each is ~400-600 bytes:
+/// Array of N "GitHub event"-shaped objects.
+///
+/// Each is ~400-600 bytes:
 /// ID, action verb, ISO-8601 timestamp, two long URLs (~80 chars each),
 /// a short user object, an optional payload bag with 3-5 fields. Mimics
 /// the heterogeneity of `api.github.com/events`. Some records carry an
@@ -87,7 +89,9 @@ pub fn log_line_array(n: usize) -> String {
     s
 }
 
-/// Array of N coordinate pairs: `[[lat, lng], ...]`. All f64s with a
+/// Array of N coordinate pairs: `[[lat, lng], ...]`.
+///
+/// All f64s with a
 /// fraction. The current `floats_decode` bench uses 5 fixed forms; this
 /// one varies the magnitude over realistic ranges (-90..90, -180..180).
 #[must_use]
@@ -107,7 +111,9 @@ pub fn geo_array(n: usize) -> String {
     s
 }
 
-/// Array of N JWT-shaped objects: numeric-id-heavy. Each entry has a
+/// Array of N JWT-shaped objects: numeric-id-heavy.
+///
+/// Each entry has a
 /// 19-digit `sub` (subject) and a 13-digit `exp` (ms timestamp), plus
 /// short string fields. **This is the corpus where SIMD digit scanning
 /// should win** — we did not have it before and that absence drove a
@@ -122,7 +128,7 @@ pub fn jwt_id_array(n: usize) -> String {
         }
         let sub: u64 = 9_000_000_000_000_000_000 + (i as u64 % 100_000);
         let exp: u64 = 1_700_000_000_000 + (i as u64 % 86400 * 1000);
-        let iat: u64 = exp - 3600_000;
+        let iat: u64 = exp - 3_600_000;
         let _ = write!(
             &mut s,
             r#"{{"sub":{sub},"iss":"https://auth.example.com","aud":"api","exp":{exp},"iat":{iat},"jti":"abcdef0123456789"}}"#,
@@ -141,9 +147,9 @@ pub fn jwt_id_array(n: usize) -> String {
 ///   - 30% medium values (paths, names, short URLs)
 ///   - 15% description-length text (sentences, error messages)
 ///   -  5% long-form payloads (logs containing serialized state, base64
-///     blobs, embedded JSON-in-string). The ceiling here is deliberately
-///     up to 64 KB — production JSON regularly has fields this size and
-///     a 4 KB ceiling under-represents that reality.
+///      blobs, embedded JSON-in-string). The ceiling here is deliberately
+///      up to 64 KB — production JSON regularly has fields this size and
+///      a 4 KB ceiling under-represents that reality.
 const MIXED_LEN_BUCKETS: &[(u32, usize, usize)] = &[
     (10, 4, 15),
     (6, 20, 80),
@@ -169,6 +175,14 @@ const STRING_BODY_SOURCE: &str =
 /// Output is deterministic: lengths within each bucket are driven by a
 /// fixed multiply-mix of the index, so two runs with the same `n`
 /// produce identical bytes.
+///
+/// # Panics
+///
+/// Cannot panic in practice. The internal `.expect("at least one
+/// bucket")` and `.expect("weights sum to 20")` guard invariants that
+/// hold for the static `MIXED_LEN_BUCKETS` table — they exist to fail
+/// loudly if the table is ever edited inconsistently, not because real
+/// inputs reach them.
 #[must_use]
 pub fn mixed_length_string_array(n: usize) -> String {
     debug_assert_eq!(
@@ -228,36 +242,46 @@ pub fn mixed_length_string_array(n: usize) -> String {
 }
 
 /// Same length distribution as [`mixed_length_string_array`], but each
-/// string carries roughly one escape per 50 bytes of body. Escapes cycle
+/// string carries roughly one escape per 50 bytes of body.
+///
+/// Escapes cycle
 /// through the cheap two-byte forms (`\n`, `\t`, `\"`, `\\`) and the
 /// six-byte unicode form (`é`) so the parser sees both fast-path
 /// escape decoding and the slow `\u`-validation path.
 ///
-/// Why this matters: serde_json's borrowed `&str` deserialization only
+/// Why this matters: `serde_json`'s borrowed `&str` deserialization only
 /// works when the source has no escapes. The existing
 /// `mixed_length_string_array` corpus has zero escapes, so the bourne-vs-
-/// serde_json head-to-head only covers the no-escape fast path. This
+/// `serde_json` head-to-head only covers the no-escape fast path. This
 /// variant forces both libraries off that path: bourne owns the bytes
-/// after `validate_escapes`, serde_json falls back to building a `Cow`
+/// after `validate_escapes`, `serde_json` falls back to building a `Cow`
 /// per element. That's where most production string fields actually live.
 ///
 /// Bucket lengths refer to the JSON-text body length (between the quotes),
 /// not the decoded string length. An escape sequence counts as its
 /// on-the-wire byte width.
+///
+/// # Panics
+///
+/// Cannot panic in practice. The internal `.expect("at least one
+/// bucket")` and `.expect("weights sum to 20")` guard invariants that
+/// hold for the static `MIXED_LEN_BUCKETS` table \u2014 they exist to fail
+/// loudly if the table is ever edited inconsistently, not because real
+/// inputs reach them.
 #[must_use]
 pub fn mixed_length_string_array_with_escapes(n: usize) -> String {
-    debug_assert_eq!(
-        MIXED_LEN_BUCKETS.iter().map(|(w, _, _)| w).sum::<u32>(),
-        20,
-        "MIXED_LEN_BUCKETS weights must sum to 20",
-    );
-
     // Five escape sequences cycled in order: four 2-byte forms plus one
     // 6-byte `\u00XX` form. Inserted every ~50 bytes of output, so density
     // is ~5-6%. The `\u` form forces the lexer through the deferred
     // `validate_escapes` slow path that the simple `\n`-etc. escapes skip.
     const ESCAPES: [&str; 5] = [r"\n", r"\t", r#"\""#, r"\\", r"\u00e9"];
     const STRIDE: usize = 50;
+
+    debug_assert_eq!(
+        MIXED_LEN_BUCKETS.iter().map(|(w, _, _)| w).sum::<u32>(),
+        20,
+        "MIXED_LEN_BUCKETS weights must sum to 20",
+    );
 
     let max_len = MIXED_LEN_BUCKETS
         .iter()
@@ -339,7 +363,9 @@ pub fn mixed_length_string_array_with_escapes(n: usize) -> String {
     s
 }
 
-/// Array of N strings with non-ASCII bytes. Cycles through Latin-1
+/// Array of N strings with non-ASCII bytes.
+///
+/// Cycles through Latin-1
 /// (2-byte UTF-8), Cyrillic (2-byte), CJK (3-byte), and emoji (4-byte)
 /// so the multi-byte UTF-8 path gets coverage at every length. Currently
 /// **zero benches exercise `consume_utf8_multibyte`.**
@@ -387,7 +413,9 @@ pub fn escape_heavy_string_array(n: usize) -> String {
 }
 
 /// Config-file-shaped document: a single object with branching nested
-/// objects 3-5 levels deep. Mimics what `package.json`, `tsconfig.json`,
+/// objects 3-5 levels deep.
+///
+/// Mimics what `package.json`, `tsconfig.json`,
 /// Kubernetes manifests, or service-discovery payloads look like — not
 /// "array of N similar records" but one structured object with a tree of
 /// heterogeneous children. `n_services` controls the fan-out at the
@@ -417,12 +445,14 @@ pub fn nested_config_doc(n_services: usize) -> String {
             i % 5 == 0,
         );
     }
-    s.push_str(r#"]}}"#);
+    s.push_str(r"]}}");
     s
 }
 
 /// Single object with `n_keys` short string-keyed fields, all numeric
-/// values. Mimics protobuf-decoded records, feature-flag bundles, and
+/// values.
+///
+/// Mimics protobuf-decoded records, feature-flag bundles, and
 /// metric snapshots — shapes where one object carries hundreds of fields
 /// rather than many small objects each carrying a few. Exercises the
 /// per-key dispatch path far more than the GitHub/log corpora do.
@@ -446,7 +476,9 @@ pub fn wide_key_object(n_keys: usize) -> String {
     s
 }
 
-/// One huge GeoJSON-FeatureCollection-shaped document. A single top-level
+/// One huge GeoJSON-FeatureCollection-shaped document.
+///
+/// A single top-level
 /// object with one large `features` array; each feature is a small nested
 /// object containing a `geometry` (coords array) and a `properties` bag.
 /// Total size is ~`n_features * 220` bytes — at `n_features = 25_000` that
@@ -484,14 +516,16 @@ pub fn giant_geojson_doc(n_features: usize) -> String {
             500_000 + i,
         );
     }
-    s.push_str(r#"]}"#);
+    s.push_str(r"]}");
     s
 }
 
 /// Array of N records, each containing both ints and floats with realistic
-/// magnitudes. Mimics metric-event payloads, financial ticks, or sensor
-/// readings — every other realistic corpus is "all ints" (jwt_ids) or
-/// "all floats" (geo_array), but real records mix them per row.
+/// magnitudes.
+///
+/// Mimics metric-event payloads, financial ticks, or sensor
+/// readings — every other realistic corpus is "all ints" (`jwt_ids`) or
+/// "all floats" (`geo_array`), but real records mix them per row.
 ///
 /// The float decoder pays `f64::from_str` for every float; the int decoder
 /// uses the fused `parse_i64_value` fast path. Mixing them per record means
@@ -522,7 +556,9 @@ pub fn metric_event_array(n: usize) -> String {
 }
 
 /// Same record shape and same values as [`metric_event_array`], but with
-/// every object's keys emitted in **reverse declaration order**. JSON
+/// every object's keys emitted in **reverse declaration order**.
+///
+/// JSON
 /// objects are unordered by spec, so a correct typed parser must accept
 /// either ordering. This bench measures whether the field-dispatch match
 /// in a hand-written `FromJson` impl performs the same regardless of key

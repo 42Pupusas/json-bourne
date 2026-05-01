@@ -1,15 +1,15 @@
 //! Malformed-input rejection latency.
 //!
 //! For each entry in `malformed::CORPUS`, measure how long the parser
-//! takes to return `Err`. Slow rejection is a DoS surface — a malicious
+//! takes to return `Err`. Slow rejection is a `DoS` surface — a malicious
 //! payload that takes 100× longer to reject than a valid one to accept
 //! is itself a vulnerability.
 //!
 //! Each iteration of each benchmark also asserts:
 //!   1. The parser returns `Err` (never panics, never returns `Ok`).
 //!   2. The error kind matches `expected.kind` if the fixture pins one.
-//! So this file doubles as a regression suite for the parser's error
-//! paths — drift in error reporting trips the assertion.
+//!      So this file doubles as a regression suite for the parser's error
+//!      paths — drift in error reporting trips the assertion.
 
 use bourne_bench::malformed::{Bad, CORPUS};
 use bourne_core::Parser;
@@ -42,21 +42,6 @@ fn check(b: &Bad) -> bourne_core::Error {
 }
 
 fn bench_malformed(c: &mut Criterion) {
-    let mut group = c.benchmark_group("malformed");
-
-    for bad in CORPUS {
-        // Throughput in bytes so criterion can express MiB/s — useful for
-        // spotting a malformed input whose rejection time scales with input
-        // size much worse than a valid parse would (the DoS warning sign).
-        group.throughput(Throughput::Bytes(bad.bytes.len() as u64));
-        group.bench_function(bad.name, |b| {
-            b.iter(|| {
-                let e = check(black_box(bad));
-                black_box(e);
-            });
-        });
-    }
-
     // Head-to-head against serde_json on a representative subset. Picks
     // span the failure-mode classes:
     //   - truncated_string  : truncation mid-token
@@ -76,6 +61,22 @@ fn bench_malformed(c: &mut Criterion) {
         "control_char_in_string",
         "depth_bomb_129",
     ];
+
+    let mut group = c.benchmark_group("malformed");
+
+    for bad in CORPUS {
+        // Throughput in bytes so criterion can express MiB/s — useful for
+        // spotting a malformed input whose rejection time scales with input
+        // size much worse than a valid parse would (the DoS warning sign).
+        group.throughput(Throughput::Bytes(bad.bytes.len() as u64));
+        group.bench_function(bad.name, |b| {
+            b.iter(|| {
+                let e = check(black_box(bad));
+                black_box(e);
+            });
+        });
+    }
+
     for &name in COMPARE_SUBSET {
         let bad = CORPUS
             .iter()

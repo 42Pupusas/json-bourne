@@ -17,7 +17,7 @@
 //!      path (where we should win biggest); the third is fair-fight
 //!      allocation-bound territory where the gap should be smaller.
 
-use bourne::{FromJson, parse};
+use bourne::{FromJson, from_json, parse};
 use bourne_bench::realistic::{metric_event_array, metric_event_array_reversed_keys};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
@@ -36,6 +36,24 @@ struct UserBourne<'input> {
     followers: u32,
     bio: Option<&'input str>,
     links: Vec<&'input str>,
+}
+
+// Same shape as `UserBourne`, but the `FromJson` impl comes from the
+// `from_json!` macro instead of a hand-written impl. The bench
+// compares this against the hand-tuned `UserBourne` impl below — if
+// the macro emits less efficient code, the gap shows up directly in
+// the `typed_struct` group.
+from_json! {
+    #[derive(Debug, PartialEq)]
+    #[allow(dead_code)]
+    struct UserDerived<'input> {
+        id: u64,
+        name: &'input str,
+        verified: bool,
+        followers: u32,
+        bio: Option<&'input str>,
+        links: Vec<&'input str>,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,6 +143,24 @@ struct MetricEventBourne<'input> {
     latency_ms: f64,
     cpu: f64,
     throughput_rps: f64,
+}
+
+// `from_json!` mirror of `MetricEventBourne`. Pinned in the
+// `typed_struct` bench group so the macro's per-record cost is
+// measured against the hand-tuned impl on a realistic 8-field shape.
+from_json! {
+    #[derive(Debug)]
+    #[allow(dead_code)]
+    struct MetricEventDerived<'input> {
+        ts: u64,
+        host: &'input str,
+        metric: &'input str,
+        count: u64,
+        bytes: u64,
+        latency_ms: f64,
+        cpu: f64,
+        throughput_rps: f64,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +289,18 @@ fn bench_typed_struct(c: &mut Criterion) {
             black_box(u);
         });
     });
+    // Macro-generated impl: same struct shape, `from_json!` instead of
+    // a hand-written `from_lex`. A meaningful gap between this row and
+    // the `small/bourne` row above signals the macro is leaving perf
+    // on the table — the most likely places to look would be the
+    // dispatch match (string-key compare order), the duplicate-key
+    // check, or per-field `Option`-slot machinery.
+    group.bench_function("small/bourne_derived", |b| {
+        b.iter(|| {
+            let u: UserDerived<'_> = parse(black_box(bytes)).unwrap();
+            black_box(u);
+        });
+    });
     group.bench_function("small/serde_json", |b| {
         b.iter(|| {
             let u: UserSerde<'_> = serde_json::from_slice(black_box(bytes)).unwrap();
@@ -269,6 +317,12 @@ fn bench_typed_struct(c: &mut Criterion) {
     group.bench_function("metric_events/1000/bourne", |b| {
         b.iter(|| {
             let v: Vec<MetricEventBourne<'_>> = parse(black_box(metrics.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+    group.bench_function("metric_events/1000/bourne_derived", |b| {
+        b.iter(|| {
+            let v: Vec<MetricEventDerived<'_>> = parse(black_box(metrics.as_bytes())).unwrap();
             black_box(v);
         });
     });
@@ -291,6 +345,13 @@ fn bench_typed_struct(c: &mut Criterion) {
     group.bench_function("metric_events_reversed/1000/bourne", |b| {
         b.iter(|| {
             let v: Vec<MetricEventBourne<'_>> =
+                parse(black_box(metrics_rev.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+    group.bench_function("metric_events_reversed/1000/bourne_derived", |b| {
+        b.iter(|| {
+            let v: Vec<MetricEventDerived<'_>> =
                 parse(black_box(metrics_rev.as_bytes())).unwrap();
             black_box(v);
         });
