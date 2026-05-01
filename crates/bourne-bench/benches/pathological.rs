@@ -36,6 +36,16 @@ fn bench_pathological(c: &mut Criterion) {
                 black_box(v);
             });
         });
+        // Head-to-head: same input bytes, same output type. The reason this
+        // category exists at all is that the original int corpus had no wide
+        // values; a fair-fight number is what tells us whether `parse_i64_value`'s
+        // 18-digit-fast / 20-digit-checked split lands.
+        group.bench_function(format!("wide_int_array/{n}/typed_i64/serde_json"), |b| {
+            b.iter(|| {
+                let v: Vec<i64> = serde_json::from_slice(black_box(s.as_bytes())).unwrap();
+                black_box(v);
+            });
+        });
     }
 
     // Mixed-width ints — same array contains 1, 10, 19-digit values.
@@ -55,6 +65,23 @@ fn bench_pathological(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(huge.len() as u64));
     group.bench_function("huge_int_literal/1000/stream", |b| {
         b.iter(|| drain(black_box(huge.as_bytes())));
+    });
+    // Head-to-head: serde_json's `arbitrary_precision` feature is on for
+    // this bench crate, so `Value` accepts the 1000-digit literal and
+    // stores it as a `Number` containing the original text. Bourne stores
+    // the same text via `JsonNum`'s offset span — same logical info, both
+    // libraries parse the same bytes; throughput is comparable.
+    //
+    // Worth noting: by default (without `arbitrary_precision`) serde_json
+    // rejects numbers wider than i64/u64/f64 with `Error("number out of
+    // range")`. Bourne always accepts; consumers decide whether to
+    // decode to a primitive. Different defaults, different trade-offs.
+    group.bench_function("huge_int_literal/1000/serde_json_value", |b| {
+        b.iter(|| {
+            let v: serde_json::Value =
+                serde_json::from_slice(black_box(huge.as_bytes())).unwrap();
+            black_box(v);
+        });
     });
 
     // Empty objects — pure dispatch, no value content.

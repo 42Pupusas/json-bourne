@@ -57,6 +57,44 @@ fn bench_malformed(c: &mut Criterion) {
         });
     }
 
+    // Head-to-head against serde_json on a representative subset. Picks
+    // span the failure-mode classes:
+    //   - truncated_string  : truncation mid-token
+    //   - invalid_escape    : escape error
+    //   - utf8_overlong_2byte : UTF-8 violation
+    //   - control_char_in_string : control byte in string
+    //   - depth_bomb_129    : depth-limit attack
+    //
+    // Both libs must reject without panicking; we don't compare error
+    // kinds across libraries (different taxonomies) but we do assert
+    // both return `Err`. The throughput numbers will be tiny (these are
+    // small inputs) — what matters is the relative rejection latency.
+    const COMPARE_SUBSET: &[&str] = &[
+        "truncated_string",
+        "invalid_escape",
+        "utf8_overlong_2byte",
+        "control_char_in_string",
+        "depth_bomb_129",
+    ];
+    for &name in COMPARE_SUBSET {
+        let bad = CORPUS
+            .iter()
+            .find(|b| b.name == name)
+            .expect("compare-subset name must exist in CORPUS");
+        group.throughput(Throughput::Bytes(bad.bytes.len() as u64));
+        group.bench_function(format!("{name}/serde_json"), |b| {
+            b.iter(|| {
+                let r: Result<serde_json::Value, _> =
+                    serde_json::from_slice(black_box(bad.bytes));
+                assert!(
+                    r.is_err(),
+                    "serde_json unexpectedly accepted malformed fixture {name:?}",
+                );
+                let _ = black_box(r);
+            });
+        });
+    }
+
     group.finish();
 }
 
