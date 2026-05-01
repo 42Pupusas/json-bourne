@@ -95,6 +95,81 @@ fn bench_malformed(c: &mut Criterion) {
         });
     }
 
+    // ---------------------------------------------------------------------
+    // Large malformed inputs — the DoS-realistic shape.
+    //
+    // Every fixture in CORPUS is under ~200 bytes. Real attacker payloads
+    // are megabytes: a 10 MB string with a single bad escape at the end,
+    // a 5 MB number followed by trailing garbage. The bench numbers on
+    // tiny inputs tell us nothing about whether rejection latency scales
+    // linearly with input (acceptable) or quadratically (a vulnerability).
+    // ---------------------------------------------------------------------
+
+    // 10 MB JSON string with a bare backslash at the end and no closing
+    // quote. The lexer must walk the entire body before failing on the
+    // truncated escape. Linear rejection ≈ a few ms; an O(n²) bug would
+    // balloon to seconds.
+    let mut huge_string_bad_tail = Vec::with_capacity(10 * 1024 * 1024 + 4);
+    huge_string_bad_tail.push(b'"');
+    huge_string_bad_tail.resize(10 * 1024 * 1024 + 1, b'a');
+    huge_string_bad_tail.push(b'\\');
+
+    // 5 MB digit run followed by trailing garbage. Probes the number-
+    // parsing path's ability to handle a wide literal *and* still report
+    // the trailing-byte error correctly.
+    let mut huge_number_trailing_garbage = Vec::with_capacity(5 * 1024 * 1024 + 8);
+    huge_number_trailing_garbage.push(b'1');
+    huge_number_trailing_garbage.resize(5 * 1024 * 1024, b'7');
+    huge_number_trailing_garbage.extend_from_slice(b" QQ");
+
+    // 1 M legal escape sequences (`\n`) inside a string, terminated by an
+    // illegal escape (`\q`). Forces a walk of the full sequence before
+    // hitting the bad one.
+    let mut huge_escape_run_bad_tail = Vec::with_capacity(1024 * 1024 * 2 + 8);
+    huge_escape_run_bad_tail.push(b'"');
+    for _ in 0..(1024 * 1024) {
+        huge_escape_run_bad_tail.push(b'\\');
+        huge_escape_run_bad_tail.push(b'n');
+    }
+    huge_escape_run_bad_tail.extend_from_slice(b"\\q\"");
+
+    let large_fixtures: &[(&str, &[u8])] = &[
+        ("huge_string_bad_tail/10MB", &huge_string_bad_tail),
+        ("huge_number_trailing_garbage/5MB", &huge_number_trailing_garbage),
+        ("huge_escape_run_bad_tail/1M_escapes", &huge_escape_run_bad_tail),
+    ];
+    for (name, bytes) in large_fixtures {
+        group.throughput(Throughput::Bytes(bytes.len() as u64));
+        group.bench_function(format!("{name}/bourne"), |b| {
+            b.iter(|| {
+                let mut p: Parser<'_> = Parser::new(black_box(bytes));
+                let mut got_err = false;
+                loop {
+                    match p.next_event() {
+                        Ok(Some(_)) => {}
+                        Ok(None) => break,
+                        Err(_) => {
+                            got_err = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(got_err, "fixture {name:?}: parser accepted invalid input");
+            });
+        });
+        group.bench_function(format!("{name}/serde_json"), |b| {
+            b.iter(|| {
+                let r: Result<serde_json::Value, _> =
+                    serde_json::from_slice(black_box(bytes));
+                assert!(
+                    r.is_err(),
+                    "serde_json unexpectedly accepted malformed fixture {name:?}",
+                );
+                let _ = black_box(r);
+            });
+        });
+    }
+
     group.finish();
 }
 
