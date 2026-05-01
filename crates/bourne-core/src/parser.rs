@@ -478,6 +478,138 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         Ok(())
     }
 
+    /// Parse a JSON integer directly into `i64`, fusing lex and conversion.
+    ///
+    /// The streaming path goes byte → `JsonNum` offsets → second walk in
+    /// `as_i64` to compute the value — every digit gets touched twice.
+    /// This method walks the digits once, accumulating in step.
+    ///
+    /// Caller must position the parser at the first byte of the value
+    /// (after any whitespace). Returns the parsed `i64` and leaves the
+    /// cursor at the byte after the number. Rejects fractional and
+    /// exponent forms — those are not integers.
+    pub fn parse_i64_value(&mut self) -> Result<i64, Error> {
+        let start = self.offset;
+        let bytes = self.input;
+        let end = bytes.len();
+        let mut i = start;
+
+        let negative = matches!(bytes.get(i), Some(&b'-'));
+        if negative {
+            i += 1;
+        }
+
+        // Integer part: leading `0` alone, or `1-9` followed by digits.
+        // Same grammar as parse_number's lex pass.
+        let digits_start = i;
+        match bytes.get(i).copied() {
+            Some(b'0') => i += 1,
+            Some(b'1'..=b'9') => {
+                // Walk the run while accumulating. Up to 18 digits is
+                // safe without overflow checks (fits in i64 unsigned).
+                // Beyond 18, fall back to checked arithmetic.
+                let mut acc: i64 = 0;
+                let mut count: u32 = 0;
+                while i < end {
+                    let d = bytes[i].wrapping_sub(b'0');
+                    if d >= 10 {
+                        break;
+                    }
+                    if count < 18 {
+                        acc = acc * 10 + i64::from(d);
+                    } else {
+                        acc = acc
+                            .checked_mul(10)
+                            .and_then(|v| v.checked_add(i64::from(d)))
+                            .ok_or_else(|| {
+                                self.offset = i;
+                                self.err(ErrorKind::NumberOutOfRange)
+                            })?;
+                    }
+                    i += 1;
+                    count += 1;
+                }
+                if i == digits_start {
+                    self.offset = i;
+                    return Err(self.err(ErrorKind::InvalidNumber));
+                }
+                self.offset = i;
+                // Reject fraction / exponent — those aren't integers.
+                if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+                    return Err(self.err(ErrorKind::ExpectedNumber));
+                }
+                if negative {
+                    return Ok(-acc);
+                }
+                return Ok(acc);
+            }
+            Some(b) => {
+                self.offset = i;
+                return Err(self.err(ErrorKind::UnexpectedByte(b)));
+            }
+            None => {
+                self.offset = i;
+                return Err(self.err(ErrorKind::UnexpectedEof));
+            }
+        }
+        // Lone `0` case (or `-0`).
+        self.offset = i;
+        if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+            return Err(self.err(ErrorKind::ExpectedNumber));
+        }
+        Ok(0)
+    }
+
+    /// Skip whitespace then expect `,` or the array-end byte. Returns
+    /// `true` if at end (caller should stop), `false` to continue with
+    /// another element. Used by the typed `Vec<i64>` fast path.
+    ///
+    /// On `]` this also runs the same stack/state bookkeeping as
+    /// `next_event` would have, so the parser is left in a state where
+    /// a subsequent `next_event` call resumes correctly (returns `None`
+    /// at document end, or the next sibling event in a nested context).
+    #[inline]
+    pub fn array_continue(&mut self, end_byte: u8) -> Result<bool, Error> {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b) if b == end_byte => {
+                self.bump();
+                let frame = if end_byte == b']' { Frame::Array } else { Frame::Object };
+                let _ = self.close_container(frame)?;
+                Ok(true)
+            }
+            Some(b',') => {
+                self.bump();
+                self.skip_whitespace();
+                Ok(false)
+            }
+            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    /// Expect the byte that opens an array (`[`), advance past it, and
+    /// skip whitespace to the first element (or `]`). Returns `true` if
+    /// the array is empty (the caller saw a closing `]` immediately).
+    #[inline]
+    pub fn array_start(&mut self) -> Result<bool, Error> {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'[') => {
+                self.bump();
+                self.skip_whitespace();
+                if self.peek() == Some(b']') {
+                    self.bump();
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            }
+            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
     #[inline]
     fn parse_number(&mut self) -> Result<JsonNum, Error> {
         let start = self.offset;

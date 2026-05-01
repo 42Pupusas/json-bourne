@@ -32,10 +32,28 @@ use bourne_core::{Error, ErrorKind, Event, Parser, Position};
 /// `(start, end)` offsets into the parser's input. Consumers materialize
 /// the actual `&str`/`&[u8]` via `JsonStr::as_str(input)` etc., so the
 /// trait exposes `input()` to provide that slice.
+///
+/// The `array_*` and `parse_*_value` methods are typed-fast-path escape
+/// hatches: they let `FromJson` impls bypass the per-element streaming
+/// detour for shapes where it duplicates work (e.g. integer arrays,
+/// where the lexer walks every digit twice). They have default impls
+/// `Parser` overrides; non-Parser sources can fall back on the events.
 pub trait EventSource<'input> {
     fn next_event(&mut self) -> Result<Option<Event>, Error>;
     fn position(&self) -> Position;
     fn input(&self) -> &'input [u8];
+
+    /// Open an array. Returns `true` if it was empty (already past `]`).
+    fn array_start(&mut self) -> Result<bool, Error>;
+
+    /// After an element, consume `,` (and skip whitespace to the next
+    /// element) or the closing `end_byte` (`]` for arrays). Returns
+    /// `true` if the closing byte was just consumed.
+    fn array_continue(&mut self, end_byte: u8) -> Result<bool, Error>;
+
+    /// Parse one signed-integer value, fusing the lex pass with the
+    /// digit-to-i64 conversion. Cursor must be at a digit (or `-`).
+    fn parse_i64_value(&mut self) -> Result<i64, Error>;
 }
 
 impl<'input, const MAX_DEPTH: usize> EventSource<'input> for Parser<'input, MAX_DEPTH> {
@@ -49,6 +67,18 @@ impl<'input, const MAX_DEPTH: usize> EventSource<'input> for Parser<'input, MAX_
 
     fn input(&self) -> &'input [u8] {
         Self::input(self)
+    }
+
+    fn array_start(&mut self) -> Result<bool, Error> {
+        Self::array_start(self)
+    }
+
+    fn array_continue(&mut self, end_byte: u8) -> Result<bool, Error> {
+        Self::array_continue(self, end_byte)
+    }
+
+    fn parse_i64_value(&mut self) -> Result<i64, Error> {
+        Self::parse_i64_value(self)
     }
 }
 
@@ -89,6 +119,34 @@ pub trait FromJson<'input>: Sized {
         source: &mut S,
         start: Event,
     ) -> Result<Self, Error>;
+
+    /// Optional fast path for `Vec<Self>`. The default implementation
+    /// drives the streaming parser through one event per element. Types
+    /// where the streaming detour is pure overhead (the integer types,
+    /// where the lexer's digit walk and the value-conversion digit walk
+    /// repeat each other) override this to lex-and-parse directly,
+    /// halving per-element work.
+    ///
+    /// `start` is the `StartArray` event; the implementation must consume
+    /// up to and including the matching `EndArray`.
+    #[cfg(feature = "alloc")]
+    #[doc(hidden)]
+    fn vec_from_event<S: EventSource<'input>>(
+        source: &mut S,
+        start: Event,
+    ) -> Result<alloc::vec::Vec<Self>, Error> {
+        if !matches!(start, Event::StartArray) {
+            return Err(type_error(source, ErrorKind::ExpectedArray));
+        }
+        let mut out = alloc::vec::Vec::new();
+        loop {
+            let ev = next_or_eof(source)?;
+            match ev {
+                Event::EndArray => return Ok(out),
+                other => out.push(Self::from_event(source, other)?),
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +222,48 @@ macro_rules! impl_int {
                             })
                         }
                         _ => Err(type_error(source, ErrorKind::ExpectedNumber)),
+                    }
+                }
+
+                /// Fused-pass fast path for `Vec<$t>`. Skips the per-element
+                /// `next_event` round trip — the streaming layer would lex
+                /// each integer's digits into a `JsonNum`, then the typed
+                /// layer would walk the same digits a second time to build
+                /// the value. `parse_i64_value` does both in one pass.
+                ///
+                /// `start` is `Event::StartArray`, so `[` has already been
+                /// consumed; we just need to handle the immediate-`]`
+                /// (empty array) case before the first element.
+                #[cfg(feature = "alloc")]
+                fn vec_from_event<S: EventSource<'input>>(
+                    source: &mut S,
+                    start: Event,
+                ) -> Result<alloc::vec::Vec<Self>, Error> {
+                    if !matches!(start, Event::StartArray) {
+                        return Err(type_error(source, ErrorKind::ExpectedArray));
+                    }
+                    let mut out: alloc::vec::Vec<Self> = alloc::vec::Vec::new();
+                    // Detect empty array: peek the first event and stop on
+                    // `EndArray` before entering the fast loop. The first
+                    // element costs one `next_event` either way; subsequent
+                    // elements use the fused path.
+                    let first_ev = next_or_eof(source)?;
+                    match first_ev {
+                        Event::EndArray => return Ok(out),
+                        ev => {
+                            let v = <Self>::from_event(source, ev)?;
+                            out.push(v);
+                        }
+                    }
+                    loop {
+                        if source.array_continue(b']')? {
+                            return Ok(out);
+                        }
+                        let v = source.parse_i64_value()?;
+                        let narrow = <$t>::try_from(v).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, source.position())
+                        })?;
+                        out.push(narrow);
                     }
                 }
             }
@@ -283,7 +383,7 @@ impl_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 #[cfg(feature = "alloc")]
 mod alloc_impls {
     extern crate alloc;
-    use super::{EventSource, FromJson, next_or_eof, type_error};
+    use super::{EventSource, FromJson, type_error};
     use alloc::string::String;
     use alloc::vec::Vec;
     use bourne_core::{Error, ErrorKind, Event};
@@ -309,17 +409,11 @@ mod alloc_impls {
             source: &mut S,
             start: Event,
         ) -> Result<Self, Error> {
-            if !matches!(start, Event::StartArray) {
-                return Err(type_error(source, ErrorKind::ExpectedArray));
-            }
-            let mut out = Self::new();
-            loop {
-                let ev = next_or_eof(source)?;
-                match ev {
-                    Event::EndArray => return Ok(out),
-                    other => out.push(T::from_event(source, other)?),
-                }
-            }
+            // Dispatch through the trait method so types that override
+            // `vec_from_event` (e.g. integer types) can supply a fused
+            // lex-and-parse fast path. For T without an override the
+            // default drives the streaming parser one event at a time.
+            T::vec_from_event(source, start)
         }
     }
 }
