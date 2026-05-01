@@ -422,9 +422,12 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
                     }
                     return Err(self.err(ErrorKind::NumberOutOfRange));
                 }
-                #[allow(clippy::cast_possible_wrap)]
-                if acc <= i64::MAX as u64 {
-                    return Ok(acc as i64);
+                // `try_from` here is the same conditional as comparing
+                // against `i64::MAX as u64`, but in a form clippy
+                // recognizes — and avoids the cast_possible_wrap
+                // exception we previously took to silence it.
+                if let Ok(n) = i64::try_from(acc) {
+                    return Ok(n);
                 }
                 return Err(self.err(ErrorKind::NumberOutOfRange));
             }
@@ -620,6 +623,78 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         } else {
             Ok(())
         }
+    }
+
+    /// Consume one complete JSON value and discard it.
+    ///
+    /// Walks whatever value sits at the cursor — primitive, string,
+    /// number, array, or object — and advances past it. For composite
+    /// values, every nested element is also skipped. The structural
+    /// frame stack stays balanced: this method pushes and pops the
+    /// same frames `read_value` would.
+    ///
+    /// Validation is the same as `read_value`: malformed input
+    /// (control char in string, lone surrogate, malformed number,
+    /// etc.) still raises an `Error`. The "skip" here means "throw
+    /// away the value", not "throw away the parse". A lenient
+    /// `deny_unknown_fields = false` consumer wants the cursor
+    /// advanced, but it still wants the surrounding object to
+    /// parse correctly afterward — which requires lexing the skipped
+    /// value to find its end.
+    ///
+    /// Used by `#[derive(FromJson)]` when a struct opts into
+    /// `#[bourne(deny_unknown_fields = false)]` to consume the value
+    /// associated with an unrecognized key.
+    pub fn skip_value(&mut self) -> Result<(), Error> {
+        let event = self.read_value()?;
+        match event {
+            Event::StartArray => self.skip_array_body(),
+            Event::StartObject => self.skip_object_body(),
+            // Primitives consumed inline by `read_value`; nothing to
+            // do but return.
+            Event::String(_) | Event::Number(_) | Event::Bool(_) | Event::Null => Ok(()),
+            // `read_value` only returns Start*/scalar events. The
+            // End*/Key variants are produced by the streaming
+            // Parser, not the bare lexer, so they cannot appear
+            // here. Match exhaustively anyway so a future Event
+            // variant is a compile error rather than a silent skip.
+            Event::EndArray | Event::EndObject | Event::Key(_) => {
+                Err(self.err(ErrorKind::UnexpectedByte(b']')))
+            }
+        }
+    }
+
+    /// Drive `array_continue` until the matching `]` closes the frame.
+    /// `read_value` already consumed the opening `[` and pushed the
+    /// frame; this finishes the job. Used only from `skip_value`.
+    fn skip_array_body(&mut self) -> Result<(), Error> {
+        // Empty array: `]` follows immediately, with the frame already
+        // pushed by read_value. We need to consume `]` and pop. The
+        // shared logic lives in array_continue, so peek and dispatch.
+        self.skip_whitespace();
+        if matches!(self.peek(), Some(b']')) {
+            self.bump();
+            return self.pop_frame(Frame::Array);
+        }
+        // Non-empty: at least one element, then either `,` (continue)
+        // or `]` (done).
+        self.skip_value()?;
+        while !self.array_continue(b']')? {
+            self.skip_value()?;
+        }
+        Ok(())
+    }
+
+    /// Drive `object_first_key` / `object_next_key` until the matching
+    /// `}` closes the frame. The keys themselves are consumed (we
+    /// don't need them); only the values need explicit skipping.
+    fn skip_object_body(&mut self) -> Result<(), Error> {
+        let mut key = self.object_first_key()?;
+        while key.is_some() {
+            self.skip_value()?;
+            key = self.object_next_key()?;
+        }
+        Ok(())
     }
 
     // -------------------------------------------------------------------

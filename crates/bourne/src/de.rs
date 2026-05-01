@@ -360,21 +360,25 @@ mod alloc_impls {
     /// Why this exists: the literal-byte run inside `decode_escapes` is
     /// the inner loop on strings with sparse escapes (~1 escape per 50
     /// bytes is typical for production payloads). On profile, the scalar
-    /// `while i < n && bytes[i] != b'\\'` walk was 64% of decode_owned's
+    /// `while i < n && bytes[i] != b'\\'` walk was 64% of `decode_owned`'s
     /// time. SSE2's `_mm_cmpeq_epi8` + `_mm_movemask_epi8` walks 16 bytes
-    /// per iteration with the same correctness; on x86_64 the gain is
+    /// per iteration with the same correctness; on `x86_64` the gain is
     /// ~10x for long literal runs.
     ///
     /// Same `unsafe_code` justification as the parent function: SSE2
-    /// is part of the x86_64 ABI baseline, the `target_feature` arm
-    /// is statically enabled on x86_64, and the unsafe is mechanical
+    /// is part of the `x86_64` ABI baseline, the `target_feature` arm
+    /// is statically enabled on `x86_64`, and the unsafe is mechanical
     /// (intrinsics carry unsafe by signature, not by memory-safety).
     #[allow(unsafe_code)]
     #[inline]
     fn find_backslash(bytes: &[u8]) -> Option<usize> {
+        // Two distinct cfg-gated function bodies — splitting them into
+        // separate items per arch avoids a `return` inside one cfg
+        // branch (which clippy flags as `needless_return`) while
+        // keeping each arm a single expression.
         #[cfg(target_arch = "x86_64")]
         {
-            return find_backslash_sse2(bytes);
+            find_backslash_sse2(bytes)
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -451,11 +455,7 @@ mod alloc_impls {
                 // Use SIMD scan when available — the scalar walk that used
                 // to live here was 64% of total decode time on profile.
                 let start = i;
-                let next_bs = find_backslash(&raw[i..]);
-                i = match next_bs {
-                    Some(off) => i + off,
-                    None => raw.len(),
-                };
+                i = find_backslash(&raw[i..]).map_or(raw.len(), |off| i + off);
                 // SAFETY: see the function-level comment. The lexer
                 // validated these bytes as UTF-8 inline.
                 let chunk = unsafe { core::str::from_utf8_unchecked(&raw[start..i]) };
