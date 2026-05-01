@@ -7,8 +7,9 @@
 use bourne::parse;
 use bourne_bench::realistic::{
     escape_heavy_string_array, geo_array, giant_geojson_doc, github_event_array, jwt_id_array,
-    log_line_array, metric_event_array, mixed_length_string_array, nested_config_doc,
-    unicode_string_array, wide_key_object,
+    log_line_array, metric_event_array, mixed_length_string_array,
+    mixed_length_string_array_with_escapes, nested_config_doc, unicode_string_array,
+    wide_key_object,
 };
 use bourne_core::Parser;
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -103,6 +104,35 @@ fn bench_realistic(c: &mut Criterion) {
             black_box(v);
         });
     });
+
+    // Same length distribution, but with ~1 escape per 50 bytes so neither
+    // library can use its borrow-everything fast path. The point is not
+    // typed deserialization — `Vec<String>` would need bourne's escape-
+    // decoding milestone which is still pending — but to measure raw
+    // validation throughput on strings with escapes, which is where most
+    // production text fields actually live.
+    //
+    // Compared against `serde_json::from_slice::<serde_json::Value>` so
+    // both sides produce a usable shape. This is the comparison the no-
+    // escape `mixed_length_strings` head-to-head deliberately can't make:
+    // serde_json's borrowed-`&str` fast path doesn't apply to escaped
+    // bodies, so the existing bench understates serde_json's typical cost
+    // on real string-heavy JSON. This corpus closes that gap.
+    let mixed_esc = mixed_length_string_array_with_escapes(1_000);
+    group.throughput(Throughput::Bytes(mixed_esc.len() as u64));
+    group.bench_function("mixed_length_strings_with_escapes/1000/stream", |b| {
+        b.iter(|| drain(black_box(mixed_esc.as_bytes())));
+    });
+    group.bench_function(
+        "mixed_length_strings_with_escapes/1000/serde_json_value",
+        |b| {
+            b.iter(|| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(black_box(mixed_esc.as_bytes())).unwrap();
+                black_box(v);
+            });
+        },
+    );
 
     // Unicode strings — exercises consume_utf8_multibyte across 2/3/4-byte
     // sequences. No existing bench touches this path.

@@ -227,6 +227,118 @@ pub fn mixed_length_string_array(n: usize) -> String {
     s
 }
 
+/// Same length distribution as [`mixed_length_string_array`], but each
+/// string carries roughly one escape per 50 bytes of body. Escapes cycle
+/// through the cheap two-byte forms (`\n`, `\t`, `\"`, `\\`) and the
+/// six-byte unicode form (`é`) so the parser sees both fast-path
+/// escape decoding and the slow `\u`-validation path.
+///
+/// Why this matters: serde_json's borrowed `&str` deserialization only
+/// works when the source has no escapes. The existing
+/// `mixed_length_string_array` corpus has zero escapes, so the bourne-vs-
+/// serde_json head-to-head only covers the no-escape fast path. This
+/// variant forces both libraries off that path: bourne owns the bytes
+/// after `validate_escapes`, serde_json falls back to building a `Cow`
+/// per element. That's where most production string fields actually live.
+///
+/// Bucket lengths refer to the JSON-text body length (between the quotes),
+/// not the decoded string length. An escape sequence counts as its
+/// on-the-wire byte width.
+#[must_use]
+pub fn mixed_length_string_array_with_escapes(n: usize) -> String {
+    debug_assert_eq!(
+        MIXED_LEN_BUCKETS.iter().map(|(w, _, _)| w).sum::<u32>(),
+        20,
+        "MIXED_LEN_BUCKETS weights must sum to 20",
+    );
+
+    // Five escape sequences cycled in order: four 2-byte forms plus one
+    // 6-byte `\u00XX` form. Inserted every ~50 bytes of output, so density
+    // is ~5-6%. The `\u` form forces the lexer through the deferred
+    // `validate_escapes` slow path that the simple `\n`-etc. escapes skip.
+    const ESCAPES: [&str; 5] = [r"\n", r"\t", r#"\""#, r"\\", r"\u00e9"];
+    const STRIDE: usize = 50;
+
+    let max_len = MIXED_LEN_BUCKETS
+        .iter()
+        .map(|(_, _, m)| *m)
+        .max()
+        .expect("at least one bucket");
+    let reps = max_len.div_ceil(STRING_BODY_SOURCE.len()).max(1);
+    let body: String = STRING_BODY_SOURCE.repeat(reps);
+
+    let avg: usize = MIXED_LEN_BUCKETS
+        .iter()
+        .map(|(w, lo, hi)| (*w as usize) * (lo + hi) / 2)
+        .sum::<usize>()
+        / 20
+        + 3;
+
+    let mut s = String::with_capacity(n * avg + 2);
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        let mut slot = (i as u32) % 20;
+        let (lo, hi) = MIXED_LEN_BUCKETS
+            .iter()
+            .find_map(|(w, lo, hi)| {
+                if slot < *w {
+                    Some((*lo, *hi))
+                } else {
+                    slot -= *w;
+                    None
+                }
+            })
+            .expect("weights sum to 20, so some bucket always matches");
+        let span = hi - lo + 1;
+        let target_len = lo + i.wrapping_mul(2_654_435_761) % span;
+
+        // Emit body bytes interleaved with escape sequences. Track JSON-text
+        // length so we land on `target_len` regardless of escape widths.
+        s.push('"');
+        let start = s.len();
+        let mut body_pos = 0;
+        let mut esc_pos = i; // rotate per element so we don't repeat the same pattern
+        let mut written = 0usize;
+        while written < target_len {
+            let remaining = target_len - written;
+            // Decide whether the next chunk is literal-body or an escape.
+            // First chunk is always literal (so the string doesn't open
+            // with an escape), and we cycle to escape every STRIDE bytes.
+            let want_escape = written > 0 && written % STRIDE == 0;
+            if want_escape {
+                let esc = ESCAPES[esc_pos % ESCAPES.len()];
+                esc_pos += 1;
+                if esc.len() <= remaining {
+                    s.push_str(esc);
+                    written += esc.len();
+                    continue;
+                }
+                // Not enough room for this escape; fall through to literal fill.
+            }
+            // Literal stretch: as many body bytes as fit before the next
+            // STRIDE boundary, capped by remaining.
+            let next_boundary = ((written / STRIDE) + 1) * STRIDE;
+            let chunk = remaining.min(next_boundary.saturating_sub(written).max(1));
+            // Body wraps; mod into range.
+            let body_start = body_pos % body.len();
+            // Take up to `chunk` bytes, but stop at end-of-body to keep the
+            // slice valid; if we hit the end, the next iteration wraps.
+            let avail = body.len() - body_start;
+            let take = chunk.min(avail);
+            s.push_str(&body[body_start..body_start + take]);
+            body_pos += take;
+            written += take;
+        }
+        debug_assert_eq!(s.len() - start, target_len);
+        s.push('"');
+    }
+    s.push(']');
+    s
+}
+
 /// Array of N strings with non-ASCII bytes. Cycles through Latin-1
 /// (2-byte UTF-8), Cyrillic (2-byte), CJK (3-byte), and emoji (4-byte)
 /// so the multi-byte UTF-8 path gets coverage at every length. Currently
