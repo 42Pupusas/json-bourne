@@ -21,6 +21,12 @@
 use crate::error::{Error, ErrorKind, Position};
 use crate::event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 
+/// `i64::MIN`'s magnitude as a `u64`: `i64::MAX as u64 + 1`. This is the
+/// largest `u64` value whose negation still fits in `i64`. Used by
+/// `parse_i64_value` to validate sign-aware bounds — `-9223372036854775808`
+/// is legal even though `+9223372036854775808` is not.
+const I64_MIN_MAGNITUDE: u64 = (i64::MAX as u64) + 1;
+
 /// Default maximum container nesting depth.
 ///
 /// Guards against pathological inputs (e.g. millions of `[`s) that would
@@ -344,19 +350,24 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         match bytes.get(i).copied() {
             Some(b'0') => i += 1,
             Some(b'1'..=b'9') => {
-                let mut acc: i64 = 0;
+                // Accumulate as u64 so positive `i64::MIN.unsigned_abs()`
+                // (= 9223372036854775808) fits during the lex pass. The
+                // sign-aware bounds check happens at the end.
+                let mut acc: u64 = 0;
                 let mut count: u32 = 0;
                 while i < end {
                     let d = bytes[i].wrapping_sub(b'0');
                     if d >= 10 {
                         break;
                     }
-                    if count < 18 {
-                        acc = acc * 10 + i64::from(d);
+                    if count < 19 {
+                        // Up to 19 digits fit in u64 without overflow; the
+                        // 20-digit boundary is u64::MAX.
+                        acc = acc * 10 + u64::from(d);
                     } else {
                         acc = acc
                             .checked_mul(10)
-                            .and_then(|v| v.checked_add(i64::from(d)))
+                            .and_then(|v| v.checked_add(u64::from(d)))
                             .ok_or_else(|| {
                                 self.offset = i;
                                 self.err(ErrorKind::NumberOutOfRange)
@@ -373,10 +384,23 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
                 if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
                     return Err(self.err(ErrorKind::ExpectedNumber));
                 }
+                // Sign-aware bounds. i64::MIN's magnitude is exactly
+                // i64::MAX as u64 + 1 = 9223372036854775808; any larger
+                // negative or positive doesn't fit.
                 if negative {
-                    return Ok(-acc);
+                    if acc <= I64_MIN_MAGNITUDE {
+                        // `0i64.wrapping_sub_unsigned(acc)` produces i64::MIN
+                        // when `acc == I64_MIN_MAGNITUDE`, and the correct
+                        // negative i64 for any smaller magnitude.
+                        return Ok(0i64.wrapping_sub_unsigned(acc));
+                    }
+                    return Err(self.err(ErrorKind::NumberOutOfRange));
                 }
-                return Ok(acc);
+                #[allow(clippy::cast_possible_wrap)]
+                if acc <= i64::MAX as u64 {
+                    return Ok(acc as i64);
+                }
+                return Err(self.err(ErrorKind::NumberOutOfRange));
             }
             Some(b) => {
                 self.offset = i;

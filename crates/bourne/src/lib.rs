@@ -206,6 +206,28 @@ mod tests {
         assert!(r.is_err());
     }
 
+    /// Regression: `parse_i64_value`'s fast-path accumulator must accept
+    /// `i64::MIN` (text `"-9223372036854775808"`). Earlier versions
+    /// accumulated as `i64`, so the unsigned magnitude (= `i64::MAX + 1`)
+    /// overflowed before the negation step and the input was rejected as
+    /// `NumberOutOfRange`. Pin both the value and the boundary +/- 1.
+    #[test]
+    fn i64_min_is_parseable() {
+        assert_eq!(parse_str::<i64>("-9223372036854775808").unwrap(), i64::MIN);
+        assert_eq!(
+            parse_str::<i64>("-9223372036854775807").unwrap(),
+            i64::MIN + 1,
+        );
+        assert_eq!(parse_str::<i64>("9223372036854775807").unwrap(), i64::MAX);
+        // Just past i64::MIN must reject.
+        assert!(parse_str::<i64>("-9223372036854775809").is_err());
+        // Just past i64::MAX must reject.
+        assert!(parse_str::<i64>("9223372036854775808").is_err());
+        // Same boundaries via Vec<i64> (the bench-fixture path that surfaced this).
+        let v: Vec<i64> = parse_str("[-9223372036854775808]").unwrap();
+        assert_eq!(v, vec![i64::MIN]);
+    }
+
     #[cfg(feature = "alloc")]
     #[test]
     fn vec_and_string() {
