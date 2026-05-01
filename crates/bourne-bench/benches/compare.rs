@@ -18,6 +18,7 @@
 //!      allocation-bound territory where the gap should be smaller.
 
 use bourne::{FromJson, parse};
+use bourne_bench::realistic::{metric_event_array, metric_event_array_reversed_keys};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -104,6 +105,103 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
 }
 
 // ---------------------------------------------------------------------------
+// Realistic-sized struct: one record from `metric_event_array`. Headline
+// "typed deserialization" was previously computed on a 120-byte
+// SMALL_OBJECT — a fixture so small that fixed overhead dominated. This
+// shape (~180 bytes per record, mixed int/string/f64, 8 fields) is closer
+// to what real production telemetry looks like, and `Vec<MetricEvent>` of
+// 1000 records gives the per-element typed dispatch room to actually
+// dominate the bench wall-clock.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct MetricEventBourne<'input> {
+    ts: u64,
+    host: &'input str,
+    metric: &'input str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct MetricEventSerde<'a> {
+    ts: u64,
+    #[serde(borrow)]
+    host: &'a str,
+    #[serde(borrow)]
+    metric: &'a str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
+}
+
+impl<'input> FromJson<'input> for MetricEventBourne<'input> {
+    fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+        lex.object_start()?;
+
+        let mut ts: Option<u64> = None;
+        let mut host: Option<&'input str> = None;
+        let mut metric: Option<&'input str> = None;
+        let mut count: Option<u64> = None;
+        let mut bytes: Option<u64> = None;
+        let mut latency_ms: Option<f64> = None;
+        let mut cpu: Option<f64> = None;
+        let mut throughput_rps: Option<f64> = None;
+
+        let mut maybe_key = lex.object_first_key()?;
+        while let Some(key) = maybe_key {
+            match key {
+                "ts" => {
+                    ts = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                        Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                    })?);
+                }
+                "host" => host = Some(lex.parse_str_value()?),
+                "metric" => metric = Some(lex.parse_str_value()?),
+                "count" => {
+                    count = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                        Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                    })?);
+                }
+                "bytes" => {
+                    bytes = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                        Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                    })?);
+                }
+                "latency_ms" => latency_ms = Some(f64::from_lex(lex)?),
+                "cpu" => cpu = Some(f64::from_lex(lex)?),
+                "throughput_rps" => throughput_rps = Some(f64::from_lex(lex)?),
+                _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
+            }
+            maybe_key = lex.object_next_key()?;
+        }
+
+        Ok(Self {
+            ts: ts.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            host: host.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            metric: metric
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            count: count
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            bytes: bytes
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            latency_ms: latency_ms
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            cpu: cpu.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            throughput_rps: throughput_rps
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Workloads
 // ---------------------------------------------------------------------------
 
@@ -145,19 +243,63 @@ fn bench_stream_vs_dom(c: &mut Criterion) {
 
 fn bench_typed_struct(c: &mut Criterion) {
     let mut group = c.benchmark_group("typed_struct");
+
+    // Original small fixture — kept for the per-call-overhead floor.
     let bytes = SMALL_OBJECT.as_bytes();
     group.throughput(Throughput::Bytes(bytes.len() as u64));
-
-    group.bench_function("bourne", |b| {
+    group.bench_function("small/bourne", |b| {
         b.iter(|| {
             let u: UserBourne<'_> = parse(black_box(bytes)).unwrap();
             black_box(u);
         });
     });
-    group.bench_function("serde_json", |b| {
+    group.bench_function("small/serde_json", |b| {
         b.iter(|| {
             let u: UserSerde<'_> = serde_json::from_slice(black_box(bytes)).unwrap();
             black_box(u);
+        });
+    });
+
+    // Realistic-sized: Vec<MetricEvent> over 1000 records (~180 KB total).
+    // The headline number for "typed deserialization" — the SMALL_OBJECT
+    // case is dominated by per-call overhead, this one is dominated by
+    // per-record dispatch + decode, which is what real workloads pay.
+    let metrics = metric_event_array(1_000);
+    group.throughput(Throughput::Bytes(metrics.len() as u64));
+    group.bench_function("metric_events/1000/bourne", |b| {
+        b.iter(|| {
+            let v: Vec<MetricEventBourne<'_>> = parse(black_box(metrics.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+    group.bench_function("metric_events/1000/serde_json", |b| {
+        b.iter(|| {
+            let v: Vec<MetricEventSerde<'_>> =
+                serde_json::from_slice(black_box(metrics.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+
+    // Same shape, same values, keys emitted in **reverse declaration
+    // order**. A correct typed parser must accept either ordering — this
+    // pair pins both correctness (an order-dependent dispatch would
+    // produce different results, which the Vec-equality property in the
+    // tests would catch) and performance parity (a parser whose
+    // field-dispatch match is order-sensitive would slow down here).
+    let metrics_rev = metric_event_array_reversed_keys(1_000);
+    group.throughput(Throughput::Bytes(metrics_rev.len() as u64));
+    group.bench_function("metric_events_reversed/1000/bourne", |b| {
+        b.iter(|| {
+            let v: Vec<MetricEventBourne<'_>> =
+                parse(black_box(metrics_rev.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+    group.bench_function("metric_events_reversed/1000/serde_json", |b| {
+        b.iter(|| {
+            let v: Vec<MetricEventSerde<'_>> =
+                serde_json::from_slice(black_box(metrics_rev.as_bytes())).unwrap();
+            black_box(v);
         });
     });
 

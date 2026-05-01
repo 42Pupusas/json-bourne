@@ -520,3 +520,36 @@ pub fn metric_event_array(n: usize) -> String {
     s.push(']');
     s
 }
+
+/// Same record shape and same values as [`metric_event_array`], but with
+/// every object's keys emitted in **reverse declaration order**. JSON
+/// objects are unordered by spec, so a correct typed parser must accept
+/// either ordering. This bench measures whether the field-dispatch match
+/// in a hand-written `FromJson` impl performs the same regardless of key
+/// order — branch predictor warmth, switch-table layout, and any
+/// optimization that assumes "first key in object is first arm of match"
+/// would surface here as a slowdown.
+#[must_use]
+pub fn metric_event_array_reversed_keys(n: usize) -> String {
+    let mut s = String::with_capacity(n * 180);
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        let ts: u64 = 1_700_000_000_000 + i as u64;
+        let count: u64 = i as u64 % 10_000;
+        let bytes: u64 = 1024 * (i as u64 % 1_000_000);
+        let latency_ms = (i % 500) as f64 + 0.125;
+        let cpu = (i % 100) as f64 / 100.0;
+        let throughput = (i as f64) * 12.345;
+        // Reverse order vs metric_event_array: throughput_rps -> ts.
+        let _ = write!(
+            &mut s,
+            r#"{{"throughput_rps":{throughput:.2},"cpu":{cpu:.4},"latency_ms":{latency_ms:.3},"bytes":{bytes},"count":{count},"metric":"req.latency","host":"node-{}","ts":{ts}}}"#,
+            i % 64,
+        );
+    }
+    s.push(']');
+    s
+}
