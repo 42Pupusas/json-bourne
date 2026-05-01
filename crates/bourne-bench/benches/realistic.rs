@@ -6,8 +6,9 @@
 
 use bourne::parse;
 use bourne_bench::realistic::{
-    escape_heavy_string_array, geo_array, github_event_array, jwt_id_array, log_line_array,
-    mixed_length_string_array, unicode_string_array,
+    escape_heavy_string_array, geo_array, giant_geojson_doc, github_event_array, jwt_id_array,
+    log_line_array, metric_event_array, mixed_length_string_array, nested_config_doc,
+    unicode_string_array, wide_key_object,
 };
 use bourne_core::Parser;
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
@@ -132,6 +133,72 @@ fn bench_realistic(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(esc.len() as u64));
     group.bench_function("escape_heavy_strings/1000/stream", |b| {
         b.iter(|| drain(black_box(esc.as_bytes())));
+    });
+
+    // Nested config-shaped document — branching object tree, 3-5 levels
+    // deep. Every other realistic fixture is a flat array of records; this
+    // one stresses the parser's frame stack across nested *objects*.
+    let cfg = nested_config_doc(200);
+    group.throughput(Throughput::Bytes(cfg.len() as u64));
+    group.bench_function("nested_config/200/stream", |b| {
+        b.iter(|| drain(black_box(cfg.as_bytes())));
+    });
+    group.bench_function("nested_config/200/serde_json_value", |b| {
+        b.iter(|| {
+            let v: serde_json::Value =
+                serde_json::from_slice(black_box(cfg.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+
+    // Wide-key object — single object with hundreds of fields. Mimics
+    // protobuf-decoded records and feature-flag bundles, where one object
+    // carries many keys rather than many objects each carrying a few.
+    // Per-key dispatch dominates parse time at this shape.
+    let wide = wide_key_object(500);
+    group.throughput(Throughput::Bytes(wide.len() as u64));
+    group.bench_function("wide_key_object/500/stream", |b| {
+        b.iter(|| drain(black_box(wide.as_bytes())));
+    });
+    group.bench_function("wide_key_object/500/serde_json_value", |b| {
+        b.iter(|| {
+            let v: serde_json::Value =
+                serde_json::from_slice(black_box(wide.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+
+    // Giant single document — multi-MB GeoJSON-style. Sustained throughput
+    // across one continuous stream rather than dispatch-amortized-over-
+    // records. Surfaces any per-byte cost that scales linearly without
+    // showing up in the smaller fixtures.
+    let geo_doc = giant_geojson_doc(25_000);
+    group.throughput(Throughput::Bytes(geo_doc.len() as u64));
+    group.bench_function("giant_geojson/25000/stream", |b| {
+        b.iter(|| drain(black_box(geo_doc.as_bytes())));
+    });
+    group.bench_function("giant_geojson/25000/serde_json_value", |b| {
+        b.iter(|| {
+            let v: serde_json::Value =
+                serde_json::from_slice(black_box(geo_doc.as_bytes())).unwrap();
+            black_box(v);
+        });
+    });
+
+    // Metric events — int + float fields per record. Every other realistic
+    // corpus is all-int (jwt_ids) or all-float (geo). Mixing per record
+    // means the lexer's int/float dispatch can't be amortized away.
+    let metrics = metric_event_array(2_000);
+    group.throughput(Throughput::Bytes(metrics.len() as u64));
+    group.bench_function("metric_events/2000/stream", |b| {
+        b.iter(|| drain(black_box(metrics.as_bytes())));
+    });
+    group.bench_function("metric_events/2000/serde_json_value", |b| {
+        b.iter(|| {
+            let v: serde_json::Value =
+                serde_json::from_slice(black_box(metrics.as_bytes())).unwrap();
+            black_box(v);
+        });
     });
 
     group.finish();

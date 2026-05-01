@@ -273,3 +273,138 @@ pub fn escape_heavy_string_array(n: usize) -> String {
     s.push(']');
     s
 }
+
+/// Config-file-shaped document: a single object with branching nested
+/// objects 3-5 levels deep. Mimics what `package.json`, `tsconfig.json`,
+/// Kubernetes manifests, or service-discovery payloads look like — not
+/// "array of N similar records" but one structured object with a tree of
+/// heterogeneous children. `n_services` controls the fan-out at the
+/// deepest level so the overall size scales linearly.
+///
+/// Why this matters: every other realistic fixture is a flat array of
+/// records. None of them exercise the parser's frame stack across a
+/// branching tree of *objects*, which is the dominant shape for config,
+/// GraphQL responses, and infra metadata.
+#[must_use]
+pub fn nested_config_doc(n_services: usize) -> String {
+    let mut s = String::with_capacity(n_services * 280 + 512);
+    s.push_str(
+        r#"{"apiVersion":"v1","kind":"ServiceMesh","metadata":{"name":"prod-mesh","namespace":"infra","labels":{"env":"prod","tier":"backend","region":"us-east-1"},"annotations":{"deploy/owner":"platform","deploy/sha":"abcdef0123456789","deploy/timestamp":"2026-04-30T12:00:00Z"}},"spec":{"defaults":{"timeouts":{"connect_ms":1000,"read_ms":5000,"write_ms":5000,"idle_ms":60000},"retries":{"max_attempts":3,"backoff":{"initial_ms":100,"max_ms":2000,"multiplier":2.0,"jitter":0.1}},"circuit_breaker":{"enabled":true,"thresholds":{"error_rate":0.05,"min_requests":20,"window_ms":10000}}},"services":["#,
+    );
+    for i in 0..n_services {
+        if i > 0 {
+            s.push(',');
+        }
+        let proto = if i % 3 == 0 { "grpc" } else { "http" };
+        let port = 8000 + (i % 1000);
+        let _ = write!(
+            &mut s,
+            r#"{{"name":"svc-{i:04}","port":{port},"protocol":"{proto}","upstream":{{"discovery":"dns","host":"svc-{i:04}.internal","health":{{"path":"/healthz","interval_ms":5000,"timeout_ms":1000,"unhealthy_threshold":3}}}},"routes":[{{"match":{{"prefix":"/api/v1/"}},"policy":{{"timeout_ms":3000,"retry":{{"on":"5xx","attempts":2}}}}}},{{"match":{{"prefix":"/admin/"}},"policy":{{"timeout_ms":30000,"auth":{{"required":true,"providers":["jwt","mtls"]}}}}}}],"tags":{{"team":"team-{}","tier":"{}","critical":{}}}}}"#,
+            i % 16,
+            if i % 4 == 0 { "edge" } else { "core" },
+            i % 5 == 0,
+        );
+    }
+    s.push_str(r#"]}}"#);
+    s
+}
+
+/// Single object with `n_keys` short string-keyed fields, all numeric
+/// values. Mimics protobuf-decoded records, feature-flag bundles, and
+/// metric snapshots — shapes where one object carries hundreds of fields
+/// rather than many small objects each carrying a few. Exercises the
+/// per-key dispatch path far more than the GitHub/log corpora do.
+///
+/// Keys are 8 bytes (`field_NNN`), values are 6-digit decimals, so the
+/// document is ~25 bytes per key. 500 keys is ~12 KB — typical for the
+/// shape but big enough that keyed dispatch dominates parse time.
+#[must_use]
+pub fn wide_key_object(n_keys: usize) -> String {
+    let mut s = String::with_capacity(n_keys * 28 + 2);
+    s.push('{');
+    for i in 0..n_keys {
+        if i > 0 {
+            s.push(',');
+        }
+        // Six-digit values keep the lexer in the fast 1-9 digit path so
+        // the bench measures key dispatch, not number parsing.
+        let _ = write!(&mut s, r#""field_{i:03}":{}"#, 100_000 + i);
+    }
+    s.push('}');
+    s
+}
+
+/// One huge GeoJSON-FeatureCollection-shaped document. A single top-level
+/// object with one large `features` array; each feature is a small nested
+/// object containing a `geometry` (coords array) and a `properties` bag.
+/// Total size is ~`n_features * 220` bytes — at `n_features = 25_000` that
+/// is ~5 MB, which approximates a single tile of OpenStreetMap data, a
+/// large GraphQL response, or a paginated API response in one shot.
+///
+/// Why this matters: every other realistic corpus benches "array of N
+/// records, each independent." A multi-MB single document is a different
+/// load on the parser — sustained throughput across one continuous stream
+/// rather than dispatch-amortized-over-records. If there is a per-call
+/// fixed cost in `Parser::new` that hides in small fixtures, this surfaces
+/// it; if there is a per-byte cost that scales linearly, this is where it
+/// shows.
+#[must_use]
+pub fn giant_geojson_doc(n_features: usize) -> String {
+    let mut s = String::with_capacity(n_features * 240 + 256);
+    s.push_str(r#"{"type":"FeatureCollection","generator":"bourne-bench","timestamp":"2026-04-30T12:00:00Z","features":["#);
+    for i in 0..n_features {
+        if i > 0 {
+            s.push(',');
+        }
+        let lat = (i % 180) as f64 / 2.0 - 89.999;
+        let lng = (i % 360) as f64 - 179.999;
+        let elev = (i % 4000) as f64 + 0.5;
+        let kind = match i % 4 {
+            0 => "node",
+            1 => "way",
+            2 => "relation",
+            _ => "area",
+        };
+        let _ = write!(
+            &mut s,
+            r#"{{"type":"Feature","id":{i},"geometry":{{"type":"Point","coordinates":[{lng:.6},{lat:.6},{elev:.2}]}},"properties":{{"osm_id":{},"kind":"{kind}","name":"feature-{i:06}","amenity":"none","tags":{{"created_by":"bourne-bench","version":1,"changeset":{}}}}}}}"#,
+            10_000_000 + i,
+            500_000 + i,
+        );
+    }
+    s.push_str(r#"]}"#);
+    s
+}
+
+/// Array of N records, each containing both ints and floats with realistic
+/// magnitudes. Mimics metric-event payloads, financial ticks, or sensor
+/// readings — every other realistic corpus is "all ints" (jwt_ids) or
+/// "all floats" (geo_array), but real records mix them per row.
+///
+/// The float decoder pays `f64::from_str` for every float; the int decoder
+/// uses the fused `parse_i64_value` fast path. Mixing them per record means
+/// the dispatch cost can't be amortized away by sticking on one branch.
+#[must_use]
+pub fn metric_event_array(n: usize) -> String {
+    let mut s = String::with_capacity(n * 180);
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        let ts: u64 = 1_700_000_000_000 + i as u64;
+        let count: u64 = i as u64 % 10_000;
+        let bytes: u64 = 1024 * (i as u64 % 1_000_000);
+        // Three different float magnitudes so f64::from_str sees variety.
+        let latency_ms = (i % 500) as f64 + 0.125;
+        let cpu = (i % 100) as f64 / 100.0;
+        let throughput = (i as f64) * 12.345;
+        let _ = write!(
+            &mut s,
+            r#"{{"ts":{ts},"host":"node-{}","metric":"req.latency","count":{count},"bytes":{bytes},"latency_ms":{latency_ms:.3},"cpu":{cpu:.4},"throughput_rps":{throughput:.2}}}"#,
+            i % 64,
+        );
+    }
+    s.push(']');
+    s
+}
