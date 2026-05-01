@@ -68,5 +68,17 @@ harness = false
 name = "compare"
 harness = false
 
+[[bench]]
+name = "pathological"
+harness = false
+
+[[bench]]
+name = "realistic"
+harness = false
+
+[[bench]]
+name = "malformed"
+harness = false
+
 [lints]
 workspace = true

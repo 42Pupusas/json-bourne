@@ -2,6 +2,20 @@
 //!
 //! Lives in a normal lib crate so each bench file can `use bourne_bench::*`
 //! instead of duplicating the corpus inline.
+//!
+//! Submodules:
+//!   - [`pathological`] — well-formed inputs that hit edge cases (wide
+//!     integers, max-depth nesting, huge int literals).
+//!   - [`realistic`] — corpora shaped like real production JSON (GitHub
+//!     events, log lines, geo data, mixed-length strings, unicode bodies).
+//!   - [`malformed`] — adversarial / malformed inputs the parser must
+//!     reject without panicking. Used to measure rejection latency.
+
+extern crate alloc;
+
+pub mod malformed;
+pub mod pathological;
+pub mod realistic;
 
 use core::fmt::Write as _;
 
