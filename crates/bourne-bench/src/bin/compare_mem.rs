@@ -14,6 +14,10 @@
 
 use bourne::{FromJson, parse};
 use bourne_alloctest::measure;
+use bourne_bench::realistic::{
+    giant_geojson_doc, metric_event_array, mixed_length_string_array_with_escapes,
+    nested_config_doc, wide_key_object,
+};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
@@ -77,6 +81,82 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
                 .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             bio,
             links: links.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+        })
+    }
+}
+
+// Realistic-sized struct shape, mirroring the one in benches/compare.rs.
+// 8 fields, mixed int/string/f64 — closer to what real telemetry payloads
+// look like than the 6-field SMALL_OBJECT user record.
+
+#[derive(Debug)]
+#[allow(dead_code)]
+struct MetricEventBourne<'input> {
+    ts: u64,
+    host: &'input str,
+    metric: &'input str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct MetricEventSerde<'a> {
+    ts: u64,
+    #[serde(borrow)]
+    host: &'a str,
+    #[serde(borrow)]
+    metric: &'a str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
+}
+
+impl<'input> FromJson<'input> for MetricEventBourne<'input> {
+    fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+        lex.object_start()?;
+        let mut ts: Option<u64> = None;
+        let mut host: Option<&'input str> = None;
+        let mut metric: Option<&'input str> = None;
+        let mut count: Option<u64> = None;
+        let mut bytes: Option<u64> = None;
+        let mut latency_ms: Option<f64> = None;
+        let mut cpu: Option<f64> = None;
+        let mut throughput_rps: Option<f64> = None;
+        let mut maybe_key = lex.object_first_key()?;
+        while let Some(key) = maybe_key {
+            match key {
+                "ts" => ts = Some(u64::from_lex(lex)?),
+                "host" => host = Some(<&str>::from_lex(lex)?),
+                "metric" => metric = Some(<&str>::from_lex(lex)?),
+                "count" => count = Some(u64::from_lex(lex)?),
+                "bytes" => bytes = Some(u64::from_lex(lex)?),
+                "latency_ms" => latency_ms = Some(f64::from_lex(lex)?),
+                "cpu" => cpu = Some(f64::from_lex(lex)?),
+                "throughput_rps" => throughput_rps = Some(f64::from_lex(lex)?),
+                _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
+            }
+            maybe_key = lex.object_next_key()?;
+        }
+        Ok(Self {
+            ts: ts.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            host: host.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            metric: metric
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            count: count
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            bytes: bytes
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            latency_ms: latency_ms
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            cpu: cpu.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            throughput_rps: throughput_rps
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
         })
     }
 }
@@ -175,6 +255,22 @@ fn run_serde_vec_string(input: &[u8]) -> Report {
     Report { allocs: snap.allocs, bytes: snap.bytes }
 }
 
+fn run_bourne_vec_metric(input: &[u8]) -> Report {
+    let (_, snap) = measure(|| {
+        let v: Vec<MetricEventBourne<'_>> = parse(input).unwrap();
+        v
+    });
+    Report { allocs: snap.allocs, bytes: snap.bytes }
+}
+
+fn run_serde_vec_metric(input: &[u8]) -> Report {
+    let (_, snap) = measure(|| {
+        let v: Vec<MetricEventSerde<'_>> = serde_json::from_slice(input).unwrap();
+        v
+    });
+    Report { allocs: snap.allocs, bytes: snap.bytes }
+}
+
 fn print_row(workload: &str, b: Report, s: Report) {
     let ratio_allocs = if s.allocs == 0 {
         "—".to_string()
@@ -191,7 +287,7 @@ fn print_row(workload: &str, b: Report, s: Report) {
         format!("{r:>5.0}%")
     };
     println!(
-        "  {:<28}  {:>6}  {:>9}  |  {:>6}  {:>9}  |  {:>6}  {:>6}",
+        "  {:<32}  {:>6}  {:>9}  |  {:>6}  {:>9}  |  {:>6}  {:>6}",
         workload,
         format!("{}", b.allocs),
         format!("{} B", b.bytes),
@@ -205,14 +301,14 @@ fn print_row(workload: &str, b: Report, s: Report) {
 fn header() {
     println!();
     println!(
-        "  {:<28}  {:>18}  |  {:>18}  |  {:>15}",
+        "  {:<32}  {:>18}  |  {:>18}  |  {:>15}",
         "workload", "bourne", "serde_json", "ratio (b/s)",
     );
     println!(
-        "  {:<28}  {:>6}  {:>9}  |  {:>6}  {:>9}  |  {:>6}  {:>6}",
+        "  {:<32}  {:>6}  {:>9}  |  {:>6}  {:>9}  |  {:>6}  {:>6}",
         "", "allocs", "bytes", "allocs", "bytes", "allocs", "bytes",
     );
-    println!("  {}", "-".repeat(85));
+    println!("  {}", "-".repeat(89));
 }
 
 fn main() {
@@ -291,6 +387,65 @@ fn main() {
         "vec_string/10000",
         run_bourne_vec_string(s.as_bytes()),
         run_serde_vec_string(s.as_bytes()),
+    );
+
+    // -----------------------------------------------------------------
+    // Realistic corpora — same shapes the benches use, so the memory
+    // numbers tell the same story as the throughput numbers about the
+    // documents callers actually parse. The original section above is
+    // all uniform fixtures (`int_array`, `string_array`); these match
+    // the structural shapes the realistic-corpus benches added.
+    // -----------------------------------------------------------------
+    println!();
+    println!("  realistic corpora");
+    println!("  {}", "-".repeat(89));
+
+    // Stream-vs-Value on each realistic shape. bourne emits Events, serde
+    // builds a Value tree — the alloc story the benches pair with their
+    // throughput numbers.
+    let cfg = nested_config_doc(200);
+    print_row(
+        "stream nested_config/200",
+        run_bourne_drain(cfg.as_bytes()),
+        run_serde_value(cfg.as_bytes()),
+    );
+    let wide = wide_key_object(500);
+    print_row(
+        "stream wide_key_object/500",
+        run_bourne_drain(wide.as_bytes()),
+        run_serde_value(wide.as_bytes()),
+    );
+    let geo = giant_geojson_doc(25_000);
+    print_row(
+        "stream giant_geojson/25000",
+        run_bourne_drain(geo.as_bytes()),
+        run_serde_value(geo.as_bytes()),
+    );
+    let metrics = metric_event_array(1_000);
+    print_row(
+        "stream metric_events/1000",
+        run_bourne_drain(metrics.as_bytes()),
+        run_serde_value(metrics.as_bytes()),
+    );
+
+    // Typed struct on the realistic shape: Vec<MetricEvent> over 1000
+    // records. The SMALL_OBJECT typed_struct row is dominated by per-call
+    // overhead; this row is dominated by per-record dispatch + decode.
+    print_row(
+        "typed_struct metric_events/1000",
+        run_bourne_vec_metric(metrics.as_bytes()),
+        run_serde_vec_metric(metrics.as_bytes()),
+    );
+
+    // Vec<String> with escapes — the case bourne couldn't decode at all
+    // before the escape-decoder landed. Both sides allocate one String
+    // per element and own the result, so this is the apples-to-apples
+    // memory story for escaped string fields.
+    let strs_esc = mixed_length_string_array_with_escapes(1_000);
+    print_row(
+        "vec_string mixed_esc/1000",
+        run_bourne_vec_string(strs_esc.as_bytes()),
+        run_serde_vec_string(strs_esc.as_bytes()),
     );
 
     println!();
