@@ -26,10 +26,17 @@ enum State {
     ArrayCommaOrEnd,
     /// Inside an object, expecting either a key or `}`.
     ObjectKeyOrEnd,
-    /// Inside an object, just emitted a key, expecting `:`. The arm fuses
-    /// `:` consumption with the value parse, so we never observe a separate
-    /// "expecting value" state — that's why there's no `ObjectValue` here.
+    /// Inside an object, just emitted a key, expecting `:`. The streaming
+    /// fast-path fuses `:` consumption with the value parse so this state
+    /// rarely surfaces in `next_event`. The fast-path object API
+    /// (`object_first_key` / `object_next_key`) consumes `:` itself and
+    /// leaves the parser in `ObjectValue` so a subsequent `next_event`
+    /// call (for a heterogeneous value) parses the value correctly.
     ObjectColon,
+    /// Inside an object, after `:`, expecting a value. Used by the
+    /// fast-path object API as a handoff point when the caller falls back
+    /// to `next_event` for a single value.
+    ObjectValue,
     /// Inside an object, just emitted a value, expecting `,` or `}`.
     ObjectCommaOrEnd,
 }
@@ -260,6 +267,25 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                     Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
                     None => Err(self.err(ErrorKind::UnexpectedEof)),
                 },
+                // Reached when the fast-path object API (`object_first_key`
+                // / `object_next_key`) consumed `:` itself and handed off
+                // to `next_event` for the value. Same body as the second
+                // half of `ObjectColon`'s `:` arm above.
+                State::ObjectValue => {
+                    let ev = self.parse_value()?;
+                    if matches!(
+                        ev,
+                        Event::String(_)
+                            | Event::Number(_)
+                            | Event::Bool(_)
+                            | Event::Null
+                            | Event::EndArray
+                            | Event::EndObject
+                    ) {
+                        self.state = State::ObjectCommaOrEnd;
+                    }
+                    Ok(Some(ev))
+                }
                 State::ObjectCommaOrEnd => match self.peek() {
                     Some(b',') => {
                         self.bump();
@@ -626,6 +652,79 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
                 self.bump();
                 self.skip_whitespace();
                 Ok(false)
+            }
+            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    /// After a `StartObject` event, return the next key as a borrowed
+    /// `&'input str`, or `None` if the object closes immediately. The
+    /// cursor is left positioned at the byte after the key's `:`, ready
+    /// for the caller to parse the field's value.
+    ///
+    /// On the closing `}` this also runs the stack/state bookkeeping
+    /// `next_event` would have run. On a returned key, `state` is set to
+    /// `ObjectValue` so the caller can call `next_event` to consume the
+    /// value through the streaming path if no fast-path method fits.
+    #[inline]
+    pub fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'}') => {
+                self.bump();
+                let _ = self.close_container(Frame::Object)?;
+                Ok(None)
+            }
+            Some(b'"') => {
+                let key = self.parse_str_value()?;
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b':') => self.bump(),
+                    Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
+                    None => return Err(self.err(ErrorKind::UnexpectedEof)),
+                }
+                self.skip_whitespace();
+                self.state = State::ObjectValue;
+                Ok(Some(key))
+            }
+            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    /// After a field's value, advance to the next key or close the
+    /// object. Returns `Some(key)` for the next field or `None` if the
+    /// object closed (`}` consumed and stack popped). Caller must have
+    /// just finished consuming a value.
+    #[inline]
+    pub fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
+        self.skip_whitespace();
+        match self.peek() {
+            Some(b'}') => {
+                self.bump();
+                let _ = self.close_container(Frame::Object)?;
+                Ok(None)
+            }
+            Some(b',') => {
+                self.bump();
+                self.skip_whitespace();
+                match self.peek() {
+                    Some(b'"') => {
+                        let key = self.parse_str_value()?;
+                        self.skip_whitespace();
+                        match self.peek() {
+                            Some(b':') => self.bump(),
+                            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
+                            None => return Err(self.err(ErrorKind::UnexpectedEof)),
+                        }
+                        self.skip_whitespace();
+                        self.state = State::ObjectValue;
+                        Ok(Some(key))
+                    }
+                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
+                    None => Err(self.err(ErrorKind::UnexpectedEof)),
+                }
             }
             Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
             None => Err(self.err(ErrorKind::UnexpectedEof)),

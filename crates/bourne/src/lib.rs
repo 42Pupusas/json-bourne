@@ -114,6 +114,54 @@ mod tests {
         }
     }
 
+    /// Regression: after `object_first_key` consumes the key + `:`, the
+    /// parser must be in a state where `next_event` correctly reads the
+    /// next byte as the start of a value (not as the start of a key).
+    /// Mixing the fast-path object API with `next_event` per-value is a
+    /// supported pattern — `UserBourne::from_event` in the bench does
+    /// exactly this for fields whose typed path doesn't have a fused
+    /// `parse_*_value` method (e.g. `bool`, `Option<&str>`, `Vec<&str>`).
+    #[test]
+    fn object_first_key_then_next_event_for_value() {
+        let mut p: Parser<'_> = Parser::new(br#"{"flag":true}"#);
+        let start = p.next_event().unwrap().unwrap();
+        assert!(matches!(start, Event::StartObject));
+
+        // Fast-path: read the key, leaving cursor past `:`.
+        let key = p.object_first_key().unwrap().unwrap();
+        assert_eq!(key, "flag");
+
+        // Now fall back to next_event for the value.
+        let val = p.next_event().unwrap().unwrap();
+        assert_eq!(val, Event::Bool(true));
+
+        // Object close.
+        let close = p.next_event().unwrap().unwrap();
+        assert!(matches!(close, Event::EndObject));
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    /// Same shape, but using `object_next_key` after the first value to
+    /// pull the next key. Exercises both fast-path entry points.
+    #[test]
+    fn object_next_key_handoff_to_next_event() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a":1,"b":true}"#);
+        let _ = p.next_event().unwrap().unwrap(); // StartObject
+
+        let k1 = p.object_first_key().unwrap().unwrap();
+        assert_eq!(k1, "a");
+        let v1 = p.parse_i64_value().unwrap();
+        assert_eq!(v1, 1);
+
+        let k2 = p.object_next_key().unwrap().unwrap();
+        assert_eq!(k2, "b");
+        let v2 = p.next_event().unwrap().unwrap();
+        assert_eq!(v2, Event::Bool(true));
+
+        assert!(p.object_next_key().unwrap().is_none());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
     #[test]
     fn primitives_round_through_typed_parse() {
         assert!(parse_str::<bool>("true").unwrap());

@@ -72,32 +72,42 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
         let mut bio: Option<&'input str> = None;
         let mut links: Option<Vec<&'input str>> = None;
 
-        loop {
-            let ev = source
-                .next_event()?
-                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-            let key = match ev {
-                Event::EndObject => break,
-                Event::Key(k) => k,
-                _ => return Err(Error::new(ErrorKind::TypeMismatch, source.position())),
-            };
-            let key_str = key
-                .as_str(source.input())
-                .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, source.position()))?;
-
-            let val_ev = source
-                .next_event()?
-                .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
-
-            match key_str {
-                "id" => id = Some(u64::from_event(source, val_ev)?),
-                "name" => name = Some(<&str>::from_event(source, val_ev)?),
-                "verified" => verified = Some(bool::from_event(source, val_ev)?),
-                "followers" => followers = Some(u32::from_event(source, val_ev)?),
-                "bio" => bio = Option::<&str>::from_event(source, val_ev)?,
-                "links" => links = Some(Vec::<&str>::from_event(source, val_ev)?),
+        // Fast path: drive the parser with `object_first_key` /
+        // `object_next_key`, which lex the key as a borrowed `&str` and
+        // leave the cursor at the field's value. For each known field we
+        // call a typed `parse_*_value` directly, skipping the `Event`
+        // streaming detour.
+        let mut maybe_key = source.object_first_key()?;
+        while let Some(key) = maybe_key {
+            match key {
+                "id" => id = Some(u64::try_from(source.parse_i64_value()?).map_err(|_| {
+                    Error::new(ErrorKind::NumberOutOfRange, source.position())
+                })?),
+                "name" => name = Some(source.parse_str_value()?),
+                "verified" => {
+                    let ev = source.next_event()?
+                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
+                    verified = Some(bool::from_event(source, ev)?);
+                }
+                "followers" => followers = Some(u32::try_from(source.parse_i64_value()?).map_err(|_| {
+                    Error::new(ErrorKind::NumberOutOfRange, source.position())
+                })?),
+                "bio" => {
+                    // Optional<&str>: peek for `null` vs string. The value
+                    // path doesn't go through Event so we hand-roll the
+                    // distinguish here.
+                    let ev = source.next_event()?
+                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
+                    bio = Option::<&str>::from_event(source, ev)?;
+                }
+                "links" => {
+                    let ev = source.next_event()?
+                        .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, source.position()))?;
+                    links = Some(Vec::<&str>::from_event(source, ev)?);
+                }
                 _ => return Err(Error::new(ErrorKind::UnknownField, source.position())),
             }
+            maybe_key = source.object_next_key()?;
         }
 
         Ok(Self {

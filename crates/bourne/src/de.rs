@@ -60,6 +60,15 @@ pub trait EventSource<'input> {
     /// caller-owned decode buffer; bourne does not allocate). Cursor must
     /// be at the opening `"`.
     fn parse_str_value(&mut self) -> Result<&'input str, Error>;
+
+    /// After a `StartObject` event, read the next key. Returns `None` if
+    /// the object closed immediately (`{}`). Cursor is left at the start
+    /// of the field's value.
+    fn object_first_key(&mut self) -> Result<Option<&'input str>, Error>;
+
+    /// After a field value, advance to the next key or close the object.
+    /// Returns `None` if the object closed.
+    fn object_next_key(&mut self) -> Result<Option<&'input str>, Error>;
 }
 
 impl<'input, const MAX_DEPTH: usize> EventSource<'input> for Parser<'input, MAX_DEPTH> {
@@ -89,6 +98,14 @@ impl<'input, const MAX_DEPTH: usize> EventSource<'input> for Parser<'input, MAX_
 
     fn parse_str_value(&mut self) -> Result<&'input str, Error> {
         Self::parse_str_value(self)
+    }
+
+    fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
+        Self::object_first_key(self)
+    }
+
+    fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
+        Self::object_next_key(self)
     }
 }
 
