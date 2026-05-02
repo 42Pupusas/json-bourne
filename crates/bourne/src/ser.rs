@@ -53,6 +53,7 @@ pub trait JsonWrite {
     /// `"` characters). The default impl escapes one byte at a time
     /// through `write_byte`; sinks with bulk-write capability (like
     /// [`StringSink`]) override with a literal-run fast path.
+    #[inline]
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
         self.write_byte(b'"')?;
         for &b in s.as_bytes() {
@@ -62,6 +63,7 @@ pub trait JsonWrite {
     }
 
     /// Write a signed 64-bit integer as a JSON number.
+    #[inline]
     fn write_int_i64(&mut self, n: i64) -> Result<(), Self::Error> {
         let mut buf = [0u8; 20];
         let s = format_i64(n, &mut buf);
@@ -69,6 +71,7 @@ pub trait JsonWrite {
     }
 
     /// Write an unsigned 64-bit integer as a JSON number.
+    #[inline]
     fn write_int_u64(&mut self, n: u64) -> Result<(), Self::Error> {
         let mut buf = [0u8; 20];
         let s = format_u64(n, &mut buf);
@@ -76,6 +79,7 @@ pub trait JsonWrite {
     }
 
     /// Write a signed 128-bit integer as a JSON number.
+    #[inline]
     fn write_int_i128(&mut self, n: i128) -> Result<(), Self::Error> {
         let mut buf = [0u8; 40];
         let s = format_i128(n, &mut buf);
@@ -83,6 +87,7 @@ pub trait JsonWrite {
     }
 
     /// Write an unsigned 128-bit integer as a JSON number.
+    #[inline]
     fn write_int_u128(&mut self, n: u128) -> Result<(), Self::Error> {
         let mut buf = [0u8; 40];
         let s = format_u128(n, &mut buf);
