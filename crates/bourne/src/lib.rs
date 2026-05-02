@@ -16,6 +16,8 @@
 extern crate alloc;
 
 mod de;
+#[cfg(feature = "alloc")]
+mod float;
 mod ser;
 
 pub use bourne_core::{

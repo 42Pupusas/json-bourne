@@ -340,35 +340,22 @@ fn format_i128(n: i128, buf: &mut [u8; 40]) -> &str {
 // ---------------------------------------------------------------------------
 // Float formatting.
 //
-// Two implementations live here side-by-side:
+// `format_f64_write` dispatches to the in-tree Grisu3 formatter
+// (`crate::float::format_finite`), which falls back to libstd's
+// `Display for f64` on the ~0.5% of inputs where Grisu3 cannot prove
+// its output is the shortest round-trip representation.
 //
-//   1. `format_f64_write` — routes through `core::fmt::Write` via the
-//      `format!` / `write!` machinery. Correctness is delegated to libstd
-//      (which itself uses ryu under the hood since Rust 1.55), so this
-//      is byte-identical to the ryu crate's output for finite inputs.
-//      Cost: one `String` allocation per float plus the `Formatter`
-//      indirection — measured at ~3× a direct ryu call on profile.
-//
-//   2. `format_f64_ryu` — placeholder for the inline ryu port (PR-next).
-//      Empty in this commit so the bench can wire both paths and the
-//      `unimplemented!` body fails loudly if anything calls it before
-//      the algorithm lands.
-//
-// The `JsonWrite::write_float_f64` default routes to (1) so user code
-// works today; (2) is reachable from the bench via this module's
-// pub(crate) surface without going through the trait. Once benches show
-// (2) is materially faster on representative workloads, the trait
-// method body switches to it — that's a one-line edit.
+// The bench in `bourne-bench/floats` pins this entry point by name.
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "alloc")]
 pub mod float {
-    //! Public so the head-to-head bench in `bourne-bench` can pin both
-    //! formatters by name; not part of the documented API surface.
+    //! Public so the head-to-head bench in `bourne-bench` can pin the
+    //! production formatter by name; not part of the documented API
+    //! surface.
 
     use super::{Error, ErrorKind, Position};
     use alloc::string::String;
-    use core::fmt::Write as _;
 
     /// Reject `inf` / `-inf` / `NaN` with a typed error. Position is
     /// `START` because serializer errors don't have an input byte to
@@ -383,16 +370,13 @@ pub mod float {
         }
     }
 
-    /// `write!`-based formatter. Delegates correctness to libstd's
-    /// `Display for f64`, which uses ryu internally. The `format!`
-    /// macro allocates a temporary `String`; we then `push_str` that
-    /// into the user's buffer. One allocation per float.
+    /// Production float formatter. Delegates correctness to the
+    /// in-tree Grisu3 implementation (`crate::float`). Non-finite
+    /// inputs are rejected before any digit work happens.
+    #[inline]
     pub fn format_f64_write(f: f64, out: &mut String) -> Result<(), Error> {
         reject_non_finite(f)?;
-        // `write!` into a `String` is infallible (returns `fmt::Error`
-        // only when the underlying writer fails, which `String` never
-        // does), so the unwrap is structurally unreachable.
-        let _ = write!(out, "{f}");
+        crate::float::format_finite(f, out);
         Ok(())
     }
 
