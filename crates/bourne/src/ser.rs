@@ -545,13 +545,18 @@ fn write_array<T: ToJson, I: IntoIterator<Item = T>, W: JsonWrite + ?Sized>(
     w: &mut W,
 ) -> Result<(), W::Error> {
     w.write_byte(b'[')?;
-    let mut first = true;
-    for v in iter {
-        if !first {
-            w.write_byte(b',')?;
-        }
+    // Peel the first element so the inner loop never re-evaluates a
+    // `first` flag — every subsequent element unconditionally writes
+    // `,` then itself. Saves one branch per element on hot Vec/slice
+    // paths where the iterator is `ExactSizeIterator` and the compiler
+    // can hoist the check out of the loop.
+    let mut iter = iter.into_iter();
+    if let Some(v) = iter.next() {
         v.write_json(w)?;
-        first = false;
+        for v in iter {
+            w.write_byte(b',')?;
+            v.write_json(w)?;
+        }
     }
     w.write_byte(b']')
 }
