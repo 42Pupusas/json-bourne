@@ -92,5 +92,9 @@ harness = false
 name = "floats"
 harness = false
 
+[[bench]]
+name = "to_json_macro"
+harness = false
+
 [lints]
 workspace = true
