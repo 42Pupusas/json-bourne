@@ -1210,3 +1210,203 @@ mod ser_roundtrip {
         rt(Duration::new(42, 750_000_000));
     }
 }
+
+/// `to_json!` macro tests. Named-struct arms (PR 4 first slice).
+/// Each test pairs a `to_json!`-defined type against a manually-defined
+/// `from_json!` mirror so the round-trip exercises both macros on
+/// equivalent shapes.
+#[cfg(all(test, feature = "alloc"))]
+mod to_json_macro_tests {
+    use super::{parse_str, to_string};
+
+    // The simplest possible shape: plain struct, no attrs.
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct Plain {
+            id: u32,
+            name: String,
+        }
+    }
+
+    crate::from_json! {
+        #[derive(Debug, PartialEq)]
+        struct PlainParse {
+            id: u32,
+            name: String,
+        }
+    }
+
+    #[test]
+    fn plain_struct_emits_object() {
+        let v = Plain { id: 7, name: String::from("alice") };
+        let s = to_string(&v).unwrap();
+        // Field order matches declaration order.
+        assert_eq!(s, r#"{"id":7,"name":"alice"}"#);
+        // Parse back through the equivalent FromJson type.
+        let back: PlainParse = parse_str(&s).unwrap();
+        assert_eq!(back, PlainParse { id: 7, name: String::from("alice") });
+    }
+
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct Borrowed<'input> {
+            tag: &'input str,
+            count: u32,
+        }
+    }
+
+    #[test]
+    fn struct_with_lifetime() {
+        let v = Borrowed { tag: "hi", count: 3 };
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, r#"{"tag":"hi","count":3}"#);
+    }
+
+    // rename, skip, skip_if_none.
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct Decorated {
+            #[bourne(rename = "user-id")]
+            user_id: u32,
+            #[bourne(skip)]
+            cached: u32,
+            #[bourne(skip_if_none)]
+            note: Option<String>,
+            value: u32,
+        }
+    }
+
+    #[test]
+    fn rename_emits_new_key() {
+        let v = Decorated { user_id: 1, cached: 99, note: None, value: 42 };
+        let s = to_string(&v).unwrap();
+        // user-id renamed; cached omitted; note omitted (None); value present.
+        assert_eq!(s, r#"{"user-id":1,"value":42}"#);
+    }
+
+    #[test]
+    fn skip_if_none_emits_when_some() {
+        let v = Decorated {
+            user_id: 1,
+            cached: 0,
+            note: Some(String::from("hi")),
+            value: 7,
+        };
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, r#"{"user-id":1,"note":"hi","value":7}"#);
+    }
+
+    // Empty struct edge case.
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct Empty {}
+    }
+
+    #[test]
+    fn empty_struct_emits_empty_object() {
+        assert_eq!(to_string(&Empty {}).unwrap(), "{}");
+    }
+
+    // String escaping inside emitted values (sanity — should already
+    // work via the ToJson<String> impl, but the macro shouldn't
+    // double-escape or corrupt the output).
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct WithEscape {
+            text: String,
+        }
+    }
+
+    #[test]
+    fn macro_passes_strings_to_escape_path() {
+        let v = WithEscape { text: String::from("a\nb\"c") };
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, r#"{"text":"a\nb\"c"}"#);
+    }
+
+    // Newtype tuple struct — emits the inner value bare.
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct UserId(u64);
+    }
+
+    #[test]
+    fn newtype_emits_bare_value() {
+        let v = UserId(42);
+        assert_eq!(to_string(&v).unwrap(), "42");
+    }
+
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct BorrowedTag<'input>(&'input str);
+    }
+
+    #[test]
+    fn newtype_with_lifetime() {
+        let v = BorrowedTag("hello");
+        assert_eq!(to_string(&v).unwrap(), r#""hello""#);
+    }
+
+    // Multi-field tuple struct — emits a JSON array.
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct Point(i32, i32);
+    }
+
+    #[test]
+    fn tuple_struct_emits_array() {
+        let v = Point(3, -7);
+        assert_eq!(to_string(&v).unwrap(), "[3,-7]");
+    }
+
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        struct Triple(i32, String, bool);
+    }
+
+    #[test]
+    fn three_field_tuple_struct() {
+        let v = Triple(1, String::from("hi"), true);
+        assert_eq!(to_string(&v).unwrap(), r#"[1,"hi",true]"#);
+    }
+
+    // Externally-tagged enum — the default encoding.
+    crate::to_json! {
+        #[derive(Debug, PartialEq)]
+        enum Shape {
+            Circle,
+            Wrapper(u32),
+            Pair(u32, String),
+            Box { w: u32, h: u32 },
+            #[bourne(rename = "tri")]
+            Triangle,
+        }
+    }
+
+    #[test]
+    fn enum_unit_emits_string() {
+        assert_eq!(to_string(&Shape::Circle).unwrap(), r#""Circle""#);
+    }
+
+    #[test]
+    fn enum_renamed_unit() {
+        assert_eq!(to_string(&Shape::Triangle).unwrap(), r#""tri""#);
+    }
+
+    #[test]
+    fn enum_newtype_emits_object() {
+        assert_eq!(to_string(&Shape::Wrapper(7)).unwrap(), r#"{"Wrapper":7}"#);
+    }
+
+    #[test]
+    fn enum_tuple_emits_object_with_array() {
+        let v = Shape::Pair(1, String::from("x"));
+        assert_eq!(to_string(&v).unwrap(), r#"{"Pair":[1,"x"]}"#);
+    }
+
+    #[test]
+    fn enum_struct_variant_emits_nested_object() {
+        let v = Shape::Box { w: 10, h: 20 };
+        assert_eq!(to_string(&v).unwrap(), r#"{"Box":{"w":10,"h":20}}"#);
+    }
+}
