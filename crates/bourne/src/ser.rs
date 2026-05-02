@@ -402,7 +402,14 @@ pub trait ToJson {
 /// [`StringSink`] is itself infallible.
 #[cfg(feature = "alloc")]
 pub fn to_string<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> {
-    let mut out = String::new();
+    // 128-byte initial capacity matches `serde_json::to_string`. Most
+    // realistic JSON shapes (small structs, log lines, metric records)
+    // fit in 128–512 bytes, so a one-shot allocation here saves the
+    // 5-7 grow-and-copy reallocations a fresh `String::new()` would
+    // pay for the same payload. For larger output the cost is one
+    // unnecessary 128-byte alloc up front, amortized to nothing once
+    // the first realloc kicks in.
+    let mut out = String::with_capacity(128);
     let mut sink = StringSink::new(&mut out);
     value.write_json(&mut sink)?;
     Ok(out)
