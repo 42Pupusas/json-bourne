@@ -3817,18 +3817,24 @@ macro_rules! __to_json_enum_walk {
                 &$name::$vname { $(ref $fname),+ } => {
                     $w.write_byte(b'{')?;
                     $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'{')?;
+                    $w.write_str_raw(":{")?;
+                    // Per-field write fused into a single &'static str.
+                    // `concat!` evaluates at expand time so each field
+                    // emits one `write_str_raw` (one `String::push_str`)
+                    // for the comma+`"key":` punctuation, replacing what
+                    // used to be five sink calls. The runtime `__first`
+                    // branch stays — macro_rules! can't peel the first
+                    // field of a `$(...)+ ` repetition.
                     let mut __first: bool = true;
                     $(
                         if !__first { $w.write_byte(b',')?; }
-                        $w.write_escaped_str(::core::stringify!($fname))?;
-                        $w.write_byte(b':')?;
+                        $w.write_str_raw(
+                            ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                        )?;
                         $crate::ToJson::write_json($fname, $w)?;
                         __first = false;
                     )+
-                    $w.write_byte(b'}')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_str_raw("}}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4001,10 +4007,14 @@ macro_rules! __to_json_internal_walk {
                     $w.write_byte(b'"')?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
                     $w.write_byte(b'"')?;
+                    // Tag is always the first key, so every struct
+                    // field unconditionally needs the leading comma —
+                    // no `__first` flag required. Fuse `,"key":` into
+                    // a single `concat!` literal per field.
                     $(
-                        $w.write_byte(b',')?;
-                        $w.write_escaped_str(::core::stringify!($fname))?;
-                        $w.write_byte(b':')?;
+                        $w.write_str_raw(
+                            ::core::concat!(",\"", ::core::stringify!($fname), "\":")
+                        )?;
                         $crate::ToJson::write_json($fname, $w)?;
                     )+
                     $w.write_byte(b'}')?;
@@ -4313,18 +4323,17 @@ macro_rules! __to_json_adjacent_walk {
                     $w.write_byte(b'"')?;
                     $w.write_byte(b',')?;
                     $w.write_escaped_str($content)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'{')?;
+                    $w.write_str_raw(":{")?;
                     let mut __first: bool = true;
                     $(
                         if !__first { $w.write_byte(b',')?; }
-                        $w.write_escaped_str(::core::stringify!($fname))?;
-                        $w.write_byte(b':')?;
+                        $w.write_str_raw(
+                            ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                        )?;
                         $crate::ToJson::write_json($fname, $w)?;
                         __first = false;
                     )+
-                    $w.write_byte(b'}')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_str_raw("}}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4518,8 +4527,9 @@ macro_rules! __to_json_untagged_walk {
                     let mut __first: bool = true;
                     $(
                         if !__first { $w.write_byte(b',')?; }
-                        $w.write_escaped_str(::core::stringify!($fname))?;
-                        $w.write_byte(b':')?;
+                        $w.write_str_raw(
+                            ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                        )?;
                         $crate::ToJson::write_json($fname, $w)?;
                         __first = false;
                     )+
@@ -4742,6 +4752,14 @@ macro_rules! __to_json_emit_struct_def {
 macro_rules! __to_json_named_body {
     ($self:ident, $w:ident, $($body:tt)*) => {{
         $w.write_byte(b'{')?;
+        // `__first` exists only for the dynamic-comma path: as soon as
+        // a `skip_if_none` field is encountered, comma placement
+        // becomes runtime-dependent and subsequent fields consult this
+        // flag. Pure-plain structs never read or write it (the walker
+        // emits static `,"key":` literals via `concat!`), so the
+        // `#[allow(unused)]` suppresses a "let assigned never read"
+        // warning for that common case.
+        #[allow(unused_assignments, unused_mut, unused_variables)]
         let mut __first: bool = true;
         $crate::__to_json_named_walk!(
             self_ref: $self,
@@ -4753,6 +4771,7 @@ macro_rules! __to_json_named_body {
             cur_skip_if_none: (),
             cur_name: (),
             ftokens: [],
+            static_first: (yes),
             input: ($($body)*)
         );
         $w.write_byte(b'}')?;
@@ -4790,6 +4809,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: (),
         cur_name: (),
         ftokens: [],
+        static_first: ($($_sf:tt)?),
         input: ()
     ) => {
         $($emit)*
@@ -4798,7 +4818,9 @@ macro_rules! __to_json_named_walk {
     // ---------- Phase 1b-skip: terminal commit for #[bourne(skip)]. ----------
     //
     // Skipped fields contribute nothing to `emit`. Type tokens are
-    // discarded.
+    // discarded. `static_first` is preserved unchanged — a skipped
+    // field neither emits punctuation nor changes the leading-comma
+    // posture of the next field.
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -4821,11 +4843,22 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: (),
             cur_name: (),
             ftokens: [],
+            static_first: (no),  // doesn't matter — input exhausted
             input: ()
         )
     };
 
     // ---------- Phase 1c: terminal — last field, skip_if_none variant. ----------
+    //
+    // skip_if_none always emits a runtime conditional regardless of
+    // `static_first`. Two flavors:
+    //   - `static_first: (yes)`: this is the *only* field, so
+    //     unconditionally elide the leading comma (the `if !$first`
+    //     branch is dead — `__first` is still `true`).
+    //   - `static_first: (no | maybe)`: prior fields may or may not
+    //     have committed. If `(no)`, a prior plain field always
+    //     committed and we always need the comma. If `(maybe)`, fall
+    //     back to the runtime flag.
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -4859,11 +4892,93 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: (),
             cur_name: (),
             ftokens: [],
+            static_first: (no),
             input: ()
         )
     };
 
-    // ---------- Phase 1d: terminal — last field, plain. ----------
+    // ---------- Phase 1d: terminal — last field, plain, no rename, static-known. ----------
+    //
+    // Fast path: no rename means the key is `stringify!($fname)`,
+    // which is guaranteed to be a Rust ident — no escape-needing
+    // bytes. Fuse `,"key":` (or `"key":` if first) into a single
+    // `concat!()` literal and emit via `write_str_raw` (one
+    // `String::push_str`).
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        emit: { $($emit:tt)* },
+        cur_rename: (),
+        cur_skip: (),
+        cur_skip_if_none: (),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        static_first: (yes),
+        input: ()
+    ) => {
+        $crate::__to_json_named_walk!(
+            self_ref: $self,
+            sink: $w,
+            first: $first,
+            emit: {
+                $($emit)*
+                $w.write_str_raw(
+                    ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                )?;
+                $crate::ToJson::write_json(&$self.$fname, $w)?;
+            },
+            cur_rename: (),
+            cur_skip: (),
+            cur_skip_if_none: (),
+            cur_name: (),
+            ftokens: [],
+            static_first: (no),
+            input: ()
+        )
+    };
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        emit: { $($emit:tt)* },
+        cur_rename: (),
+        cur_skip: (),
+        cur_skip_if_none: (),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        static_first: (no),
+        input: ()
+    ) => {
+        $crate::__to_json_named_walk!(
+            self_ref: $self,
+            sink: $w,
+            first: $first,
+            emit: {
+                $($emit)*
+                $w.write_str_raw(
+                    ::core::concat!(",\"", ::core::stringify!($fname), "\":")
+                )?;
+                $crate::ToJson::write_json(&$self.$fname, $w)?;
+            },
+            cur_rename: (),
+            cur_skip: (),
+            cur_skip_if_none: (),
+            cur_name: (),
+            ftokens: [],
+            static_first: (no),
+            input: ()
+        )
+    };
+
+    // ---------- Phase 1d: terminal — last field, plain, dynamic comma. ----------
+    //
+    // Slow path. Either:
+    //   - the field is renamed (we keep `write_escaped_str` because
+    //     the rename literal is user-controlled and may legitimately
+    //     contain bytes that need escaping), or
+    //   - a prior `skip_if_none` made comma placement runtime-
+    //     dependent (`static_first: (maybe)`).
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -4874,6 +4989,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: (),
         cur_name: ($fname:ident),
         ftokens: [ $($_ft:tt)+ ],
+        static_first: ($($_sf:tt)?),
         input: ()
     ) => {
         $crate::__to_json_named_walk!(
@@ -4895,6 +5011,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: (),
             cur_name: (),
             ftokens: [],
+            static_first: (maybe),
             input: ()
         )
     };
@@ -4910,6 +5027,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($sin:tt)?),
         cur_name: (),
         ftokens: [],
+        static_first: ($($sf:tt)?),
         input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -4922,6 +5040,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: ($($sin)?),
             cur_name: (),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
@@ -4937,6 +5056,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($sin:tt)?),
         cur_name: (),
         ftokens: [],
+        static_first: ($($sf:tt)?),
         input: ( #[bourne(skip)] $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -4949,6 +5069,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: ($($sin)?),
             cur_name: (),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
@@ -4964,6 +5085,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: (),
         cur_name: (),
         ftokens: [],
+        static_first: ($($sf:tt)?),
         input: ( #[bourne(skip_if_none)] $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -4976,6 +5098,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: (yes),
             cur_name: (),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
@@ -4991,6 +5114,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($sin:tt)?),
         cur_name: (),
         ftokens: [],
+        static_first: ($($sf:tt)?),
         input: ( #[bourne(default)] $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5003,6 +5127,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: ($($sin)?),
             cur_name: (),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
@@ -5018,6 +5143,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($sin:tt)?),
         cur_name: (),
         ftokens: [],
+        static_first: ($($sf:tt)?),
         input: ( #[bourne(rename = $renamed:literal, default)] $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5030,6 +5156,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: ($($sin)?),
             cur_name: (),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
@@ -5049,6 +5176,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($sin:tt)?),
         cur_name: (),
         ftokens: [],
+        static_first: ($($sf:tt)?),
         input: ( pub $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5061,6 +5189,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: ($($sin)?),
             cur_name: (),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
@@ -5076,6 +5205,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($sin:tt)?),
         cur_name: (),
         ftokens: [],
+        static_first: ($($sf:tt)?),
         input: ( $fname:ident : $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5088,13 +5218,16 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: ($($sin)?),
             cur_name: ($fname),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
 
     // ---------- Phase 2: comma commits the in-flight field. ----------
     //
-    // skip variant: drop the field on the floor.
+    // skip variant: drop the field on the floor. `static_first` is
+    // unchanged — a skipped field neither emits nor changes the
+    // leading-comma posture of the next field.
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -5105,6 +5238,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($_si:tt)?),
         cur_name: ($fname:ident),
         ftokens: [ $($_ft:tt)+ ],
+        static_first: ($($sf:tt)?),
         input: ( , $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5117,11 +5251,18 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: (),
             cur_name: (),
             ftokens: [],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
 
-    // skip_if_none variant: emit the conditional block.
+    // skip_if_none variant: emit the conditional block. After the
+    // block, comma posture is runtime-dependent (the field may or may
+    // not have committed), so transition `static_first` to (maybe).
+    //
+    // Two sub-arms specialize the leading-comma computation by current
+    // `static_first`: (yes) means we're definitely the first emit and
+    // the comma never fires; (no | maybe) keeps the runtime branch.
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -5132,6 +5273,44 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: (yes),
         cur_name: ($fname:ident),
         ftokens: [ $($_ft:tt)+ ],
+        static_first: (yes),
+        input: ( , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_named_walk!(
+            self_ref: $self,
+            sink: $w,
+            first: $first,
+            emit: {
+                $($emit)*
+                if let ::core::option::Option::Some(ref __v) = $self.$fname {
+                    $w.write_escaped_str(
+                        $crate::__to_json_field_key!($fname, ($($rename)?))
+                    )?;
+                    $w.write_byte(b':')?;
+                    $crate::ToJson::write_json(__v, $w)?;
+                    $first = false;
+                }
+            },
+            cur_rename: (),
+            cur_skip: (),
+            cur_skip_if_none: (),
+            cur_name: (),
+            ftokens: [],
+            static_first: (maybe),
+            input: ($($rest)*)
+        )
+    };
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        emit: { $($emit:tt)* },
+        cur_rename: ($($rename:tt)?),
+        cur_skip: (),
+        cur_skip_if_none: (yes),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        static_first: ($($_sf:tt)?),
         input: ( , $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5155,11 +5334,101 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: (),
             cur_name: (),
             ftokens: [],
+            static_first: (maybe),
             input: ($($rest)*)
         )
     };
 
-    // plain variant: emit the unconditional block.
+    // plain variant, no rename, static-first: yes.
+    //
+    // Fast path. `concat!("\"", stringify!($fname), "\":")` collapses
+    // to a single &'static str, and the value is the only field
+    // committed so far so no leading comma. Single `write_str_raw`
+    // (one `String::push_str`) replaces the old 4 sink calls.
+    //
+    // `$first = false;` keeps the runtime flag in sync so a later
+    // skip_if_none or renamed field that falls back to the dynamic
+    // arm sees the correct posture. The store is hoisted out of any
+    // loop in the caller and disappears under register allocation.
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        emit: { $($emit:tt)* },
+        cur_rename: (),
+        cur_skip: (),
+        cur_skip_if_none: (),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        static_first: (yes),
+        input: ( , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_named_walk!(
+            self_ref: $self,
+            sink: $w,
+            first: $first,
+            emit: {
+                $($emit)*
+                $w.write_str_raw(
+                    ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                )?;
+                $crate::ToJson::write_json(&$self.$fname, $w)?;
+                $first = false;
+            },
+            cur_rename: (),
+            cur_skip: (),
+            cur_skip_if_none: (),
+            cur_name: (),
+            ftokens: [],
+            static_first: (no),
+            input: ($($rest)*)
+        )
+    };
+
+    // plain variant, no rename, static-first: no.
+    //
+    // Fast path. The leading comma is also static, so fold it into
+    // the same literal: `,"key":`.
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        emit: { $($emit:tt)* },
+        cur_rename: (),
+        cur_skip: (),
+        cur_skip_if_none: (),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        static_first: (no),
+        input: ( , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_named_walk!(
+            self_ref: $self,
+            sink: $w,
+            first: $first,
+            emit: {
+                $($emit)*
+                $w.write_str_raw(
+                    ::core::concat!(",\"", ::core::stringify!($fname), "\":")
+                )?;
+                $crate::ToJson::write_json(&$self.$fname, $w)?;
+            },
+            cur_rename: (),
+            cur_skip: (),
+            cur_skip_if_none: (),
+            cur_name: (),
+            ftokens: [],
+            static_first: (no),
+            input: ($($rest)*)
+        )
+    };
+
+    // plain variant, dynamic comma fallback (rename set, OR a prior
+    // `skip_if_none` made comma posture runtime-dependent).
+    //
+    // - Rename: `$renamed` is user-controlled and may contain bytes
+    //   that need escaping; route through `write_escaped_str`.
+    // - `static_first: (maybe)`: consult the runtime `__first` flag.
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -5170,6 +5439,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: (),
         cur_name: ($fname:ident),
         ftokens: [ $($_ft:tt)+ ],
+        static_first: ($($_sf:tt)?),
         input: ( , $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5191,6 +5461,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: (),
             cur_name: (),
             ftokens: [],
+            static_first: (maybe),
             input: ($($rest)*)
         )
     };
@@ -5211,6 +5482,7 @@ macro_rules! __to_json_named_walk {
         cur_skip_if_none: ($($sin:tt)?),
         cur_name: ($fname:ident),
         ftokens: [ $($ftokens:tt)* ],
+        static_first: ($($sf:tt)?),
         input: ( $tok:tt $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
@@ -5223,6 +5495,7 @@ macro_rules! __to_json_named_walk {
             cur_skip_if_none: ($($sin)?),
             cur_name: ($fname),
             ftokens: [ $($ftokens)* $tok ],
+            static_first: ($($sf)?),
             input: ($($rest)*)
         )
     };
