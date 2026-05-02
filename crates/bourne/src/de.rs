@@ -587,13 +587,48 @@ mod alloc_impls {
     impl<'input> FromJson<'input> for std::time::Duration {
         #[allow(clippy::cast_precision_loss)]
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            let secs_f = f64::from_lex(lex)?;
-            // `Duration::from_secs_f64` panics on these inputs; convert
-            // to typed errors before calling.
+            // Skip the `f64::from_lex` detour: that does a
+            // `peek_value_kind` first, which `parse_f64_value`'s
+            // own type check makes redundant for the Number arm.
+            let secs_f = match lex.peek_value_kind()? {
+                ValueKind::Number => lex.parse_f64_value()?,
+                _ => return Err(type_error(lex, ErrorKind::ExpectedNumber)),
+            };
+            // `Duration::from_secs_f64` panics on these inputs;
+            // convert to typed errors before calling.
             if !secs_f.is_finite() || secs_f < 0.0 || secs_f >= (u64::MAX as f64) {
                 return Err(type_error(lex, ErrorKind::NumberOutOfRange));
             }
             Ok(Self::from_secs_f64(secs_f))
+        }
+
+        /// Fused-pass fast path for `Vec<Duration>`. Mirrors the
+        /// `Vec<f64>` override: `parse_f64_value` directly per
+        /// element, no type-peek detour past the first.
+        #[cfg(feature = "alloc")]
+        #[allow(clippy::cast_precision_loss)]
+        fn vec_from_lex(lex: &mut Lexer<'input>) -> Result<alloc::vec::Vec<Self>, Error> {
+            #[inline]
+            fn convert(
+                lex: &Lexer<'_>,
+                secs_f: f64,
+            ) -> Result<std::time::Duration, Error> {
+                if !secs_f.is_finite() || secs_f < 0.0 || secs_f >= (u64::MAX as f64) {
+                    return Err(type_error(lex, ErrorKind::NumberOutOfRange));
+                }
+                Ok(std::time::Duration::from_secs_f64(secs_f))
+            }
+            let mut out: alloc::vec::Vec<Self> = alloc::vec::Vec::new();
+            if lex.array_start()? {
+                return Ok(out);
+            }
+            let secs_f = lex.parse_f64_value()?;
+            out.push(convert(lex, secs_f)?);
+            while !lex.array_continue(b']')? {
+                let secs_f = lex.parse_f64_value()?;
+                out.push(convert(lex, secs_f)?);
+            }
+            Ok(out)
         }
     }
 
