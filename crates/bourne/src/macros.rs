@@ -3269,7 +3269,235 @@ macro_rules! to_json {
     };
 
     // -----------------------------------------------------------------
-    // Externally-tagged enum, no generics.
+    // Untagged enum, no generics.
+    //
+    //   #[bourne(untagged)]
+    //   enum E { Foo, Bar(T), Baz(T,U), Qux { x: T } }
+    //
+    // emits the variant's payload bare:
+    //   Foo  → null
+    //   Bar  → <T>
+    //   Baz  → [T, U]
+    //   Qux  → {"x": T}
+    //
+    // The parse side disambiguates by trial; the ser side just
+    // matches on `self` and writes the raw shape.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(untagged)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_untagged_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    arms: { },
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    (
+        #[bourne(untagged)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_untagged_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    arms: { },
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Internally-tagged enum, no generics.
+    //
+    //   #[bourne(tag = "type")]
+    //   enum E { Foo, Bar { x: u32 } }
+    //
+    // emits { "type": "Foo" } / { "type": "Bar", "x": 42 }.
+    //
+    // Only unit + struct variants. Newtype / tuple variants reject at
+    // parse time too — they have no coherent internally-tagged shape.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(tag = $tag:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_internal_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    (
+        #[bourne(tag = $tag:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_internal_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Adjacently-tagged enum, no generics.
+    //
+    //   #[bourne(tag = "t", content = "c")]
+    //   enum E { Foo, Bar(u32), Baz(u32, u32), Qux { x: u32 } }
+    //
+    // emits:
+    //   Foo  → {"t":"Foo"}
+    //   Bar  → {"t":"Bar","c":42}
+    //   Baz  → {"t":"Baz","c":[1,2]}
+    //   Qux  → {"t":"Qux","c":{"x":1}}
+    // -----------------------------------------------------------------
+    (
+        #[bourne(tag = $tag:literal, content = $content:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_adjacent_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    content: $content,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    (
+        #[bourne(tag = $tag:literal, content = $content:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_adjacent_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    content: $content,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Externally-tagged enum, no generics. (Default — no container attr.)
     //
     // Variant shapes:
     //   - Unit `Foo`            → string `"Foo"`
@@ -3605,6 +3833,700 @@ macro_rules! __to_json_enum_walk {
                 }
             },
             cur_rename: (),
+            input: ( $($($rest)*)? )
+        )
+    };
+}
+
+// ============================================================================
+// Internally-tagged enum walker.
+//
+// Each variant is encoded as a single object whose first key is the
+// configured tag literal carrying the variant name (or rename), and
+// whose remaining keys are the variant's struct fields. Unit variants
+// produce just the tag entry.
+//
+// Newtype / tuple variants are unsupported (mirror from_json! — they
+// have no coherent internally-tagged shape). The macro is silently
+// silent if you try to use one; it just won't match any arm and
+// you'll get a compilation error pointing at the variant. That's
+// the same failure mode as the parse side.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __to_json_internal_walk {
+    // Terminal: splice arms into a match.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: (),
+        input: ()
+    ) => {
+        match $r {
+            $($arms)*
+        }
+    };
+
+    // bourne(rename = "x") on the next variant.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        arms: $arms:tt,
+        cur_rename: (),
+        input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_internal_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            arms: $arms,
+            cur_rename: ($renamed),
+            input: ($($rest)*)
+        )
+    };
+
+    // Skip other attributes.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        arms: $arms:tt,
+        cur_rename: ($($rename:tt)?),
+        input: ( #[$_other:meta] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_internal_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            arms: $arms,
+            cur_rename: ($($rename)?),
+            input: ($($rest)*)
+        )
+    };
+
+    // Unit variant: `{"tag":"VariantName"}`.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_internal_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            arms: {
+                $($arms)*
+                &$name::$vname => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ($($rest)*)
+        )
+    };
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident )
+    ) => {
+        $crate::__to_json_internal_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            arms: {
+                $($arms)*
+                &$name::$vname => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ()
+        )
+    };
+
+    // Struct variant: `{"tag":"VariantName","field1":..,"field2":..}`.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident { $($fname:ident : $_fty:ty),+ $(,)? } $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_internal_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            arms: {
+                $($arms)*
+                &$name::$vname { $(ref $fname),+ } => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $(
+                        $w.write_byte(b',')?;
+                        $w.write_escaped_str(::core::stringify!($fname))?;
+                        $w.write_byte(b':')?;
+                        $crate::ToJson::write_json($fname, $w)?;
+                    )+
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ( $($($rest)*)? )
+        )
+    };
+}
+
+// ============================================================================
+// Adjacently-tagged enum walker.
+//
+// Each variant emits {"tag":"Name","content":<payload>}. Unit
+// variants omit the content key entirely (mirror the parse side).
+// All four variant shapes are supported.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __to_json_adjacent_walk {
+    // Terminal.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: (),
+        input: ()
+    ) => {
+        match $r {
+            $($arms)*
+        }
+    };
+
+    // bourne(rename = "x").
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: $arms:tt,
+        cur_rename: (),
+        input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: $arms,
+            cur_rename: ($renamed),
+            input: ($($rest)*)
+        )
+    };
+
+    // Skip other attributes.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: $arms:tt,
+        cur_rename: ($($rename:tt)?),
+        input: ( #[$_other:meta] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: $arms,
+            cur_rename: ($($rename)?),
+            input: ($($rest)*)
+        )
+    };
+
+    // Unit variant: `{"tag":"Name"}` — no content key.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: {
+                $($arms)*
+                &$name::$vname => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ($($rest)*)
+        )
+    };
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: {
+                $($arms)*
+                &$name::$vname => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ()
+        )
+    };
+
+    // Newtype variant: `{"tag":"Name","content":<inner>}`.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident ( $_fty:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: {
+                $($arms)*
+                &$name::$vname(ref __inner) => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b',')?;
+                    $w.write_escaped_str($content)?;
+                    $w.write_byte(b':')?;
+                    $crate::ToJson::write_json(__inner, $w)?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ( $($($rest)*)? )
+        )
+    };
+
+    // Tuple variant (2 fields): content is a JSON array.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident ( $_a:ty, $_b:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: {
+                $($arms)*
+                &$name::$vname(ref __a, ref __b) => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b',')?;
+                    $w.write_escaped_str($content)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'[')?;
+                    $crate::ToJson::write_json(__a, $w)?;
+                    $w.write_byte(b',')?;
+                    $crate::ToJson::write_json(__b, $w)?;
+                    $w.write_byte(b']')?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ( $($($rest)*)? )
+        )
+    };
+
+    // Tuple variant (3 fields).
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident ( $_a:ty, $_b:ty, $_c:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: {
+                $($arms)*
+                &$name::$vname(ref __a, ref __b, ref __c) => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b',')?;
+                    $w.write_escaped_str($content)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'[')?;
+                    $crate::ToJson::write_json(__a, $w)?;
+                    $w.write_byte(b',')?;
+                    $crate::ToJson::write_json(__b, $w)?;
+                    $w.write_byte(b',')?;
+                    $crate::ToJson::write_json(__c, $w)?;
+                    $w.write_byte(b']')?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ( $($($rest)*)? )
+        )
+    };
+
+    // Struct variant: content is a JSON object.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        tag: $tag:literal,
+        content: $content:literal,
+        arms: { $($arms:tt)* },
+        cur_rename: ($($rename:tt)?),
+        input: ( $vname:ident { $($fname:ident : $_fty:ty),+ $(,)? } $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_adjacent_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            tag: $tag,
+            content: $content,
+            arms: {
+                $($arms)*
+                &$name::$vname { $(ref $fname),+ } => {
+                    $w.write_byte(b'{')?;
+                    $w.write_escaped_str($tag)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'"')?;
+                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_byte(b'"')?;
+                    $w.write_byte(b',')?;
+                    $w.write_escaped_str($content)?;
+                    $w.write_byte(b':')?;
+                    $w.write_byte(b'{')?;
+                    let mut __first: bool = true;
+                    $(
+                        if !__first { $w.write_byte(b',')?; }
+                        $w.write_escaped_str(::core::stringify!($fname))?;
+                        $w.write_byte(b':')?;
+                        $crate::ToJson::write_json($fname, $w)?;
+                        __first = false;
+                    )+
+                    $w.write_byte(b'}')?;
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            cur_rename: (),
+            input: ( $($($rest)*)? )
+        )
+    };
+}
+
+// ============================================================================
+// Untagged enum walker.
+//
+// Each variant's payload is written bare with no surrounding tag.
+// Unit → `null`, newtype → inner, tuple → array, struct → object.
+// Variant-level rename has no meaning (no tag is emitted), so we
+// simply ignore it.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __to_json_untagged_walk {
+    // Terminal.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { $($arms:tt)* },
+        input: ()
+    ) => {
+        match $r {
+            $($arms)*
+        }
+    };
+
+    // Drop attributes — rename has no tag to retag here, ignore quietly.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: $arms:tt,
+        input: ( #[$_other:meta] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_untagged_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            arms: $arms,
+            input: ($($rest)*)
+        )
+    };
+
+    // Unit variant: emit `null`.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { $($arms:tt)* },
+        input: ( $vname:ident , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_untagged_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            arms: {
+                $($arms)*
+                &$name::$vname => {
+                    $w.write_str_raw("null")?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            input: ($($rest)*)
+        )
+    };
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { $($arms:tt)* },
+        input: ( $vname:ident )
+    ) => {
+        $crate::__to_json_untagged_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            arms: {
+                $($arms)*
+                &$name::$vname => {
+                    $w.write_str_raw("null")?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            input: ()
+        )
+    };
+
+    // Newtype variant: emit the inner value bare.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { $($arms:tt)* },
+        input: ( $vname:ident ( $_fty:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_untagged_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            arms: {
+                $($arms)*
+                &$name::$vname(ref __inner) => {
+                    $crate::ToJson::write_json(__inner, $w)?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            input: ( $($($rest)*)? )
+        )
+    };
+
+    // Tuple variant (2 fields): emit as array.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { $($arms:tt)* },
+        input: ( $vname:ident ( $_a:ty, $_b:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_untagged_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            arms: {
+                $($arms)*
+                &$name::$vname(ref __a, ref __b) => {
+                    $w.write_byte(b'[')?;
+                    $crate::ToJson::write_json(__a, $w)?;
+                    $w.write_byte(b',')?;
+                    $crate::ToJson::write_json(__b, $w)?;
+                    $w.write_byte(b']')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            input: ( $($($rest)*)? )
+        )
+    };
+
+    // Tuple variant (3 fields).
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { $($arms:tt)* },
+        input: ( $vname:ident ( $_a:ty, $_b:ty, $_c:ty $(,)? ) $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_untagged_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            arms: {
+                $($arms)*
+                &$name::$vname(ref __a, ref __b, ref __c) => {
+                    $w.write_byte(b'[')?;
+                    $crate::ToJson::write_json(__a, $w)?;
+                    $w.write_byte(b',')?;
+                    $crate::ToJson::write_json(__b, $w)?;
+                    $w.write_byte(b',')?;
+                    $crate::ToJson::write_json(__c, $w)?;
+                    $w.write_byte(b']')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
+            input: ( $($($rest)*)? )
+        )
+    };
+
+    // Struct variant: emit as object.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { $($arms:tt)* },
+        input: ( $vname:ident { $($fname:ident : $_fty:ty),+ $(,)? } $(, $($rest:tt)*)? )
+    ) => {
+        $crate::__to_json_untagged_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            arms: {
+                $($arms)*
+                &$name::$vname { $(ref $fname),+ } => {
+                    $w.write_byte(b'{')?;
+                    let mut __first: bool = true;
+                    $(
+                        if !__first { $w.write_byte(b',')?; }
+                        $w.write_escaped_str(::core::stringify!($fname))?;
+                        $w.write_byte(b':')?;
+                        $crate::ToJson::write_json($fname, $w)?;
+                        __first = false;
+                    )+
+                    $w.write_byte(b'}')?;
+                    ::core::result::Result::Ok(())
+                }
+            },
             input: ( $($($rest)*)? )
         )
     };

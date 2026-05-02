@@ -1409,4 +1409,94 @@ mod to_json_macro_tests {
         let v = Shape::Box { w: 10, h: 20 };
         assert_eq!(to_string(&v).unwrap(), r#"{"Box":{"w":10,"h":20}}"#);
     }
+
+    // Internally-tagged enum.
+    crate::to_json! {
+        #[bourne(tag = "type")]
+        #[derive(Debug, PartialEq)]
+        enum Event {
+            Heartbeat,
+            #[bourne(rename = "click")]
+            Click { x: u32, y: u32 },
+        }
+    }
+
+    #[test]
+    fn internal_tag_unit_emits_object_with_tag() {
+        assert_eq!(to_string(&Event::Heartbeat).unwrap(), r#"{"type":"Heartbeat"}"#);
+    }
+
+    #[test]
+    fn internal_tag_struct_inlines_fields() {
+        let v = Event::Click { x: 1, y: 2 };
+        assert_eq!(to_string(&v).unwrap(), r#"{"type":"click","x":1,"y":2}"#);
+    }
+
+    // Adjacently-tagged enum.
+    crate::to_json! {
+        #[bourne(tag = "t", content = "c")]
+        #[derive(Debug, PartialEq)]
+        enum Msg {
+            Ping,
+            Echo(String),
+            Pair(u32, u32),
+            Body { text: String },
+        }
+    }
+
+    #[test]
+    fn adjacent_unit_emits_only_tag() {
+        assert_eq!(to_string(&Msg::Ping).unwrap(), r#"{"t":"Ping"}"#);
+    }
+
+    #[test]
+    fn adjacent_newtype_emits_content() {
+        let v = Msg::Echo(String::from("hi"));
+        assert_eq!(to_string(&v).unwrap(), r#"{"t":"Echo","c":"hi"}"#);
+    }
+
+    #[test]
+    fn adjacent_tuple_emits_content_array() {
+        let v = Msg::Pair(1, 2);
+        assert_eq!(to_string(&v).unwrap(), r#"{"t":"Pair","c":[1,2]}"#);
+    }
+
+    #[test]
+    fn adjacent_struct_emits_content_object() {
+        let v = Msg::Body { text: String::from("ok") };
+        assert_eq!(to_string(&v).unwrap(), r#"{"t":"Body","c":{"text":"ok"}}"#);
+    }
+
+    // Untagged enum.
+    crate::to_json! {
+        #[bourne(untagged)]
+        #[derive(Debug, PartialEq)]
+        enum Mixed {
+            Nothing,
+            One(u32),
+            Two(u32, u32),
+            Body { name: String },
+        }
+    }
+
+    #[test]
+    fn untagged_unit_emits_null() {
+        assert_eq!(to_string(&Mixed::Nothing).unwrap(), "null");
+    }
+
+    #[test]
+    fn untagged_newtype_emits_inner() {
+        assert_eq!(to_string(&Mixed::One(42)).unwrap(), "42");
+    }
+
+    #[test]
+    fn untagged_tuple_emits_array() {
+        assert_eq!(to_string(&Mixed::Two(1, 2)).unwrap(), "[1,2]");
+    }
+
+    #[test]
+    fn untagged_struct_emits_object() {
+        let v = Mixed::Body { name: String::from("x") };
+        assert_eq!(to_string(&v).unwrap(), r#"{"name":"x"}"#);
+    }
 }
