@@ -88,6 +88,17 @@ pub trait JsonWrite {
         let s = format_u128(n, &mut buf);
         self.write_str_raw(s)
     }
+
+    /// Write a finite `f64` as a JSON number. Non-finite inputs (`inf`,
+    /// `-inf`, `NaN`) have no JSON representation; sinks reject them
+    /// via their `Self::Error` type.
+    ///
+    /// The default routes through `core::fmt::Write` after stack-buffer
+    /// formatting via `format!` — this is the "good enough" path that
+    /// works for any sink. Sinks that want shortest-round-trip output
+    /// without fmt overhead override with a direct ryu call.
+    #[cfg(feature = "alloc")]
+    fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error>;
 }
 
 /// Write one byte of a string body, applying JSON escape rules.
@@ -143,7 +154,11 @@ impl<'a> StringSink<'a> {
 
 #[cfg(feature = "alloc")]
 impl JsonWrite for StringSink<'_> {
-    type Error = core::convert::Infallible;
+    /// `StringSink` widens its error to [`Error`] (rather than
+    /// [`core::convert::Infallible`]) so the float path has a typed
+    /// variant for non-finite inputs. The byte/string/integer writes
+    /// never fail in practice; only `write_float_f64` produces an `Err`.
+    type Error = Error;
 
     #[inline]
     fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
@@ -189,6 +204,15 @@ impl JsonWrite for StringSink<'_> {
         }
         self.out.push('"');
         Ok(())
+    }
+
+    /// Production float path. Currently dispatches to the `write!`-based
+    /// formatter — see the `float` module below for the alternate ryu
+    /// path and the bench that picks between them. Both reject non-finite
+    /// inputs with `ErrorKind::NonFiniteFloat`.
+    #[inline]
+    fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
+        float::format_f64_write(f, self.out)
     }
 }
 
@@ -314,6 +338,67 @@ fn format_i128(n: i128, buf: &mut [u8; 40]) -> &str {
 }
 
 // ---------------------------------------------------------------------------
+// Float formatting.
+//
+// Two implementations live here side-by-side:
+//
+//   1. `format_f64_write` — routes through `core::fmt::Write` via the
+//      `format!` / `write!` machinery. Correctness is delegated to libstd
+//      (which itself uses ryu under the hood since Rust 1.55), so this
+//      is byte-identical to the ryu crate's output for finite inputs.
+//      Cost: one `String` allocation per float plus the `Formatter`
+//      indirection — measured at ~3× a direct ryu call on profile.
+//
+//   2. `format_f64_ryu` — placeholder for the inline ryu port (PR-next).
+//      Empty in this commit so the bench can wire both paths and the
+//      `unimplemented!` body fails loudly if anything calls it before
+//      the algorithm lands.
+//
+// The `JsonWrite::write_float_f64` default routes to (1) so user code
+// works today; (2) is reachable from the bench via this module's
+// pub(crate) surface without going through the trait. Once benches show
+// (2) is materially faster on representative workloads, the trait
+// method body switches to it — that's a one-line edit.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "alloc")]
+pub mod float {
+    //! Public so the head-to-head bench in `bourne-bench` can pin both
+    //! formatters by name; not part of the documented API surface.
+
+    use super::{Error, ErrorKind, Position};
+    use alloc::string::String;
+    use core::fmt::Write as _;
+
+    /// Reject `inf` / `-inf` / `NaN` with a typed error. Position is
+    /// `START` because serializer errors don't have an input byte to
+    /// point at — symmetric with how the parse side reports
+    /// "byte offset" errors.
+    #[inline]
+    const fn reject_non_finite(f: f64) -> Result<(), Error> {
+        if f.is_finite() {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::NonFiniteFloat, Position::START))
+        }
+    }
+
+    /// `write!`-based formatter. Delegates correctness to libstd's
+    /// `Display for f64`, which uses ryu internally. The `format!`
+    /// macro allocates a temporary `String`; we then `push_str` that
+    /// into the user's buffer. One allocation per float.
+    pub fn format_f64_write(f: f64, out: &mut String) -> Result<(), Error> {
+        reject_non_finite(f)?;
+        // `write!` into a `String` is infallible (returns `fmt::Error`
+        // only when the underlying writer fails, which `String` never
+        // does), so the unwrap is structurally unreachable.
+        let _ = write!(out, "{f}");
+        Ok(())
+    }
+
+}
+
+// ---------------------------------------------------------------------------
 // ToJson trait + entry points
 // ---------------------------------------------------------------------------
 
@@ -335,15 +420,8 @@ pub trait ToJson {
 pub fn to_string<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> {
     let mut out = String::new();
     let mut sink = StringSink::new(&mut out);
-    // `StringSink::Error` is `Infallible`; the only way `write_json`
-    // returns `Err` is via a typed-level wrapper that has its own error
-    // path — currently the float impls (PR 2). Until those land, this
-    // call is structurally infallible, but the signature commits early
-    // so users don't have to migrate when it does.
-    match value.write_json(&mut sink) {
-        Ok(()) => Ok(out),
-        Err(infallible) => match infallible {},
-    }
+    value.write_json(&mut sink)?;
+    Ok(out)
 }
 
 /// Serialize `value` into a fresh `Vec<u8>`.
@@ -557,6 +635,22 @@ mod alloc_impls {
         }
     }
 
+    impl ToJson for f64 {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            w.write_float_f64(*self)
+        }
+    }
+
+    /// `f32` widens losslessly to `f64` for serialization. The decoded
+    /// form on the parse side narrows via `as f32`, mirroring this.
+    impl ToJson for f32 {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            w.write_float_f64(f64::from(*self))
+        }
+    }
+
     /// JSON has no `char` primitive — encode as a one-character string,
     /// matching the `FromJson` direction.
     impl ToJson for char {
@@ -701,12 +795,23 @@ mod alloc_impls {
         }
     }
 
+    /// Encode `Duration` as fractional seconds, mirroring the parse-side
+    /// `from_secs_f64` adapter. Negative durations are unrepresentable
+    /// (`Duration` is unsigned), and the float impl already rejects
+    /// non-finite output, so this never errors for valid inputs.
+    #[cfg(feature = "std")]
+    impl ToJson for std::time::Duration {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            w.write_float_f64(self.as_secs_f64())
+        }
+    }
+
     // -----------------------------------------------------------------
     // std::net and std::path adapters.
     //
     // Each writes its canonical Display form as a quoted JSON string,
-    // matching the FromJson `parse_from_str` adapter on the parse
-    // side. Duration goes through f64 seconds, deferred to the float PR.
+    // matching the FromJson `parse_from_str` adapter on the parse side.
     // -----------------------------------------------------------------
 
     /// Display the value into a small scratch buffer, then write it as

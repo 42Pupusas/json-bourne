@@ -1158,4 +1158,55 @@ mod ser_roundtrip {
         let m: BTreeMap<String, i32> = BTreeMap::new();
         assert_eq!(to_string(&m).unwrap(), "{}");
     }
+
+    /// Floats via the production path (`write!`-based today, ryu later).
+    /// `rt()` works because `f64` parses back losslessly when serialized
+    /// via shortest-round-trip — that's the contract the `write!` impl
+    /// inherits from libstd's `Display` (which uses ryu internally).
+    #[test]
+    fn finite_f64_roundtrips() {
+        for v in [
+            0.0_f64,
+            -0.0,
+            1.0,
+            -1.0,
+            1.5,
+            -1.5,
+            1.5e2,
+            1.5e-2,
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            f64::MIN,
+            std::f64::consts::PI,
+        ] {
+            rt(v);
+        }
+    }
+
+    #[test]
+    fn finite_f32_roundtrips() {
+        for v in [0.0_f32, 1.5, -1.5, f32::MIN_POSITIVE, f32::MAX] {
+            rt(v);
+        }
+    }
+
+    #[test]
+    fn nonfinite_f64_rejected() {
+        use crate::ErrorKind;
+        let r = to_string(&f64::INFINITY);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::NonFiniteFloat);
+        let r = to_string(&f64::NEG_INFINITY);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::NonFiniteFloat);
+        let r = to_string(&f64::NAN);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::NonFiniteFloat);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn duration_roundtrips() {
+        use std::time::Duration;
+        rt(Duration::from_secs(0));
+        rt(Duration::from_millis(1500));
+        rt(Duration::new(42, 750_000_000));
+    }
 }
