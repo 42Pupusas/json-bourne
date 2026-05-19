@@ -12,7 +12,7 @@
 //!
 //! See `PROFILING.md` for the full runbook and notes on flamegraphs.
 
-use bourne::{FromJson, parse};
+use bourne::{FromJson, parse, to_json, to_string};
 use bourne_bench::realistic::{mixed_length_string_array_with_escapes, unicode_string_array};
 use bourne_bench::{
     SMALL_OBJECT, duration_seconds_array, float_array, i128_array, int_array,
@@ -164,6 +164,111 @@ fn run_hashmap_keys_escaped(input: &[u8], iters: u64) {
 }
 
 // ---------------------------------------------------------------------------
+// Serialization workloads
+// ---------------------------------------------------------------------------
+
+to_json! {
+    #[derive(Debug)]
+    struct MetricEventSer<'input> {
+        ts: u64,
+        host: &'input str,
+        metric: &'input str,
+        count: u64,
+        bytes: u64,
+        latency_ms: f64,
+        cpu: f64,
+        throughput_rps: f64,
+    }
+}
+
+const SER_N: usize = 1_000;
+const HOSTS: &[&str] = &[
+    "node-0", "node-1", "node-2", "node-3", "node-4", "node-5", "node-6", "node-7",
+];
+
+fn metric_ser_vec() -> Vec<MetricEventSer<'static>> {
+    (0..SER_N)
+        .map(|i| MetricEventSer {
+            ts: 1_700_000_000_000 + i as u64,
+            host: HOSTS[i % HOSTS.len()],
+            metric: "req.latency",
+            count: i as u64 % 10_000,
+            bytes: 1024 * (i as u64 % 1_000_000),
+            latency_ms: (i % 500) as f64 + 0.125,
+            cpu: (i % 100) as f64 / 100.0,
+            throughput_rps: (i as f64) * 12.345,
+        })
+        .collect()
+}
+
+fn run_to_json_metric(data: &[MetricEventSer<'_>], iters: u64) {
+    for _ in 0..iters {
+        let out = to_string(black_box(data)).unwrap();
+        black_box(out);
+    }
+}
+
+to_json! {
+    #[derive(Debug)]
+    struct IntStruct {
+        id: u64,
+        count: u64,
+        flags: u32,
+        status: i32,
+        version: u16,
+    }
+}
+
+fn int_struct_vec() -> Vec<IntStruct> {
+    (0..SER_N)
+        .map(|i| IntStruct {
+            id: 1_700_000_000_000 + i as u64,
+            count: i as u64 * 37,
+            flags: (i as u32) | 0xFF00,
+            status: if i % 3 == 0 { -(i as i32) } else { i as i32 },
+            version: (i % 256) as u16,
+        })
+        .collect()
+}
+
+fn run_to_json_int_struct(data: &[IntStruct], iters: u64) {
+    for _ in 0..iters {
+        let out = to_string(black_box(data)).unwrap();
+        black_box(out);
+    }
+}
+
+// Mirrors `benches/floats.rs::make_floats` so the pprof flamegraph
+// reflects exactly what the divan bench measures: a `Vec<f64>` mixing
+// small (1e-6), large (1e6), and mid-range (~[-100, 100)) magnitudes.
+#[allow(clippy::cast_precision_loss)]
+fn float_ser_vec(n: usize) -> Vec<f64> {
+    let mut state: u64 = 0xCAFE_BABE_DEAD_BEEF;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        let mantissa = (state >> 11) as f64 / (1u64 << 53) as f64;
+        let signed = mantissa.mul_add(2.0, -1.0);
+        let v = match i % 10 {
+            0 => signed * 1e-6,
+            1 => signed * 1e6,
+            _ => signed * 100.0,
+        };
+        out.push(v);
+    }
+    out
+}
+
+fn run_to_json_floats(data: &[f64], iters: u64) {
+    for _ in 0..iters {
+        let out = to_string(black_box(data)).unwrap();
+        black_box(out);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Workload registry
 // ---------------------------------------------------------------------------
 
@@ -178,12 +283,14 @@ const fn workloads() -> &'static [&'static str] {
         "vec_string_10k",
         "vec_borrowed_unicode_10k",
         "vec_string_escaped_1k",
-        // New: surfaces added in the feature-parity pass.
         "vec_f64_10k",
         "vec_i128_10k",
         "vec_duration_10k",
         "hashmap_string_keys_1k",
         "hashmap_keys_escaped_1k",
+        "to_json_metric",
+        "to_json_int_struct",
+        "to_json_floats_10k",
     ]
 }
 
@@ -262,6 +369,20 @@ fn run(name: &str) {
             let input = small_object_escaped_keys(1_000);
             run_hashmap_keys_escaped(input.as_bytes(), 40_000);
         }
+        "to_json_metric" => {
+            let data = metric_ser_vec();
+            run_to_json_metric(&data, 25_000);
+        }
+        "to_json_int_struct" => {
+            let data = int_struct_vec();
+            run_to_json_int_struct(&data, 100_000);
+        }
+        "to_json_floats_10k" => {
+            // Mirrors `benches/floats.rs::bourne_write::bench(10_000)`.
+            // Divan measured ~720 µs/iter, so ~7k iters ≈ 5s.
+            let data = float_ser_vec(10_000);
+            run_to_json_floats(&data, 7_000);
+        }
         other => {
             eprintln!("unknown workload: {other}");
             eprintln!("known workloads:");
@@ -283,5 +404,26 @@ fn main() {
         }
         std::process::exit(2);
     });
-    run(&workload);
+
+    #[cfg(feature = "pprof")]
+    {
+        let guard = pprof::ProfilerGuardBuilder::default()
+            .frequency(1000)
+            .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+            .build()
+            .expect("failed to start pprof profiler");
+
+        run(&workload);
+
+        let report = guard.report().build().expect("failed to build pprof report");
+        let out_path = format!("{workload}.svg");
+        let file = std::fs::File::create(&out_path).expect("failed to create SVG file");
+        report.flamegraph(file).expect("failed to write flamegraph");
+        eprintln!("flamegraph written to {out_path}");
+    }
+
+    #[cfg(not(feature = "pprof"))]
+    {
+        run(&workload);
+    }
 }

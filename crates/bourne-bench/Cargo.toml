@@ -13,6 +13,7 @@ bourne-core = { path = "../bourne-core" }
 bourne = { path = "../bourne" }
 bourne-alloctest = { path = "../bourne-alloctest", optional = true }
 dhat = { version = "0.3", optional = true }
+pprof = { version = "0.14", features = ["flamegraph"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
@@ -25,6 +26,9 @@ ryu = "1"
 
 [features]
 default = []
+# Enables pprof-based CPU profiling. Build/run with:
+#   cargo run --release --features pprof --bin profile -- to_json_metric
+pprof = ["dep:pprof"]
 # Enables the heap-profiling example. Build/run with:
 #   cargo run --release --features dhat-heap --example profile_heap
 dhat-heap = ["dep:dhat"]
