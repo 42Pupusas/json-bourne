@@ -334,28 +334,141 @@ fn mantissa_digit_count(n: u64) -> usize {
     else { 1 }
 }
 
-/// Write `n`'s digits into `buf[end-digits..end]`.
-///
-/// Algorithm (transcribed from ryu):
-///   1. If `n` has more than 32 bits, peel off the bottom 8 decimal digits
-///      with a single 64-bit divmod and process them as a `u32`. Any remaining
-///      bits also fit in `u32`. This costs one expensive 64-bit divide
-///      instead of one per pair of digits.
-///   2. For the 32-bit portion, process 4 decimal digits per loop iteration
-///      via two 2-digit LUT lookups, then handle the leading 1-3 digits.
-///
-/// Why 32-bit math matters: `u64 / 100` is ~20 cycles on x86, `u32 / 100`
-/// is ~5 cycles. The old `while n >= 100 { n /= 100; ... }` loop was paying
-/// the 64-bit divide cost every iteration even for the lower digits.
-///
-/// `pos` ends at `end - digits` — caller wrote those bytes to a known offset.
+/// Core formatter: write `value`'s shortest-roundtrip decimal into `buf`,
+/// returning the byte length. `buf` must hold at least `FORMAT_BUF_LEN` (32)
+/// bytes. The output is ASCII.
 #[inline]
-#[allow(clippy::cast_possible_truncation)]
-fn write_digits_at(n: u64, buf: &mut [u8], digits: usize, end: usize) {
-    debug_assert!(end <= buf.len() && digits <= end);
+pub(crate) fn format_finite_to_buf(value: f64, buf: &mut [u8; FORMAT_BUF_LEN]) -> usize {
+    #[allow(unsafe_code)]
+    // SAFETY: buf is at least FORMAT_BUF_LEN = 32 bytes, the worst-case
+    // length any finite f64 can produce.
+    unsafe { format_finite_to_ptr(value, buf.as_mut_ptr()) }
+}
+
+/// Core formatter: write `value`'s shortest-roundtrip decimal through `dst`,
+/// returning the byte length. The output is ASCII.
+///
+/// # Safety
+///
+/// `dst` must point to at least `FORMAT_BUF_LEN` (32) writable bytes — the
+/// worst case for any finite f64.
+///
+/// All writes go through `ptr::write` and `ptr::copy_nonoverlapping` (no
+/// bounds checks); the slice-and-debug-assert version is `format_finite_to_buf`.
+#[allow(unsafe_code)]
+pub(crate) unsafe fn format_finite_to_ptr(value: f64, dst: *mut u8) -> usize {
+    if value == 0.0 {
+        let (src, len) = if value.is_sign_negative() {
+            (b"-0.0".as_ptr(), 4)
+        } else {
+            (b"0.0".as_ptr(), 3)
+        };
+        // SAFETY: caller guarantees at least 32 writable bytes.
+        unsafe { core::ptr::copy_nonoverlapping(src, dst, len) };
+        return len;
+    }
+
+    let negative = value.is_sign_negative();
+    let d = teju(value.abs());
+    let digits_count = mantissa_digit_count(d.mantissa);
+    let pos = usize::from(negative);
+    if negative {
+        // SAFETY: caller guarantees at least 32 writable bytes; pos==1 is
+        // inside.
+        unsafe { dst.write(b'-') };
+    }
+
+    let point = digits_count as i32 + d.exponent;
+
+    if (-6..=21).contains(&point) {
+        // Fixed-point form.
+        if point <= 0 {
+            // "0." + (−point) zeros + digits
+            let zeros = (-point) as usize;
+            // SAFETY: pos + 2 + zeros + digits_count ≤ 1 + 2 + 6 + 17 = 26 ≤ 32.
+            unsafe {
+                dst.add(pos).write(b'0');
+                dst.add(pos + 1).write(b'.');
+                ptr_fill(dst.add(pos + 2), b'0', zeros);
+                write_digits_at_ptr(d.mantissa, dst.add(pos + 2 + zeros), digits_count);
+            }
+            pos + 2 + zeros + digits_count
+        } else if (point as usize) >= digits_count {
+            // digits + (point − digits_count) zeros + ".0"
+            let trail_zeros = point as usize - digits_count;
+            // SAFETY: pos + digits_count + trail_zeros + 2 ≤ 1 + 21 + 2 = 24 ≤ 32.
+            unsafe {
+                write_digits_at_ptr(d.mantissa, dst.add(pos), digits_count);
+                ptr_fill(dst.add(pos + digits_count), b'0', trail_zeros);
+                let tail = dst.add(pos + digits_count + trail_zeros);
+                tail.write(b'.');
+                tail.add(1).write(b'0');
+            }
+            pos + digits_count + trail_zeros + 2
+        } else {
+            // digits[..p] + '.' + digits[p..]
+            // Render digits into [pos+1 .. pos+1+digits_count] then shift the
+            // leading p digits down by one to free the slot for '.'.
+            let p = point as usize;
+            // SAFETY: pos + 1 + digits_count ≤ 1 + 1 + 17 = 19 ≤ 32.
+            unsafe {
+                write_digits_at_ptr(d.mantissa, dst.add(pos + 1), digits_count);
+                // Shift leading p digits left by 1. Overlapping copy ⇒ ptr::copy.
+                core::ptr::copy(dst.add(pos + 1), dst.add(pos), p);
+                dst.add(pos + p).write(b'.');
+            }
+            pos + digits_count + 1
+        }
+    } else {
+        // Scientific form: "d.dddde±N".
+        // Render digits into [pos+1 .. pos+1+digits_count], then drop the
+        // first digit down to pos and overwrite pos+1 with '.' (when there
+        // are ≥ 2 digits).
+        // SAFETY: pos + 1 + digits_count + 5 ≤ 1 + 1 + 17 + 5 = 24 ≤ 32.
+        unsafe {
+            write_digits_at_ptr(d.mantissa, dst.add(pos + 1), digits_count);
+            let lead = dst.add(pos + 1).read();
+            dst.add(pos).write(lead);
+            let after_mantissa = if digits_count > 1 {
+                dst.add(pos + 1).write(b'.');
+                pos + 1 + digits_count
+            } else {
+                pos + 1
+            };
+            dst.add(after_mantissa).write(b'e');
+            let exp = point - 1;
+            let exp_len = write_exponent_ptr(dst.add(after_mantissa + 1), exp);
+            after_mantissa + 1 + exp_len
+        }
+    }
+}
+
+/// Fill `n` bytes at `dst` with `byte`. Used for zero-padding in the fixed
+/// form. `n` is bounded by 22 here (point ∈ [−6, 21]).
+///
+/// # Safety
+/// `dst` must point to ≥ `n` writable bytes.
+#[inline]
+#[allow(unsafe_code)]
+unsafe fn ptr_fill(dst: *mut u8, byte: u8, n: usize) {
+    // SAFETY: forwarded to caller.
+    unsafe { core::ptr::write_bytes(dst, byte, n) };
+}
+
+/// Pointer-flavored `write_digits_at`. Writes `digits` decimal digits of `n`
+/// to `dst[0..digits]`. Same algorithm as the slice version but unchecked.
+///
+/// # Safety
+/// `dst` must point to ≥ `digits` writable bytes, and
+/// `digits == mantissa_digit_count(n)`.
+#[inline]
+#[allow(unsafe_code, clippy::cast_possible_truncation)]
+unsafe fn write_digits_at_ptr(n: u64, dst: *mut u8, digits: usize) {
     debug_assert_eq!(mantissa_digit_count(n), digits);
 
-    let mut pos = end;
+    // `pos` is the offset of the next byte to write (counts down).
+    let mut pos = digits;
+    let lut = DIGIT_LUT.as_ptr();
 
     // Split a >32-bit value into (upper, lower 8 digits) with one
     // expensive 64-bit divide. Both halves then fit in u32.
@@ -365,25 +478,25 @@ fn write_digits_at(n: u64, buf: &mut [u8], digits: usize, end: usize) {
         let low = (n - 100_000_000 * (n / 100_000_000)) as u32;
         let upper = (n / 100_000_000) as u32;
 
-        // Write the bottom 8 digits as two 4-digit chunks.
+        // Write the bottom 8 digits as two 4-digit chunks via 4 LUT copies.
         let c = low % 10_000;
         let d = low / 10_000;
         let c0 = ((c % 100) * 2) as usize;
         let c1 = ((c / 100) * 2) as usize;
         let d0 = ((d % 100) * 2) as usize;
         let d1 = ((d / 100) * 2) as usize;
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[c0];
-        buf[pos + 1] = DIGIT_LUT[c0 + 1];
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[c1];
-        buf[pos + 1] = DIGIT_LUT[c1 + 1];
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[d0];
-        buf[pos + 1] = DIGIT_LUT[d0 + 1];
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[d1];
-        buf[pos + 1] = DIGIT_LUT[d1 + 1];
+        // SAFETY: pos starts at digits ≥ 9 (we are in the >32-bit branch),
+        // and decreases by 8 across the four 2-byte copies below.
+        unsafe {
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(c0), dst.add(pos), 2);
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(c1), dst.add(pos), 2);
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(d0), dst.add(pos), 2);
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(d1), dst.add(pos), 2);
+        }
         upper
     };
 
@@ -393,163 +506,73 @@ fn write_digits_at(n: u64, buf: &mut [u8], digits: usize, end: usize) {
         output32 /= 10_000;
         let c0 = ((c % 100) * 2) as usize;
         let c1 = ((c / 100) * 2) as usize;
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[c0];
-        buf[pos + 1] = DIGIT_LUT[c0 + 1];
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[c1];
-        buf[pos + 1] = DIGIT_LUT[c1 + 1];
+        // SAFETY: digit count was precomputed; pos always reaches 0 cleanly.
+        unsafe {
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(c0), dst.add(pos), 2);
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(c1), dst.add(pos), 2);
+        }
     }
     if output32 >= 100 {
         let c = ((output32 % 100) * 2) as usize;
         output32 /= 100;
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[c];
-        buf[pos + 1] = DIGIT_LUT[c + 1];
+        // SAFETY: see loop above.
+        unsafe {
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(c), dst.add(pos), 2);
+        }
     }
     if output32 >= 10 {
         let c = (output32 * 2) as usize;
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[c];
-        buf[pos + 1] = DIGIT_LUT[c + 1];
+        // SAFETY: see loop above.
+        unsafe {
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut.add(c), dst.add(pos), 2);
+        }
     } else {
-        pos -= 1;
-        buf[pos] = b'0' + output32 as u8;
+        // SAFETY: see loop above.
+        unsafe {
+            pos -= 1;
+            dst.add(pos).write(b'0' + output32 as u8);
+        }
     }
-    debug_assert_eq!(pos, end - digits);
+    debug_assert_eq!(pos, 0);
 }
 
-/// Fill `buf[pos..pos+n]` with ASCII `'0'`. `n` is bounded by 22 in practice
-/// (point ∈ [-6, 21]).
+/// Pointer-flavored `write_exponent`. Writes the exponent to `dst[0..]` and
+/// returns the byte length (1–4 bytes including optional `-`).
+///
+/// # Safety
+/// `dst` must point to ≥ 4 writable bytes.
 #[inline]
-fn write_zeros(buf: &mut [u8], pos: usize, n: usize) {
-    debug_assert!(pos + n <= buf.len());
-    for b in &mut buf[pos..pos + n] {
-        *b = b'0';
-    }
-}
-
-/// Write a small i32 exponent in the range [-324, 308] into `buf[pos..]`,
-/// returning the number of bytes written. Replaces a `write!(out, "{exp}")`
-/// call that went through `fmt::Display`.
-#[inline]
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn write_exponent(buf: &mut [u8], pos: usize, exp: i32) -> usize {
+#[allow(unsafe_code, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+unsafe fn write_exponent_ptr(dst: *mut u8, exp: i32) -> usize {
     let (mag, sign_bytes) = if exp < 0 {
+        // SAFETY: caller guarantees ≥ 4 bytes.
+        unsafe { dst.write(b'-') };
         ((-exp) as u32, 1)
     } else {
         (exp as u32, 0)
     };
-    if sign_bytes == 1 {
-        buf[pos] = b'-';
-    }
-    let start = pos + sign_bytes;
-    if mag >= 100 {
-        let hundreds = mag / 100;
-        let rem = ((mag % 100) * 2) as usize;
-        buf[start] = b'0' + hundreds as u8;
-        buf[start + 1] = DIGIT_LUT[rem];
-        buf[start + 2] = DIGIT_LUT[rem + 1];
-        sign_bytes + 3
-    } else if mag >= 10 {
-        let r = (mag * 2) as usize;
-        buf[start] = DIGIT_LUT[r];
-        buf[start + 1] = DIGIT_LUT[r + 1];
-        sign_bytes + 2
-    } else {
-        buf[start] = b'0' + mag as u8;
-        sign_bytes + 1
-    }
-}
-
-/// Core formatter: write `value`'s shortest-roundtrip decimal into `buf`,
-/// returning the byte length. `buf` must hold at least `FORMAT_BUF_LEN` (32)
-/// bytes. The output is ASCII.
-///
-/// Handles zero and sign internally so callers can stay dest-agnostic.
-pub(crate) fn format_finite_to_buf(value: f64, buf: &mut [u8; FORMAT_BUF_LEN]) -> usize {
-    if value == 0.0 {
-        if value.is_sign_negative() {
-            buf[..4].copy_from_slice(b"-0.0");
-            return 4;
-        }
-        buf[..3].copy_from_slice(b"0.0");
-        return 3;
-    }
-
-    let negative = value.is_sign_negative();
-    let d = teju(value.abs());
-    let digits_count = mantissa_digit_count(d.mantissa);
-    let mut pos = if negative {
-        buf[0] = b'-';
-        1usize
-    } else {
-        0
-    };
-
-    // `point` is the position of the decimal point relative to the leading
-    // digit: `point == 1` means "1.xxxx", `point == 0` means "0.dxxx",
-    // `point == digits_count` means "ddddd.0". Same convention as the
-    // previous Grisu3-era implementation.
-    let point = digits_count as i32 + d.exponent;
-
-    if (-6..=21).contains(&point) {
-        // Fixed-point form.
-        if point <= 0 {
-            // "0." + (−point) zeros + digits
-            let zeros = (-point) as usize;
-            buf[pos] = b'0';
-            buf[pos + 1] = b'.';
-            pos += 2;
-            write_zeros(buf, pos, zeros);
-            pos += zeros;
-            write_digits_at(d.mantissa, buf, digits_count, pos + digits_count);
-            pos + digits_count
-        } else if (point as usize) >= digits_count {
-            // digits + (point − digits_count) zeros + ".0"
-            let trail_zeros = point as usize - digits_count;
-            write_digits_at(d.mantissa, buf, digits_count, pos + digits_count);
-            pos += digits_count;
-            write_zeros(buf, pos, trail_zeros);
-            pos += trail_zeros;
-            buf[pos] = b'.';
-            buf[pos + 1] = b'0';
-            pos + 2
+    let lut = DIGIT_LUT.as_ptr();
+    // SAFETY: mag < 1000 in all cases (f64 exponent ≤ 308 in magnitude),
+    // so we write at most 3 bytes after the optional sign.
+    unsafe {
+        if mag >= 100 {
+            let hundreds = mag / 100;
+            let rem = ((mag % 100) * 2) as usize;
+            dst.add(sign_bytes).write(b'0' + hundreds as u8);
+            core::ptr::copy_nonoverlapping(lut.add(rem), dst.add(sign_bytes + 1), 2);
+            sign_bytes + 3
+        } else if mag >= 10 {
+            let r = (mag * 2) as usize;
+            core::ptr::copy_nonoverlapping(lut.add(r), dst.add(sign_bytes), 2);
+            sign_bytes + 2
         } else {
-            // digits[..p] + '.' + digits[p..]
-            let p = point as usize;
-            // Render all digits at offsets [pos+1 .. pos+1+digits_count],
-            // then shift the leading `p` digits down by one to insert '.'.
-            write_digits_at(d.mantissa, buf, digits_count, pos + digits_count + 1);
-            // After render, buf[pos+1 .. pos+1+digits_count] holds digits.
-            // We want buf[pos .. pos+p] = leading p digits, buf[pos+p] = '.',
-            // buf[pos+p+1 .. pos+p+1+(digits_count-p)] = trailing digits.
-            // The trailing digits already sit at the right place
-            // (buf[pos+p+1 .. pos+1+digits_count]). Shift the leading p
-            // digits left by one and drop '.' into the freed slot.
-            buf.copy_within(pos + 1..pos + 1 + p, pos);
-            buf[pos + p] = b'.';
-            pos + digits_count + 1
+            dst.add(sign_bytes).write(b'0' + mag as u8);
+            sign_bytes + 1
         }
-    } else {
-        // Scientific form: "d.dddde±N".
-        // Render digits into buf[pos+1 .. pos+1+digits_count], then drop
-        // the first digit down to buf[pos] and overwrite buf[pos+1] with '.'.
-        // If there's only one digit, omit the '.'.
-        write_digits_at(d.mantissa, buf, digits_count, pos + 1 + digits_count);
-        let lead = buf[pos + 1];
-        buf[pos] = lead;
-        if digits_count > 1 {
-            buf[pos + 1] = b'.';
-            pos += 1 + digits_count;
-        } else {
-            pos += 1;
-        }
-        buf[pos] = b'e';
-        pos += 1;
-        let exp = point - 1;
-        pos += write_exponent(buf, pos, exp);
-        pos
     }
 }
 
@@ -574,14 +597,29 @@ pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> 
     out.write_str(unsafe { core::str::from_utf8_unchecked(&buf[..len]) })
 }
 
-/// Direct-to-`Vec<u8>` path used by `ByteSink::write_float_f64`. Avoids the
-/// per-call `String::with_capacity(24)` allocation the old `format_finite`
-/// wrapper paid.
+/// Direct-to-`Vec<u8>` path used by `ByteSink::write_float_f64`. Reserves
+/// the worst-case 32 bytes, writes through a raw pointer into the tail,
+/// then bumps the length — no intermediate stack buffer, no
+/// `extend_from_slice` memcpy of the rendered bytes.
 #[cfg(feature = "alloc")]
+#[allow(unsafe_code)]
+#[inline]
 pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) {
-    let mut buf = [0u8; FORMAT_BUF_LEN];
-    let len = format_finite_to_buf(f, &mut buf);
-    out.extend_from_slice(&buf[..len]);
+    out.reserve(FORMAT_BUF_LEN);
+    // SAFETY:
+    //   - `reserve` guarantees `out.capacity() - out.len() >= FORMAT_BUF_LEN`.
+    //   - `out.as_mut_ptr().add(out.len())` is a valid writable address for
+    //     `FORMAT_BUF_LEN` bytes (the reserved tail of the Vec).
+    //   - `format_finite_to_ptr` returns the number of bytes it wrote,
+    //     bounded by `FORMAT_BUF_LEN`.
+    //   - All written bytes are ASCII (digits, '.', 'e', '-'), so the new
+    //     length is still a valid `Vec<u8>`.
+    unsafe {
+        let len = out.len();
+        let dst = out.as_mut_ptr().add(len);
+        let written = format_finite_to_ptr(f, dst);
+        out.set_len(len + written);
+    }
 }
 
 // ===========================================================================
