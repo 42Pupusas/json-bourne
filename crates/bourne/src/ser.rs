@@ -207,6 +207,41 @@ pub trait JsonWrite {
         // SAFETY: weaker contract subsumes ours.
         unsafe { self.write_float_f64_unchecked(f) }
     }
+
+    /// Per-element float write that branchlessly tolerates non-finite
+    /// input. Tainted bytes (junk ASCII for non-finite values) land in
+    /// the sink; the caller is expected to query the sink's
+    /// `take_nonfinite_taint()` once at the end of the slice and turn a
+    /// non-zero result into a typed error.
+    ///
+    /// This avoids both the per-element finiteness branch AND the
+    /// pre-scan pass that hoisted it out of the loop in the previous
+    /// design (the SIMD-vectorised pand/pcmpeqd scan was costing ~20%
+    /// of total cycles per `perf record -c cycles`).
+    ///
+    /// Default impl forwards to `write_float_f64_unchecked` and emits a
+    /// dummy taint of 0 — sinks without taint tracking should never be
+    /// driven through this path.
+    ///
+    /// # Safety
+    /// `MAX_SERIALIZED_LEN` (32) bytes of sink capacity must be available.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn write_float_f64_taint(&mut self, f: f64) -> Result<(), Self::Error> {
+        // SAFETY: weaker contract subsumes ours.
+        unsafe { self.write_float_f64_unchecked(f) }
+    }
+
+    /// Read and clear the accumulated non-finite taint from the sink.
+    /// Returns 0 for sinks without taint tracking. The array writer
+    /// queries this once after a batch of `write_float_f64_taint`
+    /// calls; a non-zero result means at least one input was inf/NaN
+    /// and the call must return `Err(NonFiniteFloat)`.
+    #[inline]
+    fn take_nonfinite_taint(&mut self) -> u64 {
+        0
+    }
 }
 
 /// Write one byte of a string body, applying JSON escape rules.
@@ -337,13 +372,19 @@ impl JsonWrite for StringSink<'_> {
 #[derive(Debug)]
 pub struct ByteSink<'a> {
     out: &'a mut alloc::vec::Vec<u8>,
+    /// Set whenever any float write encounters a non-finite input.
+    /// Read once at the end of the array path; if non-zero, the call
+    /// returns `Err(NonFiniteFloat)`. Threading this side-channel
+    /// avoids a per-element branch on the finiteness check (the
+    /// dominant remaining cliff source under random input).
+    nonfinite_taint: u64,
 }
 
 #[cfg(feature = "alloc")]
 impl<'a> ByteSink<'a> {
     #[must_use]
     pub const fn new(out: &'a mut alloc::vec::Vec<u8>) -> Self {
-        Self { out }
+        Self { out, nonfinite_taint: 0 }
     }
 }
 
@@ -504,6 +545,23 @@ impl JsonWrite for ByteSink<'_> {
         // SAFETY: contract forwarded.
         unsafe { crate::float::format_finite_to_vec_unchecked_finite(f, self.out) };
         Ok(())
+    }
+
+    /// Taint-tracking float write: accumulates non-finite-ness into the
+    /// sink's `nonfinite_taint` field for end-of-slice query. No
+    /// per-element branch on finiteness.
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn write_float_f64_taint(&mut self, f: f64) -> Result<(), Self::Error> {
+        // SAFETY: caller-reserved ≥ 32 bytes.
+        self.nonfinite_taint |=
+            unsafe { crate::float::format_finite_to_vec_taint(f, self.out) };
+        Ok(())
+    }
+
+    #[inline]
+    fn take_nonfinite_taint(&mut self) -> u64 {
+        core::mem::take(&mut self.nonfinite_taint)
     }
 }
 
@@ -1471,29 +1529,11 @@ impl<T: ToJson> ToJson for [T] {
         // the per-element max payload. After this, *every* byte the
         // primitive path writes fits in the reserved tail.
         if T::MAX_SERIALIZED_LEN != 0 {
-            // Pre-scan validation for types that need it (currently
-            // `f64`/`f32`'s finiteness check). Doing the scan once here
-            // — at predictable, branchless speed — removes the equivalent
-            // per-element branch from the inner loop, which dominated
-            // remaining mispredicts under random input.
-            if T::NEEDS_VALIDATION {
-                if let Err(_e) = T::pre_validate_slice(self) {
-                    // The error type returned by `pre_validate_slice`
-                    // is the typed `bourne_core::Error`. Sinks have
-                    // their own `Self::Error`. We rely on the fact that
-                    // every sink that calls this path uses `Error` as
-                    // `Self::Error` (the only sinks with non-trivial
-                    // float handling). Force the conversion via
-                    // `write_float_f64` which already produces the
-                    // sink's error from a non-finite input — calling
-                    // it with `f64::NAN` yields the right typed error
-                    // through the sink's natural channel.
-                    //
-                    // Concretely: when `pre_validate_slice` rejects, we
-                    // re-issue the rejection through the sink so the
-                    // caller's `W::Error` flows naturally.
-                    return w.write_float_f64(f64::NAN);
-                }
+            // Optional pre-scan validation (kept for types that prefer
+            // a separate validation pass; floats now use per-element
+            // taint via `write_float_f64_taint` instead).
+            if T::NEEDS_VALIDATION && T::pre_validate_slice(self).is_err() {
+                return w.write_float_f64(f64::NAN);
             }
             let hint = self
                 .len()
@@ -1502,13 +1542,17 @@ impl<T: ToJson> ToJson for [T] {
             w.reserve_hint(hint);
             // SAFETY: hint above covers brackets + per-element max +
             // commas. The sink's `write_byte_unchecked` skips the
-            // capacity check, eliminating the mispredict-heavy
-            // `Vec::push` cap branch. For types where
-            // `NEEDS_VALIDATION` is true, the pre-scan above has
-            // already rejected any non-finite inputs, so the
-            // per-element finite-known path is safe.
+            // capacity check.
             #[allow(unsafe_code)]
-            return unsafe { write_array_reserved(self, w) };
+            let res = unsafe { write_array_reserved(self, w) };
+            // Flush any per-element float taint. Non-zero means at least
+            // one input was non-finite during the loop; surface it as
+            // a typed error through the sink's natural channel.
+            let taint = w.take_nonfinite_taint();
+            if taint != 0 {
+                return w.write_float_f64(f64::NAN);
+            }
+            return res;
         }
         write_array(self.iter(), w)
     }
@@ -1557,7 +1601,7 @@ impl_tuple_to_json!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 
 #[cfg(feature = "alloc")]
 mod alloc_impls {
-    use super::{Error, ErrorKind, JsonWrite, Position, ToJson};
+    use super::{Error, JsonWrite, ToJson};
     use alloc::borrow::Cow;
     use alloc::boxed::Box;
     use alloc::rc::Rc;
@@ -1586,60 +1630,40 @@ mod alloc_impls {
         // 3-digit exponent = 25 bytes. Round to 32 to match the
         // formatter's stack-buffer size.
         const MAX_SERIALIZED_LEN: usize = 32;
-        // The slice writer calls `pre_validate_slice` to reject any
-        // non-finite up front; the per-element path below then assumes
-        // finiteness and skips a hot-loop branch.
-        const NEEDS_VALIDATION: bool = true;
+        // Validation is folded into the per-element `write_float_f64_taint`
+        // path: each call OR-accumulates a taint bit into the sink, and
+        // the slice writer queries it once at the end. Skips the
+        // separate pre-scan pass (which was ~20% of total cycles).
+        const NEEDS_VALIDATION: bool = false;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(*self)
         }
-        /// SAFETY: caller (`write_array_reserved`) has both reserved
-        /// `MAX_SERIALIZED_LEN` bytes via `reserve_hint` AND already
-        /// invoked `pre_validate_slice`, so `*self` is finite.
+        /// SAFETY: caller (`write_array_reserved`) has reserved
+        /// `MAX_SERIALIZED_LEN` bytes via `reserve_hint`. Non-finite
+        /// inputs do not break safety — they are routed through the
+        /// sink's taint-tracking float write, which substitutes a
+        /// finite placeholder before calling teju and accumulates a
+        /// taint bit. The slice writer queries the sink's taint after
+        /// the loop and converts it to an error.
         #[inline]
         #[allow(unsafe_code)]
         unsafe fn write_json_in_reserved<W: JsonWrite + ?Sized>(
             &self,
             w: &mut W,
         ) -> Result<(), W::Error> {
-            // SAFETY: forwarded to the sink's finite-known unchecked path.
-            unsafe { w.write_float_f64_unchecked_finite(*self) }
+            // SAFETY: forwarded to the sink's taint-tracking float path.
+            unsafe { w.write_float_f64_taint(*self) }
         }
-        /// One-shot finiteness scan over the slice. Rejects up front if
-        /// any element has the all-ones IEEE exponent (inf or NaN).
-        /// The loop body is branchless: each iteration ORs the bits
-        /// of `EXP_MASK ^ (bits & EXP_MASK)` — zero iff the element is
-        /// non-finite — into an accumulator, then a single branch at
-        /// the end checks the accumulator. Auto-vectorisable by LLVM.
+        /// Validation is deferred into the per-element taint write —
+        /// the pre-scan pass was costing ~20% of total cycles per
+        /// `perf record -c cycles` (the SIMD pand/pcmpeqd loop). The
+        /// merged taint path costs only ~3 extra instructions per
+        /// element (bit-mask check + cmov substitute + OR accumulate)
+        /// and removes the separate pass entirely.
         #[inline]
-        fn pre_validate_slice(slice: &[Self]) -> Result<(), Error> {
-            const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
-            // `acc` accumulates a 0 bit (XOR == 0) for any non-finite
-            // input. If acc remains all-ones at the end, every element
-            // was finite. We use a u64 to carry the OR-fold; LLVM tends
-            // to autovec this with `por` on x86_64.
-            let mut all_finite_mask = u64::MAX;
-            for &f in slice {
-                let bits = f.to_bits();
-                // `(bits & EXP_MASK) ^ EXP_MASK` is 0 iff non-finite, else
-                // some non-zero pattern. Bitwise-AND into the accumulator
-                // turns it to 0 the first time we see a non-finite input.
-                let elem_finite_bits = (bits & EXP_MASK) ^ EXP_MASK;
-                // Spread elem_finite_bits's non-zero-ness to all bits of
-                // the accumulator: if elem_finite_bits == 0, OR keeps acc
-                // unchanged but we still want to mark it. Instead, AND
-                // with a "is finite" mask derived branchlessly.
-                let is_finite_mask = ((elem_finite_bits | elem_finite_bits.wrapping_neg()) >> 63).wrapping_neg();
-                // is_finite_mask == u64::MAX when elem_finite_bits != 0
-                // (finite), 0 when == 0 (non-finite).
-                all_finite_mask &= is_finite_mask;
-            }
-            if all_finite_mask == u64::MAX {
-                Ok(())
-            } else {
-                Err(Error::new(ErrorKind::NonFiniteFloat, Position::START))
-            }
+        fn pre_validate_slice(_slice: &[Self]) -> Result<(), Error> {
+            Ok(())
         }
     }
 
@@ -1648,36 +1672,23 @@ mod alloc_impls {
     impl ToJson for f32 {
         const MIN_SERIALIZED_LEN: usize = 1;
         const MAX_SERIALIZED_LEN: usize = 32;
-        const NEEDS_VALIDATION: bool = true;
+        // The taint path handles validation per-element now — no pre-scan.
+        const NEEDS_VALIDATION: bool = false;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(f64::from(*self))
         }
-        /// SAFETY: see `f64::write_json_in_reserved`.
+        /// SAFETY: caller has reserved `MAX_SERIALIZED_LEN` bytes via
+        /// `reserve_hint`. Non-finite inputs are tolerated via the
+        /// sink's taint accumulator.
         #[inline]
         #[allow(unsafe_code)]
         unsafe fn write_json_in_reserved<W: JsonWrite + ?Sized>(
             &self,
             w: &mut W,
         ) -> Result<(), W::Error> {
-            // SAFETY: forwarded to the sink's finite-known unchecked path.
-            unsafe { w.write_float_f64_unchecked_finite(f64::from(*self)) }
-        }
-        #[inline]
-        fn pre_validate_slice(slice: &[Self]) -> Result<(), Error> {
-            const EXP_MASK: u32 = 0x7f80_0000;
-            let mut all_finite_mask = u32::MAX;
-            for &f in slice {
-                let bits = f.to_bits();
-                let elem_finite_bits = (bits & EXP_MASK) ^ EXP_MASK;
-                let is_finite_mask = ((elem_finite_bits | elem_finite_bits.wrapping_neg()) >> 31).wrapping_neg();
-                all_finite_mask &= is_finite_mask;
-            }
-            if all_finite_mask == u32::MAX {
-                Ok(())
-            } else {
-                Err(Error::new(ErrorKind::NonFiniteFloat, Position::START))
-            }
+            // SAFETY: forwarded to the sink's taint-tracking float path.
+            unsafe { w.write_float_f64_taint(f64::from(*self)) }
         }
     }
 

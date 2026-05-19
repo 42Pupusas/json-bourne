@@ -747,6 +747,50 @@ pub(crate) unsafe fn format_finite_to_vec_unchecked(
     true
 }
 
+/// `Vec<u8>` path that branchlessly tolerates non-finite input. Always
+/// writes 24-byte-bounded output; for non-finite values, the bytes are
+/// garbage (but valid ASCII) and the caller is expected to discard the
+/// `Vec` via the returned taint bit.
+///
+/// Returns a `u64` that is non-zero iff `f` was non-finite. The caller
+/// accumulates these bits across a slice's worth of writes and checks
+/// once at the end — no per-element branch.
+///
+/// Why: `pre_validate_slice` adds an entire scan pass over the input,
+/// which `perf record -c cycles` showed costing ~20% of total cycles
+/// at n=10000 (the SIMD-vectorised pand/pcmpeqd loop). Folding the
+/// finiteness check into the per-element work eliminates that pass.
+///
+/// # Safety
+/// `out.capacity() - out.len()` must be ≥ `FORMAT_BUF_LEN` (32) bytes.
+#[cfg(feature = "alloc")]
+#[allow(unsafe_code)]
+#[inline]
+pub(crate) unsafe fn format_finite_to_vec_taint(
+    f: f64,
+    out: &mut alloc::vec::Vec<u8>,
+) -> u64 {
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    let bits = f.to_bits();
+    let is_nonfinite = (bits & EXP_MASK) == EXP_MASK;
+    // Branchless substitute: if non-finite, replace `f` with `1.0` so
+    // the teju math never indexes out of MULTIPLIERS. The substitute
+    // value's ASCII output goes into `out` but is junk; the caller's
+    // taint check rejects the whole call, so the bytes are never
+    // observed.
+    let safe = if is_nonfinite { 1.0_f64 } else { f };
+    // SAFETY: caller-reserved ≥ 32 bytes; `safe` is finite by
+    // construction so `format_finite_to_ptr` does not OOB-read
+    // `MULTIPLIERS`.
+    unsafe {
+        let len = out.len();
+        let dst = out.as_mut_ptr().add(len);
+        let written = format_finite_to_ptr(safe, dst);
+        out.set_len(len + written);
+    }
+    u64::from(is_nonfinite)
+}
+
 /// Like [`format_finite_to_vec_unchecked`] but the caller PROMISES `f`
 /// is finite — no per-call finiteness branch. The slice path
 /// `[f64]::write_json` calls this after a one-shot pre-scan of the
