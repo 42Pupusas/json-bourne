@@ -3,45 +3,45 @@
 
 use bourne::parse;
 use bourne_bench::{int_array, string_array};
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 
-fn bench_typed(c: &mut Criterion) {
-    let mut group = c.benchmark_group("typed");
-
-    for &n in &[10usize, 1_000, 100_000] {
-        let s = int_array(n);
-        let bytes = s.as_bytes();
-        group.throughput(Throughput::Bytes(bytes.len() as u64));
-        group.bench_function(format!("vec_i64/{n}"), |b| {
-            b.iter(|| {
-                let v: Vec<i64> = parse(black_box(bytes)).unwrap();
-                black_box(v);
-            });
-        });
-    }
-
-    for &n in &[10usize, 1_000, 100_000] {
-        let s = string_array(n);
-        let bytes = s.as_bytes();
-        group.throughput(Throughput::Bytes(bytes.len() as u64));
-        // Borrowed: should not allocate per element (only the outer Vec).
-        group.bench_function(format!("vec_borrowed_str/{n}"), |b| {
-            b.iter(|| {
-                let v: Vec<&str> = parse(black_box(bytes)).unwrap();
-                black_box(v);
-            });
-        });
-        // Owned: forces a String allocation per element.
-        group.bench_function(format!("vec_string/{n}"), |b| {
-            b.iter(|| {
-                let v: Vec<String> = parse(black_box(bytes)).unwrap();
-                black_box(v);
-            });
-        });
-    }
-
-    group.finish();
+fn main() {
+    divan::main();
 }
 
-criterion_group!(benches, bench_typed);
-criterion_main!(benches);
+#[divan::bench(args = [10, 1_000, 100_000])]
+fn vec_i64(bencher: divan::Bencher, n: usize) {
+    let s = int_array(n);
+    let bytes = s.as_bytes();
+    bencher
+        .counter(divan::counter::BytesCount::new(bytes.len()))
+        .bench(|| {
+            let v: Vec<i64> = parse(divan::black_box(bytes)).unwrap();
+            divan::black_box(v);
+        });
+}
+
+#[divan::bench(args = [10, 1_000, 100_000])]
+fn vec_borrowed_str(bencher: divan::Bencher, n: usize) {
+    let s = string_array(n);
+    let bytes = s.as_bytes();
+    // Borrowed: should not allocate per element (only the outer Vec).
+    bencher
+        .counter(divan::counter::BytesCount::new(bytes.len()))
+        .bench(|| {
+            let v: Vec<&str> = parse(divan::black_box(bytes)).unwrap();
+            divan::black_box(v);
+        });
+}
+
+#[divan::bench(args = [10, 1_000, 100_000])]
+fn vec_string(bencher: divan::Bencher, n: usize) {
+    let s = string_array(n);
+    let bytes = s.as_bytes();
+    // Owned: forces a String allocation per element.
+    bencher
+        .counter(divan::counter::BytesCount::new(bytes.len()))
+        .bench(|| {
+            let v: Vec<String> = parse(divan::black_box(bytes)).unwrap();
+            divan::black_box(v);
+        });
+}

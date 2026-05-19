@@ -1,6 +1,6 @@
 //! Head-to-head benches for the `to_json!` macro.
 //!
-//! Each criterion group has up to three rows over the same input:
+//! Each benchmark group has up to three rows over the same input:
 //!   - `macro` — the `to_json!`-emitted `ToJson` impl.
 //!   - `hand`  — a manually written `ToJson` impl over an identically
 //!     shaped struct/enum. A meaningful gap between this and `macro`
@@ -26,8 +26,11 @@
 
 use bourne::{JsonWrite, ToJson, to_json, to_string};
 use bourne_bench::SMALL_OBJECT;
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use serde::Serialize;
+
+fn main() {
+    divan::main();
+}
 
 const N: usize = 1_000;
 
@@ -116,32 +119,41 @@ fn user_fixture<'a>() -> (UserMacro<'a>, UserHand<'a>, UserSerde<'a>) {
     (m, h, s)
 }
 
-fn bench_struct_small(c: &mut Criterion) {
-    let (m, h, s) = user_fixture();
-    let mut group = c.benchmark_group("to_json_struct_small");
-    // Throughput in elements/sec — bytes/sec would require pre-serializing.
-    group.throughput(Throughput::Bytes(SMALL_OBJECT.len() as u64));
+mod to_json_struct_small {
+    use super::*;
 
-    group.bench_function("macro", |b| {
-        b.iter(|| {
-            let out = to_string(black_box(&m)).unwrap();
-            black_box(out);
-        });
-    });
-    group.bench_function("hand", |b| {
-        b.iter(|| {
-            let out = to_string(black_box(&h)).unwrap();
-            black_box(out);
-        });
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| {
-            let out = serde_json::to_string(black_box(&s)).unwrap();
-            black_box(out);
-        });
-    });
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let (m, _, _) = user_fixture();
+        bencher
+            .counter(divan::counter::BytesCount::new(SMALL_OBJECT.len()))
+            .bench(|| {
+                let out = to_string(divan::black_box(&m)).unwrap();
+                divan::black_box(out);
+            });
+    }
 
-    group.finish();
+    #[divan::bench]
+    fn hand(bencher: divan::Bencher) {
+        let (_, h, _) = user_fixture();
+        bencher
+            .counter(divan::counter::BytesCount::new(SMALL_OBJECT.len()))
+            .bench(|| {
+                let out = to_string(divan::black_box(&h)).unwrap();
+                divan::black_box(out);
+            });
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let (_, _, s) = user_fixture();
+        bencher
+            .counter(divan::counter::BytesCount::new(SMALL_OBJECT.len()))
+            .bench(|| {
+                let out = serde_json::to_string(divan::black_box(&s)).unwrap();
+                divan::black_box(out);
+            });
+    }
 }
 
 // ===========================================================================
@@ -263,42 +275,49 @@ fn metric_serde_vec() -> Vec<MetricEventSerde<'static>> {
         .collect()
 }
 
-fn bench_struct_metric(c: &mut Criterion) {
-    let m = metric_macro_vec();
-    let h = metric_hand_vec();
-    let s = metric_serde_vec();
+mod to_json_struct_metric_1000 {
+    use super::*;
 
-    // Pre-serialize once to size the throughput counter so the
-    // bytes/sec figure is comparable across rows.
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = metric_macro_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| {
+                let out = to_string(divan::black_box(&m)).unwrap();
+                divan::black_box(out);
+            });
+    }
 
-    let mut group = c.benchmark_group("to_json_struct_metric_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
+    #[divan::bench]
+    fn hand(bencher: divan::Bencher) {
+        let h = metric_hand_vec();
+        let payload_bytes = to_string(&h).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| {
+                let out = to_string(divan::black_box(&h)).unwrap();
+                divan::black_box(out);
+            });
+    }
 
-    group.bench_function("macro", |b| {
-        b.iter(|| {
-            let out = to_string(black_box(&m)).unwrap();
-            black_box(out);
-        });
-    });
-    group.bench_function("hand", |b| {
-        b.iter(|| {
-            let out = to_string(black_box(&h)).unwrap();
-            black_box(out);
-        });
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| {
-            let out = serde_json::to_string(black_box(&s)).unwrap();
-            black_box(out);
-        });
-    });
-    group.finish();
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = metric_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| {
+                let out = serde_json::to_string(divan::black_box(&s)).unwrap();
+                divan::black_box(out);
+            });
+    }
 }
 
 // ===========================================================================
 // 3. Borrowed-`&str` struct with escape-heavy field values.
-//    Pins the macro on its headline use case (zero-copy parse → write
+//    Pins the macro on its headline use case (zero-copy parse -> write
 //    back out) and exercises the `write_escaped_str` slow path.
 // ===========================================================================
 
@@ -348,27 +367,32 @@ fn log_serde_vec() -> Vec<LogLineSerde<'static>> {
         .collect()
 }
 
-fn bench_struct_borrowed_escape(c: &mut Criterion) {
-    let m = log_macro_vec();
-    let s = log_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
+mod to_json_struct_borrowed_escape_1000 {
+    use super::*;
 
-    let mut group = c.benchmark_group("to_json_struct_borrowed_escape_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = log_macro_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| {
+                let out = to_string(divan::black_box(&m)).unwrap();
+                divan::black_box(out);
+            });
+    }
 
-    group.bench_function("macro", |b| {
-        b.iter(|| {
-            let out = to_string(black_box(&m)).unwrap();
-            black_box(out);
-        });
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| {
-            let out = serde_json::to_string(black_box(&s)).unwrap();
-            black_box(out);
-        });
-    });
-    group.finish();
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = log_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| {
+                let out = serde_json::to_string(divan::black_box(&s)).unwrap();
+                divan::black_box(out);
+            });
+    }
 }
 
 // ===========================================================================
@@ -433,26 +457,32 @@ fn decorated_serde_vec() -> Vec<DecoratedSerde> {
         .collect()
 }
 
-fn bench_struct_decorated(c: &mut Criterion) {
-    let m = decorated_macro_vec();
-    let s = decorated_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
+mod to_json_struct_decorated_1000 {
+    use super::*;
 
-    let mut group = c.benchmark_group("to_json_struct_decorated_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
-    group.bench_function("macro", |b| {
-        b.iter(|| {
-            let out = to_string(black_box(&m)).unwrap();
-            black_box(out);
-        });
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| {
-            let out = serde_json::to_string(black_box(&s)).unwrap();
-            black_box(out);
-        });
-    });
-    group.finish();
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = decorated_macro_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| {
+                let out = to_string(divan::black_box(&m)).unwrap();
+                divan::black_box(out);
+            });
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = decorated_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| {
+                let out = serde_json::to_string(divan::black_box(&s)).unwrap();
+                divan::black_box(out);
+            });
+    }
 }
 
 // ===========================================================================
@@ -493,34 +523,48 @@ fn triple_serde_vec() -> Vec<TripleSerde> {
         .collect()
 }
 
-fn bench_tuple_newtype(c: &mut Criterion) {
-    let m = newtype_vec();
-    let s = newtype_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
-    let mut group = c.benchmark_group("to_json_tuple_newtype_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
-    group.bench_function("macro", |b| {
-        b.iter(|| black_box(to_string(black_box(&m)).unwrap()));
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| black_box(serde_json::to_string(black_box(&s)).unwrap()));
-    });
-    group.finish();
+mod to_json_tuple_newtype_1000 {
+    use super::*;
+
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = newtype_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(to_string(divan::black_box(&m)).unwrap()));
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = newtype_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(serde_json::to_string(divan::black_box(&s)).unwrap()));
+    }
 }
 
-fn bench_tuple_multi(c: &mut Criterion) {
-    let m = triple_vec();
-    let s = triple_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
-    let mut group = c.benchmark_group("to_json_tuple_multi_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
-    group.bench_function("macro", |b| {
-        b.iter(|| black_box(to_string(black_box(&m)).unwrap()));
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| black_box(serde_json::to_string(black_box(&s)).unwrap()));
-    });
-    group.finish();
+mod to_json_tuple_multi_1000 {
+    use super::*;
+
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = triple_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(to_string(divan::black_box(&m)).unwrap()));
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = triple_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(serde_json::to_string(divan::black_box(&s)).unwrap()));
+    }
 }
 
 // ===========================================================================
@@ -575,19 +619,26 @@ fn shape_serde_vec() -> Vec<ShapeSerde> {
         .collect()
 }
 
-fn bench_enum_external(c: &mut Criterion) {
-    let m = shape_macro_vec();
-    let s = shape_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
-    let mut group = c.benchmark_group("to_json_enum_external_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
-    group.bench_function("macro", |b| {
-        b.iter(|| black_box(to_string(black_box(&m)).unwrap()));
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| black_box(serde_json::to_string(black_box(&s)).unwrap()));
-    });
-    group.finish();
+mod to_json_enum_external_1000 {
+    use super::*;
+
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = shape_macro_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(to_string(divan::black_box(&m)).unwrap()));
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = shape_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(serde_json::to_string(divan::black_box(&s)).unwrap()));
+    }
 }
 
 // ===========================================================================
@@ -647,19 +698,26 @@ fn event_serde_vec() -> Vec<EventSerde> {
         .collect()
 }
 
-fn bench_enum_internal(c: &mut Criterion) {
-    let m = event_macro_vec();
-    let s = event_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
-    let mut group = c.benchmark_group("to_json_enum_internal_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
-    group.bench_function("macro", |b| {
-        b.iter(|| black_box(to_string(black_box(&m)).unwrap()));
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| black_box(serde_json::to_string(black_box(&s)).unwrap()));
-    });
-    group.finish();
+mod to_json_enum_internal_1000 {
+    use super::*;
+
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = event_macro_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(to_string(divan::black_box(&m)).unwrap()));
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = event_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(serde_json::to_string(divan::black_box(&s)).unwrap()));
+    }
 }
 
 // ===========================================================================
@@ -711,19 +769,26 @@ fn msg_serde_vec() -> Vec<MsgSerde> {
         .collect()
 }
 
-fn bench_enum_adjacent(c: &mut Criterion) {
-    let m = msg_macro_vec();
-    let s = msg_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
-    let mut group = c.benchmark_group("to_json_enum_adjacent_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
-    group.bench_function("macro", |b| {
-        b.iter(|| black_box(to_string(black_box(&m)).unwrap()));
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| black_box(serde_json::to_string(black_box(&s)).unwrap()));
-    });
-    group.finish();
+mod to_json_enum_adjacent_1000 {
+    use super::*;
+
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = msg_macro_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(to_string(divan::black_box(&m)).unwrap()));
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = msg_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(serde_json::to_string(divan::black_box(&s)).unwrap()));
+    }
 }
 
 // ===========================================================================
@@ -775,32 +840,24 @@ fn mixed_serde_vec() -> Vec<MixedSerde> {
         .collect()
 }
 
-fn bench_enum_untagged(c: &mut Criterion) {
-    let m = mixed_macro_vec();
-    let s = mixed_serde_vec();
-    let payload_bytes = to_string(&m).unwrap().len() as u64;
-    let mut group = c.benchmark_group("to_json_enum_untagged_1000");
-    group.throughput(Throughput::Bytes(payload_bytes));
-    group.bench_function("macro", |b| {
-        b.iter(|| black_box(to_string(black_box(&m)).unwrap()));
-    });
-    group.bench_function("serde_json", |b| {
-        b.iter(|| black_box(serde_json::to_string(black_box(&s)).unwrap()));
-    });
-    group.finish();
-}
+mod to_json_enum_untagged_1000 {
+    use super::*;
 
-criterion_group!(
-    benches,
-    bench_struct_small,
-    bench_struct_metric,
-    bench_struct_borrowed_escape,
-    bench_struct_decorated,
-    bench_tuple_newtype,
-    bench_tuple_multi,
-    bench_enum_external,
-    bench_enum_internal,
-    bench_enum_adjacent,
-    bench_enum_untagged,
-);
-criterion_main!(benches);
+    #[divan::bench]
+    fn r#macro(bencher: divan::Bencher) {
+        let m = mixed_macro_vec();
+        let payload_bytes = to_string(&m).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(to_string(divan::black_box(&m)).unwrap()));
+    }
+
+    #[divan::bench]
+    fn serde_json(bencher: divan::Bencher) {
+        let s = mixed_serde_vec();
+        let payload_bytes = serde_json::to_string(&s).unwrap().len();
+        bencher
+            .counter(divan::counter::BytesCount::new(payload_bytes))
+            .bench(|| divan::black_box(serde_json::to_string(divan::black_box(&s)).unwrap()));
+    }
+}

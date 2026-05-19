@@ -17,7 +17,10 @@
 //! so the bench isolates float cost.
 
 use bourne::to_string;
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+
+fn main() {
+    divan::main();
+}
 
 /// Reproducible pseudo-random `Vec<f64>` covering a realistic range
 /// of magnitudes. Seeded so successive bench runs are comparable.
@@ -50,34 +53,39 @@ fn make_floats(n: usize) -> Vec<f64> {
     out
 }
 
-fn bench_floats(c: &mut Criterion) {
-    let mut group = c.benchmark_group("floats");
+mod bourne_write {
+    use super::*;
 
-    for &n in &[100usize, 1_000, 10_000] {
+    // -------- bourne (production write!-based path) --------
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
         let floats = make_floats(n);
-        // Throughput counted in floats per iteration so the report
-        // shows elem/sec — easier to reason about than bytes/sec for
-        // this workload.
-        group.throughput(Throughput::Elements(n as u64));
-
-        // -------- bourne (production write!-based path) --------
-        group.bench_function(format!("bourne_write/{n}"), |b| {
-            b.iter(|| {
-                let s = to_string(black_box(&floats)).unwrap();
-                black_box(s);
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench(|| {
+                let s = to_string(divan::black_box(&floats)).unwrap();
+                divan::black_box(s);
             });
-        });
+    }
+}
 
-        // -------- ryu crate direct (target for inline port) --------
-        // Build the same JSON shape (`[f0,f1,...]`) by hand so the
-        // comparison isolates float formatting from punctuation.
-        group.bench_function(format!("ryu_direct/{n}"), |b| {
-            b.iter(|| {
+mod ryu_direct {
+    use super::*;
+
+    // -------- ryu crate direct (target for inline port) --------
+    // Build the same JSON shape (`[f0,f1,...]`) by hand so the
+    // comparison isolates float formatting from punctuation.
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
+        let floats = make_floats(n);
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench(|| {
                 let mut out = String::with_capacity(n * 24);
                 let mut buf = ryu::Buffer::new();
                 out.push('[');
                 let mut first = true;
-                for f in black_box(&floats) {
+                for f in divan::black_box(&floats) {
                     if !first {
                         out.push(',');
                     }
@@ -85,21 +93,23 @@ fn bench_floats(c: &mut Criterion) {
                     first = false;
                 }
                 out.push(']');
-                black_box(out);
+                divan::black_box(out);
             });
-        });
-
-        // -------- serde_json (absolute anchor) --------
-        group.bench_function(format!("serde_json/{n}"), |b| {
-            b.iter(|| {
-                let s = serde_json::to_string(black_box(&floats)).unwrap();
-                black_box(s);
-            });
-        });
     }
-
-    group.finish();
 }
 
-criterion_group!(benches, bench_floats);
-criterion_main!(benches);
+mod serde_json {
+    use super::*;
+
+    // -------- serde_json (absolute anchor) --------
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
+        let floats = make_floats(n);
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench(|| {
+                let s = ::serde_json::to_string(divan::black_box(&floats)).unwrap();
+                divan::black_box(s);
+            });
+    }
+}

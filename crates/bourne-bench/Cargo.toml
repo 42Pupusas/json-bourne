@@ -17,13 +17,10 @@ serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+divan = "0.1"
 iai-callgrind = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
-# Float-formatting comparison point. Used only by the `floats` bench
-# to measure how much we'd gain from porting ryu inline vs the current
-# `write!`-based path. NOT a library dep.
 ryu = "1"
 
 [features]

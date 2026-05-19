@@ -1,6 +1,6 @@
 //! Head-to-head: bourne vs `serde_json`.
 //!
-//! Each criterion group contains one `bourne` and one `serde_json` function
+//! Each benchmark group contains one `bourne` and one `serde_json` function
 //! over the same input, so the report shows the two bars side by side.
 //!
 //! Categories:
@@ -21,8 +21,11 @@ use bourne::{FromJson, from_json, parse};
 use bourne_bench::realistic::{metric_event_array, metric_event_array_reversed_keys};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use serde::Deserialize;
+
+fn main() {
+    divan::main();
+}
 
 // ---------------------------------------------------------------------------
 // Struct shapes used by typed_struct.
@@ -244,95 +247,160 @@ impl<'input> FromJson<'input> for MetricEventBourne<'input> {
 fn bourne_drain(input: &[u8]) {
     let mut p: Parser<'_> = Parser::new(input);
     while let Some(ev) = p.next_event().expect("valid input") {
-        black_box(ev);
+        divan::black_box(ev);
     }
 }
 
-fn bench_stream_vs_dom(c: &mut Criterion) {
-    let mut group = c.benchmark_group("stream_vs_dom");
+mod stream_vs_dom {
+    use super::*;
 
-    // Use the existing small/representative object plus one bigger document.
-    let small = SMALL_OBJECT.as_bytes();
-    let big_ints = int_array(10_000);
-    let big_strs = string_array(10_000);
+    #[divan::bench]
+    fn small_object_bourne_stream(bencher: divan::Bencher) {
+        let bytes = SMALL_OBJECT.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| bourne_drain(divan::black_box(bytes)));
+    }
 
-    for (name, bytes) in [
-        ("small_object", small),
-        ("ints/10000", big_ints.as_bytes()),
-        ("strings/10000", big_strs.as_bytes()),
-    ] {
-        group.throughput(Throughput::Bytes(bytes.len() as u64));
-        group.bench_function(format!("{name}/bourne_stream"), |b| {
-            b.iter(|| bourne_drain(black_box(bytes)));
-        });
-        group.bench_function(format!("{name}/serde_json_value"), |b| {
-            b.iter(|| {
+    #[divan::bench]
+    fn small_object_serde_json_value(bencher: divan::Bencher) {
+        let bytes = SMALL_OBJECT.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
                 let v: serde_json::Value =
-                    serde_json::from_slice(black_box(bytes)).expect("valid input");
-                black_box(v);
+                    serde_json::from_slice(divan::black_box(bytes)).expect("valid input");
+                divan::black_box(v);
             });
-        });
     }
 
-    group.finish();
+    #[divan::bench]
+    fn ints_10000_bourne_stream(bencher: divan::Bencher) {
+        let big_ints = int_array(10_000);
+        let bytes = big_ints.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| bourne_drain(divan::black_box(bytes)));
+    }
+
+    #[divan::bench]
+    fn ints_10000_serde_json_value(bencher: divan::Bencher) {
+        let big_ints = int_array(10_000);
+        let bytes = big_ints.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(divan::black_box(bytes)).expect("valid input");
+                divan::black_box(v);
+            });
+    }
+
+    #[divan::bench]
+    fn strings_10000_bourne_stream(bencher: divan::Bencher) {
+        let big_strs = string_array(10_000);
+        let bytes = big_strs.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| bourne_drain(divan::black_box(bytes)));
+    }
+
+    #[divan::bench]
+    fn strings_10000_serde_json_value(bencher: divan::Bencher) {
+        let big_strs = string_array(10_000);
+        let bytes = big_strs.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(divan::black_box(bytes)).expect("valid input");
+                divan::black_box(v);
+            });
+    }
 }
 
-fn bench_typed_struct(c: &mut Criterion) {
-    let mut group = c.benchmark_group("typed_struct");
+mod typed_struct {
+    use super::*;
 
     // Original small fixture — kept for the per-call-overhead floor.
-    let bytes = SMALL_OBJECT.as_bytes();
-    group.throughput(Throughput::Bytes(bytes.len() as u64));
-    group.bench_function("small/bourne", |b| {
-        b.iter(|| {
-            let u: UserBourne<'_> = parse(black_box(bytes)).unwrap();
-            black_box(u);
-        });
-    });
+
+    #[divan::bench]
+    fn small_bourne(bencher: divan::Bencher) {
+        let bytes = SMALL_OBJECT.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let u: UserBourne<'_> = parse(divan::black_box(bytes)).unwrap();
+                divan::black_box(u);
+            });
+    }
+
     // Macro-generated impl: same struct shape, `from_json!` instead of
     // a hand-written `from_lex`. A meaningful gap between this row and
     // the `small/bourne` row above signals the macro is leaving perf
     // on the table — the most likely places to look would be the
     // dispatch match (string-key compare order), the duplicate-key
     // check, or per-field `Option`-slot machinery.
-    group.bench_function("small/bourne_derived", |b| {
-        b.iter(|| {
-            let u: UserDerived<'_> = parse(black_box(bytes)).unwrap();
-            black_box(u);
-        });
-    });
-    group.bench_function("small/serde_json", |b| {
-        b.iter(|| {
-            let u: UserSerde<'_> = serde_json::from_slice(black_box(bytes)).unwrap();
-            black_box(u);
-        });
-    });
+    #[divan::bench]
+    fn small_bourne_derived(bencher: divan::Bencher) {
+        let bytes = SMALL_OBJECT.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let u: UserDerived<'_> = parse(divan::black_box(bytes)).unwrap();
+                divan::black_box(u);
+            });
+    }
+
+    #[divan::bench]
+    fn small_serde_json(bencher: divan::Bencher) {
+        let bytes = SMALL_OBJECT.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let u: UserSerde<'_> = serde_json::from_slice(divan::black_box(bytes)).unwrap();
+                divan::black_box(u);
+            });
+    }
 
     // Realistic-sized: Vec<MetricEvent> over 1000 records (~180 KB total).
     // The headline number for "typed deserialization" — the SMALL_OBJECT
     // case is dominated by per-call overhead, this one is dominated by
     // per-record dispatch + decode, which is what real workloads pay.
-    let metrics = metric_event_array(1_000);
-    group.throughput(Throughput::Bytes(metrics.len() as u64));
-    group.bench_function("metric_events/1000/bourne", |b| {
-        b.iter(|| {
-            let v: Vec<MetricEventBourne<'_>> = parse(black_box(metrics.as_bytes())).unwrap();
-            black_box(v);
-        });
-    });
-    group.bench_function("metric_events/1000/bourne_derived", |b| {
-        b.iter(|| {
-            let v: Vec<MetricEventDerived<'_>> = parse(black_box(metrics.as_bytes())).unwrap();
-            black_box(v);
-        });
-    });
-    group.bench_function("metric_events/1000/serde_json", |b| {
-        b.iter(|| {
-            let v: Vec<MetricEventSerde<'_>> =
-                serde_json::from_slice(black_box(metrics.as_bytes())).unwrap();
-            black_box(v);
-        });
-    });
+
+    #[divan::bench]
+    fn metric_events_1000_bourne(bencher: divan::Bencher) {
+        let metrics = metric_event_array(1_000);
+        bencher
+            .counter(divan::counter::BytesCount::new(metrics.len()))
+            .bench(|| {
+                let v: Vec<MetricEventBourne<'_>> = parse(divan::black_box(metrics.as_bytes())).unwrap();
+                divan::black_box(v);
+            });
+    }
+
+    #[divan::bench]
+    fn metric_events_1000_bourne_derived(bencher: divan::Bencher) {
+        let metrics = metric_event_array(1_000);
+        bencher
+            .counter(divan::counter::BytesCount::new(metrics.len()))
+            .bench(|| {
+                let v: Vec<MetricEventDerived<'_>> = parse(divan::black_box(metrics.as_bytes())).unwrap();
+                divan::black_box(v);
+            });
+    }
+
+    #[divan::bench]
+    fn metric_events_1000_serde_json(bencher: divan::Bencher) {
+        let metrics = metric_event_array(1_000);
+        bencher
+            .counter(divan::counter::BytesCount::new(metrics.len()))
+            .bench(|| {
+                let v: Vec<MetricEventSerde<'_>> =
+                    serde_json::from_slice(divan::black_box(metrics.as_bytes())).unwrap();
+                divan::black_box(v);
+            });
+    }
 
     // Same shape, same values, keys emitted in **reverse declaration
     // order**. A correct typed parser must accept either ordering — this
@@ -340,107 +408,126 @@ fn bench_typed_struct(c: &mut Criterion) {
     // produce different results, which the Vec-equality property in the
     // tests would catch) and performance parity (a parser whose
     // field-dispatch match is order-sensitive would slow down here).
-    let metrics_rev = metric_event_array_reversed_keys(1_000);
-    group.throughput(Throughput::Bytes(metrics_rev.len() as u64));
-    group.bench_function("metric_events_reversed/1000/bourne", |b| {
-        b.iter(|| {
-            let v: Vec<MetricEventBourne<'_>> =
-                parse(black_box(metrics_rev.as_bytes())).unwrap();
-            black_box(v);
-        });
-    });
-    group.bench_function("metric_events_reversed/1000/bourne_derived", |b| {
-        b.iter(|| {
-            let v: Vec<MetricEventDerived<'_>> =
-                parse(black_box(metrics_rev.as_bytes())).unwrap();
-            black_box(v);
-        });
-    });
-    group.bench_function("metric_events_reversed/1000/serde_json", |b| {
-        b.iter(|| {
-            let v: Vec<MetricEventSerde<'_>> =
-                serde_json::from_slice(black_box(metrics_rev.as_bytes())).unwrap();
-            black_box(v);
-        });
-    });
 
-    group.finish();
+    #[divan::bench]
+    fn metric_events_reversed_1000_bourne(bencher: divan::Bencher) {
+        let metrics_rev = metric_event_array_reversed_keys(1_000);
+        bencher
+            .counter(divan::counter::BytesCount::new(metrics_rev.len()))
+            .bench(|| {
+                let v: Vec<MetricEventBourne<'_>> =
+                    parse(divan::black_box(metrics_rev.as_bytes())).unwrap();
+                divan::black_box(v);
+            });
+    }
+
+    #[divan::bench]
+    fn metric_events_reversed_1000_bourne_derived(bencher: divan::Bencher) {
+        let metrics_rev = metric_event_array_reversed_keys(1_000);
+        bencher
+            .counter(divan::counter::BytesCount::new(metrics_rev.len()))
+            .bench(|| {
+                let v: Vec<MetricEventDerived<'_>> =
+                    parse(divan::black_box(metrics_rev.as_bytes())).unwrap();
+                divan::black_box(v);
+            });
+    }
+
+    #[divan::bench]
+    fn metric_events_reversed_1000_serde_json(bencher: divan::Bencher) {
+        let metrics_rev = metric_event_array_reversed_keys(1_000);
+        bencher
+            .counter(divan::counter::BytesCount::new(metrics_rev.len()))
+            .bench(|| {
+                let v: Vec<MetricEventSerde<'_>> =
+                    serde_json::from_slice(divan::black_box(metrics_rev.as_bytes())).unwrap();
+                divan::black_box(v);
+            });
+    }
 }
 
-fn bench_vec_i64(c: &mut Criterion) {
-    let mut group = c.benchmark_group("vec_i64");
-    for &n in &[100usize, 10_000] {
+mod vec_i64 {
+    use super::*;
+
+    #[divan::bench(args = [100, 10_000])]
+    fn bourne(bencher: divan::Bencher, n: usize) {
         let s = int_array(n);
         let bytes = s.as_bytes();
-        group.throughput(Throughput::Bytes(bytes.len() as u64));
-        group.bench_function(format!("{n}/bourne"), |b| {
-            b.iter(|| {
-                let v: Vec<i64> = parse(black_box(bytes)).unwrap();
-                black_box(v);
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: Vec<i64> = parse(divan::black_box(bytes)).unwrap();
+                divan::black_box(v);
             });
-        });
-        group.bench_function(format!("{n}/serde_json"), |b| {
-            b.iter(|| {
-                let v: Vec<i64> = serde_json::from_slice(black_box(bytes)).unwrap();
-                black_box(v);
-            });
-        });
     }
-    group.finish();
+
+    #[divan::bench(args = [100, 10_000])]
+    fn serde_json(bencher: divan::Bencher, n: usize) {
+        let s = int_array(n);
+        let bytes = s.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: Vec<i64> = serde_json::from_slice(divan::black_box(bytes)).unwrap();
+                divan::black_box(v);
+            });
+    }
 }
 
-fn bench_vec_borrowed_str(c: &mut Criterion) {
-    let mut group = c.benchmark_group("vec_borrowed_str");
-    for &n in &[100usize, 10_000] {
+mod vec_borrowed_str {
+    use super::*;
+
+    #[divan::bench(args = [100, 10_000])]
+    fn bourne(bencher: divan::Bencher, n: usize) {
         let s = string_array(n);
         let bytes = s.as_bytes();
-        group.throughput(Throughput::Bytes(bytes.len() as u64));
-        group.bench_function(format!("{n}/bourne"), |b| {
-            b.iter(|| {
-                let v: Vec<&str> = parse(black_box(bytes)).unwrap();
-                black_box(v);
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: Vec<&str> = parse(divan::black_box(bytes)).unwrap();
+                divan::black_box(v);
             });
-        });
-        group.bench_function(format!("{n}/serde_json"), |b| {
-            b.iter(|| {
+    }
+
+    #[divan::bench(args = [100, 10_000])]
+    fn serde_json(bencher: divan::Bencher, n: usize) {
+        let s = string_array(n);
+        let bytes = s.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
                 // serde_json supports zero-copy borrowed &str via from_slice + #[serde(borrow)],
                 // but only when there are no escapes. Our string_array has none.
-                let v: Vec<&str> = serde_json::from_slice(black_box(bytes)).unwrap();
-                black_box(v);
+                let v: Vec<&str> = serde_json::from_slice(divan::black_box(bytes)).unwrap();
+                divan::black_box(v);
             });
-        });
     }
-    group.finish();
 }
 
-fn bench_vec_string(c: &mut Criterion) {
-    let mut group = c.benchmark_group("vec_string");
-    for &n in &[100usize, 10_000] {
+mod vec_string {
+    use super::*;
+
+    #[divan::bench(args = [100, 10_000])]
+    fn bourne(bencher: divan::Bencher, n: usize) {
         let s = string_array(n);
         let bytes = s.as_bytes();
-        group.throughput(Throughput::Bytes(bytes.len() as u64));
-        group.bench_function(format!("{n}/bourne"), |b| {
-            b.iter(|| {
-                let v: Vec<String> = parse(black_box(bytes)).unwrap();
-                black_box(v);
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: Vec<String> = parse(divan::black_box(bytes)).unwrap();
+                divan::black_box(v);
             });
-        });
-        group.bench_function(format!("{n}/serde_json"), |b| {
-            b.iter(|| {
-                let v: Vec<String> = serde_json::from_slice(black_box(bytes)).unwrap();
-                black_box(v);
-            });
-        });
     }
-    group.finish();
-}
 
-criterion_group!(
-    benches,
-    bench_stream_vs_dom,
-    bench_typed_struct,
-    bench_vec_i64,
-    bench_vec_borrowed_str,
-    bench_vec_string,
-);
-criterion_main!(benches);
+    #[divan::bench(args = [100, 10_000])]
+    fn serde_json(bencher: divan::Bencher, n: usize) {
+        let s = string_array(n);
+        let bytes = s.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: Vec<String> = serde_json::from_slice(divan::black_box(bytes)).unwrap();
+                divan::black_box(v);
+            });
+    }
+}

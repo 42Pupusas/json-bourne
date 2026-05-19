@@ -5,40 +5,44 @@
 
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use bourne_core::Parser;
-use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
+
+fn main() {
+    divan::main();
+}
 
 fn drain(input: &[u8]) {
     let mut p: Parser<'_> = Parser::new(input);
     while let Some(ev) = p.next_event().expect("valid input") {
-        black_box(ev);
+        divan::black_box(ev);
     }
 }
 
-fn bench_stream(c: &mut Criterion) {
-    let mut group = c.benchmark_group("stream");
-
+#[divan::bench]
+fn small_object(bencher: divan::Bencher) {
     let small = SMALL_OBJECT.as_bytes();
-    group.throughput(Throughput::Bytes(small.len() as u64));
-    group.bench_function("small_object", |b| b.iter(|| drain(black_box(small))));
-
-    for &n in &[10usize, 1_000, 100_000] {
-        let s = int_array(n);
-        group.throughput(Throughput::Bytes(s.len() as u64));
-        group.bench_function(format!("int_array/{n}"), |b| {
-            b.iter(|| drain(black_box(s.as_bytes())));
+    bencher
+        .counter(divan::counter::BytesCount::new(small.len()))
+        .bench(|| {
+            drain(divan::black_box(small));
         });
-    }
-
-    for &n in &[10usize, 1_000, 100_000] {
-        let s = string_array(n);
-        group.throughput(Throughput::Bytes(s.len() as u64));
-        group.bench_function(format!("string_array/{n}"), |b| {
-            b.iter(|| drain(black_box(s.as_bytes())));
-        });
-    }
-
-    group.finish();
 }
 
-criterion_group!(benches, bench_stream);
-criterion_main!(benches);
+#[divan::bench(args = [10, 1_000, 100_000])]
+fn int_array_bench(bencher: divan::Bencher, n: usize) {
+    let s = int_array(n);
+    bencher
+        .counter(divan::counter::BytesCount::new(s.len()))
+        .bench(|| {
+            drain(divan::black_box(s.as_bytes()));
+        });
+}
+
+#[divan::bench(args = [10, 1_000, 100_000])]
+fn string_array_bench(bencher: divan::Bencher, n: usize) {
+    let s = string_array(n);
+    bencher
+        .counter(divan::counter::BytesCount::new(s.len()))
+        .bench(|| {
+            drain(divan::black_box(s.as_bytes()));
+        });
+}
