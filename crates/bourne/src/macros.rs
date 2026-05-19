@@ -3227,7 +3227,7 @@ macro_rules! to_json {
                 &self,
                 __w: &mut __W,
             ) -> ::core::result::Result<(), __W::Error> {
-                __w.write_byte(b'[')?;
+                __w.write_raw_bytes(b"[")?;
                 $crate::ToJson::write_json(&self.0, __w)?;
                 $crate::__to_json_tuple_walk!(
                     self_ref: self,
@@ -3235,7 +3235,7 @@ macro_rules! to_json {
                     idx: 1,
                     remaining: [ $(($ftyn))+ ]
                 );
-                __w.write_byte(b']')?;
+                __w.write_raw_bytes(b"]")?;
                 ::core::result::Result::Ok(())
             }
         }
@@ -3254,7 +3254,7 @@ macro_rules! to_json {
                 &self,
                 __w: &mut __W,
             ) -> ::core::result::Result<(), __W::Error> {
-                __w.write_byte(b'[')?;
+                __w.write_raw_bytes(b"[")?;
                 $crate::ToJson::write_json(&self.0, __w)?;
                 $crate::__to_json_tuple_walk!(
                     self_ref: self,
@@ -3262,7 +3262,7 @@ macro_rules! to_json {
                     idx: 1,
                     remaining: [ $(($ftyn))+ ]
                 );
-                __w.write_byte(b']')?;
+                __w.write_raw_bytes(b"]")?;
                 ::core::result::Result::Ok(())
             }
         }
@@ -3663,9 +3663,9 @@ macro_rules! __to_json_enum_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b"\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b"\"")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -3688,9 +3688,9 @@ macro_rules! __to_json_enum_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b"\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b"\"")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -3718,11 +3718,11 @@ macro_rules! __to_json_enum_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __inner) => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b':')?;
+                    $w.write_raw_bytes(b":")?;
                     $crate::ToJson::write_json(__inner, $w)?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -3747,15 +3747,13 @@ macro_rules! __to_json_enum_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b) => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'[')?;
+                    $w.write_raw_bytes(b":[")?;
                     $crate::ToJson::write_json(__a, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__b, $w)?;
-                    $w.write_byte(b']')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"]}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -3780,17 +3778,15 @@ macro_rules! __to_json_enum_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b, ref __c) => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'[')?;
+                    $w.write_raw_bytes(b":[")?;
                     $crate::ToJson::write_json(__a, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__b, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__c, $w)?;
-                    $w.write_byte(b']')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"]}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -3815,26 +3811,19 @@ macro_rules! __to_json_enum_walk {
             arms: {
                 $($arms)*
                 &$name::$vname { $(ref $fname),+ } => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_str_raw(":{")?;
-                    // Per-field write fused into a single &'static str.
-                    // `concat!` evaluates at expand time so each field
-                    // emits one `write_str_raw` (one `String::push_str`)
-                    // for the comma+`"key":` punctuation, replacing what
-                    // used to be five sink calls. The runtime `__first`
-                    // branch stays — macro_rules! can't peel the first
-                    // field of a `$(...)+ ` repetition.
+                    $w.write_raw_bytes(b":{")?;
                     let mut __first: bool = true;
                     $(
-                        if !__first { $w.write_byte(b',')?; }
-                        $w.write_str_raw(
-                            ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                        if !__first { $w.write_raw_bytes(b",")?; }
+                        $w.write_raw_bytes(
+                            ::core::concat!("\"", ::core::stringify!($fname), "\":").as_bytes()
                         )?;
                         $crate::ToJson::write_json($fname, $w)?;
                         __first = false;
                     )+
-                    $w.write_str_raw("}}")?;
+                    $w.write_raw_bytes(b"}}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -3937,13 +3926,11 @@ macro_rules! __to_json_internal_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"\"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -3968,13 +3955,11 @@ macro_rules! __to_json_internal_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"\"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4001,23 +3986,18 @@ macro_rules! __to_json_internal_walk {
             arms: {
                 $($arms)*
                 &$name::$vname { $(ref $fname),+ } => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    // Tag is always the first key, so every struct
-                    // field unconditionally needs the leading comma —
-                    // no `__first` flag required. Fuse `,"key":` into
-                    // a single `concat!` literal per field.
+                    $w.write_raw_bytes(b"\"")?;
                     $(
-                        $w.write_str_raw(
-                            ::core::concat!(",\"", ::core::stringify!($fname), "\":")
+                        $w.write_raw_bytes(
+                            ::core::concat!(",\"", ::core::stringify!($fname), "\":").as_bytes()
                         )?;
                         $crate::ToJson::write_json($fname, $w)?;
                     )+
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4120,13 +4100,11 @@ macro_rules! __to_json_adjacent_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"\"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4153,13 +4131,11 @@ macro_rules! __to_json_adjacent_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"\"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4188,17 +4164,15 @@ macro_rules! __to_json_adjacent_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __inner) => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b"\",")?;
                     $w.write_escaped_str($content)?;
-                    $w.write_byte(b':')?;
+                    $w.write_raw_bytes(b":")?;
                     $crate::ToJson::write_json(__inner, $w)?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4227,21 +4201,17 @@ macro_rules! __to_json_adjacent_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b) => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b"\",")?;
                     $w.write_escaped_str($content)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'[')?;
+                    $w.write_raw_bytes(b":[")?;
                     $crate::ToJson::write_json(__a, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__b, $w)?;
-                    $w.write_byte(b']')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"]}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4270,23 +4240,19 @@ macro_rules! __to_json_adjacent_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b, ref __c) => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b"\",")?;
                     $w.write_escaped_str($content)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'[')?;
+                    $w.write_raw_bytes(b":[")?;
                     $crate::ToJson::write_json(__a, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__b, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__c, $w)?;
-                    $w.write_byte(b']')?;
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"]}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4315,25 +4281,23 @@ macro_rules! __to_json_adjacent_walk {
             arms: {
                 $($arms)*
                 &$name::$vname { $(ref $fname),+ } => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     $w.write_escaped_str($tag)?;
-                    $w.write_byte(b':')?;
-                    $w.write_byte(b'"')?;
+                    $w.write_raw_bytes(b":\"")?;
                     $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
-                    $w.write_byte(b'"')?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b"\",")?;
                     $w.write_escaped_str($content)?;
-                    $w.write_str_raw(":{")?;
+                    $w.write_raw_bytes(b":{")?;
                     let mut __first: bool = true;
                     $(
-                        if !__first { $w.write_byte(b',')?; }
-                        $w.write_str_raw(
-                            ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                        if !__first { $w.write_raw_bytes(b",")?; }
+                        $w.write_raw_bytes(
+                            ::core::concat!("\"", ::core::stringify!($fname), "\":").as_bytes()
                         )?;
                         $crate::ToJson::write_json($fname, $w)?;
                         __first = false;
                     )+
-                    $w.write_str_raw("}}")?;
+                    $w.write_raw_bytes(b"}}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4400,7 +4364,7 @@ macro_rules! __to_json_untagged_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_str_raw("null")?;
+                    $w.write_raw_bytes(b"null")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4421,7 +4385,7 @@ macro_rules! __to_json_untagged_walk {
             arms: {
                 $($arms)*
                 &$name::$vname => {
-                    $w.write_str_raw("null")?;
+                    $w.write_raw_bytes(b"null")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4467,11 +4431,11 @@ macro_rules! __to_json_untagged_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b) => {
-                    $w.write_byte(b'[')?;
+                    $w.write_raw_bytes(b"[")?;
                     $crate::ToJson::write_json(__a, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__b, $w)?;
-                    $w.write_byte(b']')?;
+                    $w.write_raw_bytes(b"]")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4494,13 +4458,13 @@ macro_rules! __to_json_untagged_walk {
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b, ref __c) => {
-                    $w.write_byte(b'[')?;
+                    $w.write_raw_bytes(b"[")?;
                     $crate::ToJson::write_json(__a, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__b, $w)?;
-                    $w.write_byte(b',')?;
+                    $w.write_raw_bytes(b",")?;
                     $crate::ToJson::write_json(__c, $w)?;
-                    $w.write_byte(b']')?;
+                    $w.write_raw_bytes(b"]")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4523,17 +4487,17 @@ macro_rules! __to_json_untagged_walk {
             arms: {
                 $($arms)*
                 &$name::$vname { $(ref $fname),+ } => {
-                    $w.write_byte(b'{')?;
+                    $w.write_raw_bytes(b"{")?;
                     let mut __first: bool = true;
                     $(
-                        if !__first { $w.write_byte(b',')?; }
-                        $w.write_str_raw(
-                            ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                        if !__first { $w.write_raw_bytes(b",")?; }
+                        $w.write_raw_bytes(
+                            ::core::concat!("\"", ::core::stringify!($fname), "\":").as_bytes()
                         )?;
                         $crate::ToJson::write_json($fname, $w)?;
                         __first = false;
                     )+
-                    $w.write_byte(b'}')?;
+                    $w.write_raw_bytes(b"}")?;
                     ::core::result::Result::Ok(())
                 }
             },
@@ -4572,7 +4536,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 1,
         remaining: [ ($_fty:ty) ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.1, $w)?;
     };
     (
@@ -4581,7 +4545,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 2,
         remaining: [ ($_fty:ty) ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.2, $w)?;
     };
     (
@@ -4590,7 +4554,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 3,
         remaining: [ ($_fty:ty) ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.3, $w)?;
     };
     (
@@ -4599,7 +4563,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 4,
         remaining: [ ($_fty:ty) ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.4, $w)?;
     };
     (
@@ -4608,7 +4572,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 5,
         remaining: [ ($_fty:ty) ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.5, $w)?;
     };
 
@@ -4619,7 +4583,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 1,
         remaining: [ ($_fty:ty) $(($rest:ty))+ ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.1, $w)?;
         $crate::__to_json_tuple_walk!(
             self_ref: $self,
@@ -4634,7 +4598,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 2,
         remaining: [ ($_fty:ty) $(($rest:ty))+ ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.2, $w)?;
         $crate::__to_json_tuple_walk!(
             self_ref: $self,
@@ -4649,7 +4613,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 3,
         remaining: [ ($_fty:ty) $(($rest:ty))+ ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.3, $w)?;
         $crate::__to_json_tuple_walk!(
             self_ref: $self,
@@ -4664,7 +4628,7 @@ macro_rules! __to_json_tuple_walk {
         idx: 4,
         remaining: [ ($_fty:ty) $(($rest:ty))+ ]
     ) => {
-        $w.write_byte(b',')?;
+        $w.write_raw_bytes(b",")?;
         $crate::ToJson::write_json(&$self.4, $w)?;
         $crate::__to_json_tuple_walk!(
             self_ref: $self,
@@ -4751,7 +4715,7 @@ macro_rules! __to_json_emit_struct_def {
 #[macro_export]
 macro_rules! __to_json_named_body {
     ($self:ident, $w:ident, $($body:tt)*) => {{
-        $w.write_byte(b'{')?;
+        $w.write_raw_bytes(b"{")?;
         // `__first` exists only for the dynamic-comma path: as soon as
         // a `skip_if_none` field is encountered, comma placement
         // becomes runtime-dependent and subsequent fields consult this
@@ -4774,7 +4738,7 @@ macro_rules! __to_json_named_body {
             static_first: (yes),
             input: ($($body)*)
         );
-        $w.write_byte(b'}')?;
+        $w.write_raw_bytes(b"}")?;
         ::core::result::Result::Ok(())
     }};
 }
@@ -4878,11 +4842,11 @@ macro_rules! __to_json_named_walk {
             emit: {
                 $($emit)*
                 if let ::core::option::Option::Some(ref __v) = $self.$fname {
-                    if !$first { $w.write_byte(b',')?; }
+                    if !$first { $w.write_raw_bytes(b",")?; }
                     $w.write_escaped_str(
                         $crate::__to_json_field_key!($fname, ($($rename)?))
                     )?;
-                    $w.write_byte(b':')?;
+                    $w.write_raw_bytes(b":")?;
                     $crate::ToJson::write_json(__v, $w)?;
                     $first = false;
                 }
@@ -4902,8 +4866,8 @@ macro_rules! __to_json_named_walk {
     // Fast path: no rename means the key is `stringify!($fname)`,
     // which is guaranteed to be a Rust ident — no escape-needing
     // bytes. Fuse `,"key":` (or `"key":` if first) into a single
-    // `concat!()` literal and emit via `write_str_raw` (one
-    // `String::push_str`).
+    // `concat!()` literal and emit via `write_raw_bytes` (one
+    // `extend_from_slice` on `ByteSink`).
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -4923,8 +4887,8 @@ macro_rules! __to_json_named_walk {
             first: $first,
             emit: {
                 $($emit)*
-                $w.write_str_raw(
-                    ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                $w.write_raw_bytes(
+                    ::core::concat!("\"", ::core::stringify!($fname), "\":").as_bytes()
                 )?;
                 $crate::ToJson::write_json(&$self.$fname, $w)?;
             },
@@ -4956,8 +4920,8 @@ macro_rules! __to_json_named_walk {
             first: $first,
             emit: {
                 $($emit)*
-                $w.write_str_raw(
-                    ::core::concat!(",\"", ::core::stringify!($fname), "\":")
+                $w.write_raw_bytes(
+                    ::core::concat!(",\"", ::core::stringify!($fname), "\":").as_bytes()
                 )?;
                 $crate::ToJson::write_json(&$self.$fname, $w)?;
             },
@@ -4998,11 +4962,11 @@ macro_rules! __to_json_named_walk {
             first: $first,
             emit: {
                 $($emit)*
-                if !$first { $w.write_byte(b',')?; }
+                if !$first { $w.write_raw_bytes(b",")?; }
                 $w.write_escaped_str(
                     $crate::__to_json_field_key!($fname, ($($rename)?))
                 )?;
-                $w.write_byte(b':')?;
+                $w.write_raw_bytes(b":")?;
                 $crate::ToJson::write_json(&$self.$fname, $w)?;
                 $first = false;
             },
@@ -5253,7 +5217,7 @@ macro_rules! __to_json_named_walk {
                     $w.write_escaped_str(
                         $crate::__to_json_field_key!($fname, ($($rename)?))
                     )?;
-                    $w.write_byte(b':')?;
+                    $w.write_raw_bytes(b":")?;
                     $crate::ToJson::write_json(__v, $w)?;
                     $first = false;
                 }
@@ -5287,11 +5251,11 @@ macro_rules! __to_json_named_walk {
             emit: {
                 $($emit)*
                 if let ::core::option::Option::Some(ref __v) = $self.$fname {
-                    if !$first { $w.write_byte(b',')?; }
+                    if !$first { $w.write_raw_bytes(b",")?; }
                     $w.write_escaped_str(
                         $crate::__to_json_field_key!($fname, ($($rename)?))
                     )?;
-                    $w.write_byte(b':')?;
+                    $w.write_raw_bytes(b":")?;
                     $crate::ToJson::write_json(__v, $w)?;
                     $first = false;
                 }
@@ -5309,9 +5273,9 @@ macro_rules! __to_json_named_walk {
     // plain variant, no rename, static-first: yes.
     //
     // Fast path. `concat!("\"", stringify!($fname), "\":")` collapses
-    // to a single &'static str, and the value is the only field
-    // committed so far so no leading comma. Single `write_str_raw`
-    // (one `String::push_str`) replaces the old 4 sink calls.
+    // to a single &'static byte slice, and the value is the only field
+    // committed so far so no leading comma. Single `write_raw_bytes`
+    // (one `extend_from_slice` on `ByteSink`).
     //
     // `$first = false;` keeps the runtime flag in sync so a later
     // skip_if_none or renamed field that falls back to the dynamic
@@ -5336,8 +5300,8 @@ macro_rules! __to_json_named_walk {
             first: $first,
             emit: {
                 $($emit)*
-                $w.write_str_raw(
-                    ::core::concat!("\"", ::core::stringify!($fname), "\":")
+                $w.write_raw_bytes(
+                    ::core::concat!("\"", ::core::stringify!($fname), "\":").as_bytes()
                 )?;
                 $crate::ToJson::write_json(&$self.$fname, $w)?;
                 $first = false;
@@ -5355,7 +5319,7 @@ macro_rules! __to_json_named_walk {
     // plain variant, no rename, static-first: no.
     //
     // Fast path. The leading comma is also static, so fold it into
-    // the same literal: `,"key":`.
+    // the same byte literal: `,"key":`.
     (
         self_ref: $self:ident,
         sink: $w:ident,
@@ -5375,8 +5339,8 @@ macro_rules! __to_json_named_walk {
             first: $first,
             emit: {
                 $($emit)*
-                $w.write_str_raw(
-                    ::core::concat!(",\"", ::core::stringify!($fname), "\":")
+                $w.write_raw_bytes(
+                    ::core::concat!(",\"", ::core::stringify!($fname), "\":").as_bytes()
                 )?;
                 $crate::ToJson::write_json(&$self.$fname, $w)?;
             },
@@ -5415,11 +5379,11 @@ macro_rules! __to_json_named_walk {
             first: $first,
             emit: {
                 $($emit)*
-                if !$first { $w.write_byte(b',')?; }
+                if !$first { $w.write_raw_bytes(b",")?; }
                 $w.write_escaped_str(
                     $crate::__to_json_field_key!($fname, ($($rename)?))
                 )?;
-                $w.write_byte(b':')?;
+                $w.write_raw_bytes(b":")?;
                 $crate::ToJson::write_json(&$self.$fname, $w)?;
                 $first = false;
             },
@@ -5664,7 +5628,7 @@ macro_rules! json {
                 &self,
                 __w: &mut __W,
             ) -> ::core::result::Result<(), __W::Error> {
-                __w.write_byte(b'[')?;
+                __w.write_raw_bytes(b"[")?;
                 $crate::ToJson::write_json(&self.0, __w)?;
                 $crate::__to_json_tuple_walk!(
                     self_ref: self,
@@ -5672,7 +5636,7 @@ macro_rules! json {
                     idx: 1,
                     remaining: [ $(($ftyn))+ ]
                 );
-                __w.write_byte(b']')?;
+                __w.write_raw_bytes(b"]")?;
                 ::core::result::Result::Ok(())
             }
         }
@@ -5710,7 +5674,7 @@ macro_rules! json {
                 &self,
                 __w: &mut __W,
             ) -> ::core::result::Result<(), __W::Error> {
-                __w.write_byte(b'[')?;
+                __w.write_raw_bytes(b"[")?;
                 $crate::ToJson::write_json(&self.0, __w)?;
                 $crate::__to_json_tuple_walk!(
                     self_ref: self,
@@ -5718,7 +5682,7 @@ macro_rules! json {
                     idx: 1,
                     remaining: [ $(($ftyn))+ ]
                 );
-                __w.write_byte(b']')?;
+                __w.write_raw_bytes(b"]")?;
                 ::core::result::Result::Ok(())
             }
         }

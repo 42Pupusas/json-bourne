@@ -62,6 +62,20 @@ pub trait JsonWrite {
         self.write_byte(b'"')
     }
 
+    /// Append a byte slice whose contents are known-valid UTF-8.
+    ///
+    /// Used by macro-generated code to fuse adjacent structural literals
+    /// (e.g. `b"{\"id\":"`) into a single write. The default routes
+    /// through [`Self::write_str_raw`]; byte-oriented sinks like
+    /// [`ByteSink`] override to avoid the `&str` conversion.
+    #[inline]
+    fn write_raw_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error> {
+        // SAFETY: callers guarantee valid UTF-8 — in practice these are
+        // compile-time byte-string literals from `concat!` / `b"..."`.
+        #[allow(unsafe_code)]
+        self.write_str_raw(unsafe { core::str::from_utf8_unchecked(b) })
+    }
+
     /// Write a signed 64-bit integer as a JSON number.
     #[inline]
     fn write_int_i64(&mut self, n: i64) -> Result<(), Self::Error> {
@@ -218,6 +232,118 @@ impl JsonWrite for StringSink<'_> {
     #[inline]
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
         float::format_f64_write(f, self.out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ByteSink — fast path for to_string / to_vec
+// ---------------------------------------------------------------------------
+
+/// `JsonWrite` sink that appends to a `Vec<u8>`.
+///
+/// Bypasses `String`'s UTF-8 invariant maintenance — every byte
+/// written is known-valid by construction, so the caller can convert
+/// to `String` via `from_utf8_unchecked` after serialization completes.
+#[cfg(feature = "alloc")]
+#[derive(Debug)]
+pub struct ByteSink<'a> {
+    out: &'a mut alloc::vec::Vec<u8>,
+}
+
+#[cfg(feature = "alloc")]
+impl<'a> ByteSink<'a> {
+    #[must_use]
+    pub const fn new(out: &'a mut alloc::vec::Vec<u8>) -> Self {
+        Self { out }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl JsonWrite for ByteSink<'_> {
+    type Error = Error;
+
+    #[inline]
+    fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
+        self.out.push(b);
+        Ok(())
+    }
+
+    #[inline]
+    fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
+        self.out.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    fn write_raw_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error> {
+        self.out.extend_from_slice(b);
+        Ok(())
+    }
+
+    fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
+        self.out.push(b'"');
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        let mut start = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if needs_escape(b) {
+                if start < i {
+                    self.out.extend_from_slice(&bytes[start..i]);
+                }
+                write_escape_byte(self, b)?;
+                start = i + 1;
+            }
+            i += 1;
+        }
+        if start < bytes.len() {
+            self.out.extend_from_slice(&bytes[start..]);
+        }
+        self.out.push(b'"');
+        Ok(())
+    }
+
+    #[inline]
+    fn write_int_i64(&mut self, n: i64) -> Result<(), Self::Error> {
+        let mut buf = [0u8; 20];
+        let s = format_i64(n, &mut buf);
+        self.out.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    fn write_int_u64(&mut self, n: u64) -> Result<(), Self::Error> {
+        let mut buf = [0u8; 20];
+        let s = format_u64(n, &mut buf);
+        self.out.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    fn write_int_i128(&mut self, n: i128) -> Result<(), Self::Error> {
+        let mut buf = [0u8; 40];
+        let s = format_i128(n, &mut buf);
+        self.out.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    fn write_int_u128(&mut self, n: u128) -> Result<(), Self::Error> {
+        let mut buf = [0u8; 40];
+        let s = format_u128(n, &mut buf);
+        self.out.extend_from_slice(s.as_bytes());
+        Ok(())
+    }
+
+    #[inline]
+    fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
+        if !f.is_finite() {
+            return Err(Error::new(ErrorKind::NonFiniteFloat, Position::START));
+        }
+        let mut scratch = String::with_capacity(24);
+        crate::float::format_finite(f, &mut scratch);
+        self.out.extend_from_slice(scratch.as_bytes());
+        Ok(())
     }
 }
 
@@ -396,6 +522,12 @@ pub mod float {
 /// This is the dual of [`crate::FromJson`]. Implementors call sink methods
 /// directly — there is no intermediate `Value` representation.
 pub trait ToJson {
+    /// Lower bound on the number of bytes `write_json` will emit.
+    ///
+    /// Used by [`to_vec`] / [`to_string`] to size the initial allocation.
+    /// Defaults to `0` so existing impls aren't forced to provide it.
+    const MIN_SERIALIZED_LEN: usize = 0;
+
     /// Serialize `self` into `w`.
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error>;
 }
@@ -403,27 +535,44 @@ pub trait ToJson {
 /// Serialize `value` into a fresh `String`.
 ///
 /// Returns [`Error`] (rather than `Infallible`) so non-finite floats and
-/// other typed-level failures have a place to surface. The underlying
-/// [`StringSink`] is itself infallible.
+/// other typed-level failures have a place to surface.
+///
+/// Internally serializes into a `Vec<u8>` via [`ByteSink`] (avoiding
+/// per-byte UTF-8 invariant checks), then converts to `String` in one
+/// step. The resulting bytes are guaranteed valid UTF-8 because every
+/// `JsonWrite` method only emits ASCII structural bytes, `&str` slices
+/// (valid by construction), ASCII escape sequences, and ASCII digit
+/// sequences from the integer/float formatters.
 #[cfg(feature = "alloc")]
 pub fn to_string<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> {
-    // 128-byte initial capacity matches `serde_json::to_string`. Most
-    // realistic JSON shapes (small structs, log lines, metric records)
-    // fit in 128–512 bytes, so a one-shot allocation here saves the
-    // 5-7 grow-and-copy reallocations a fresh `String::new()` would
-    // pay for the same payload. For larger output the cost is one
-    // unnecessary 128-byte alloc up front, amortized to nothing once
-    // the first realloc kicks in.
-    let mut out = String::with_capacity(128);
-    let mut sink = StringSink::new(&mut out);
-    value.write_json(&mut sink)?;
-    Ok(out)
+    let bytes = to_vec(value)?;
+    // SAFETY: every code path through `ByteSink`'s `JsonWrite` impl
+    // emits only valid UTF-8:
+    //   - `write_byte`: called with ASCII structural punctuation
+    //   - `write_str_raw`: takes `&str`, valid UTF-8 by definition
+    //   - `write_escaped_str`: copies `&str` bytes verbatim (valid
+    //     UTF-8) plus ASCII escape sequences
+    //   - `write_int_*`: ASCII digits from the LUT formatter
+    //   - `write_float_f64`: ASCII digits from Grisu3 / libstd
+    #[allow(unsafe_code)]
+    Ok(unsafe { String::from_utf8_unchecked(bytes) })
 }
 
 /// Serialize `value` into a fresh `Vec<u8>`.
+///
+/// This is the primary fast path: writes directly into `Vec<u8>` via
+/// [`ByteSink`], bypassing `String`'s per-write UTF-8 invariant checks.
 #[cfg(feature = "alloc")]
 pub fn to_vec<T: ToJson + ?Sized>(value: &T) -> Result<alloc::vec::Vec<u8>, Error> {
-    to_string(value).map(String::into_bytes)
+    let cap = if T::MIN_SERIALIZED_LEN > 128 {
+        T::MIN_SERIALIZED_LEN
+    } else {
+        128
+    };
+    let mut out = alloc::vec::Vec::with_capacity(cap);
+    let mut sink = ByteSink::new(&mut out);
+    value.write_json(&mut sink)?;
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -762,6 +911,7 @@ pub fn to_string_pretty<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> 
 // ---------------------------------------------------------------------------
 
 impl ToJson for bool {
+    const MIN_SERIALIZED_LEN: usize = 4; // "true"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_str_raw(if *self { "true" } else { "false" })
@@ -769,6 +919,7 @@ impl ToJson for bool {
 }
 
 impl ToJson for () {
+    const MIN_SERIALIZED_LEN: usize = 4; // "null"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_str_raw("null")
@@ -776,6 +927,7 @@ impl ToJson for () {
 }
 
 impl ToJson for str {
+    const MIN_SERIALIZED_LEN: usize = 2; // "\"\""
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_escaped_str(self)
@@ -789,6 +941,7 @@ macro_rules! impl_int_signed {
     ($($t:ty),* $(,)?) => {
         $(
             impl ToJson for $t {
+                const MIN_SERIALIZED_LEN: usize = 1;
                 #[inline]
                 fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
                     w.write_int_i64(i64::from(*self))
@@ -802,6 +955,7 @@ macro_rules! impl_int_unsigned {
     ($($t:ty),* $(,)?) => {
         $(
             impl ToJson for $t {
+                const MIN_SERIALIZED_LEN: usize = 1;
                 #[inline]
                 fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
                     w.write_int_u64(u64::from(*self))
@@ -817,16 +971,18 @@ impl_int_unsigned!(u8, u16, u32, u64);
 // `isize` / `usize` widen to 64-bit on the platforms bourne supports.
 // `as` is acceptable here: the cast is the documented platform widening,
 // not a truncation.
-#[allow(clippy::cast_possible_wrap, clippy::cast_lossless)]
+#[allow(clippy::cast_possible_wrap, clippy::cast_lossless, clippy::use_self)]
 impl ToJson for isize {
+    const MIN_SERIALIZED_LEN: usize = 1;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_i64(*self as i64)
     }
 }
 
-#[allow(clippy::cast_lossless)]
+#[allow(clippy::cast_lossless, clippy::use_self)]
 impl ToJson for usize {
+    const MIN_SERIALIZED_LEN: usize = 1;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_u64(*self as u64)
@@ -834,6 +990,7 @@ impl ToJson for usize {
 }
 
 impl ToJson for i128 {
+    const MIN_SERIALIZED_LEN: usize = 1;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_i128(*self)
@@ -841,6 +998,7 @@ impl ToJson for i128 {
 }
 
 impl ToJson for u128 {
+    const MIN_SERIALIZED_LEN: usize = 1;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_u128(*self)
@@ -850,6 +1008,7 @@ impl ToJson for u128 {
 // Composite: Option<T> writes `null` for None or the inner value for Some.
 // Mirrors the FromJson direction.
 impl<T: ToJson> ToJson for Option<T> {
+    const MIN_SERIALIZED_LEN: usize = 4; // "null"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         match self {
@@ -862,6 +1021,7 @@ impl<T: ToJson> ToJson for Option<T> {
 // References pass through. `&T: ToJson` whenever `T: ToJson` lets callers
 // pass `&value` or `&&value` indifferently.
 impl<T: ToJson + ?Sized> ToJson for &T {
+    const MIN_SERIALIZED_LEN: usize = T::MIN_SERIALIZED_LEN;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         (*self).write_json(w)
@@ -898,6 +1058,7 @@ fn write_array<T: ToJson, I: IntoIterator<Item = T>, W: JsonWrite + ?Sized>(
 }
 
 impl<T: ToJson> ToJson for [T] {
+    const MIN_SERIALIZED_LEN: usize = 2; // "[]"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         write_array(self.iter(), w)
@@ -905,6 +1066,7 @@ impl<T: ToJson> ToJson for [T] {
 }
 
 impl<T: ToJson, const N: usize> ToJson for [T; N] {
+    const MIN_SERIALIZED_LEN: usize = 2; // "[]"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         write_array(self.iter(), w)
@@ -954,6 +1116,7 @@ mod alloc_impls {
     use alloc::sync::Arc;
 
     impl ToJson for String {
+        const MIN_SERIALIZED_LEN: usize = 2; // "\"\""
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_escaped_str(self.as_str())
@@ -961,6 +1124,7 @@ mod alloc_impls {
     }
 
     impl ToJson for Cow<'_, str> {
+        const MIN_SERIALIZED_LEN: usize = 2; // "\"\""
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_escaped_str(self.as_ref())
@@ -968,6 +1132,7 @@ mod alloc_impls {
     }
 
     impl ToJson for f64 {
+        const MIN_SERIALIZED_LEN: usize = 1;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(*self)
@@ -977,6 +1142,7 @@ mod alloc_impls {
     /// `f32` widens losslessly to `f64` for serialization. The decoded
     /// form on the parse side narrows via `as f32`, mirroring this.
     impl ToJson for f32 {
+        const MIN_SERIALIZED_LEN: usize = 1;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(f64::from(*self))
@@ -986,6 +1152,7 @@ mod alloc_impls {
     /// JSON has no `char` primitive — encode as a one-character string,
     /// matching the `FromJson` direction.
     impl ToJson for char {
+        const MIN_SERIALIZED_LEN: usize = 3; // "\"x\""
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             let mut buf = [0u8; 4];
             let s: &str = self.encode_utf8(&mut buf);
@@ -994,6 +1161,7 @@ mod alloc_impls {
     }
 
     impl<T: ToJson + ?Sized> ToJson for Box<T> {
+        const MIN_SERIALIZED_LEN: usize = T::MIN_SERIALIZED_LEN;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             (**self).write_json(w)
@@ -1001,6 +1169,7 @@ mod alloc_impls {
     }
 
     impl<T: ToJson + ?Sized> ToJson for Rc<T> {
+        const MIN_SERIALIZED_LEN: usize = T::MIN_SERIALIZED_LEN;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             (**self).write_json(w)
@@ -1008,6 +1177,7 @@ mod alloc_impls {
     }
 
     impl<T: ToJson + ?Sized> ToJson for Arc<T> {
+        const MIN_SERIALIZED_LEN: usize = T::MIN_SERIALIZED_LEN;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             (**self).write_json(w)
@@ -1015,6 +1185,7 @@ mod alloc_impls {
     }
 
     impl<T: ToJson> ToJson for alloc::vec::Vec<T> {
+        const MIN_SERIALIZED_LEN: usize = 2; // "[]"
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             // Forward to the slice impl in the parent module.

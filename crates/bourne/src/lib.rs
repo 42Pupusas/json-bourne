@@ -103,8 +103,8 @@ pub use de::{MapKey, key_to_cow};
 pub use ser::{JsonWrite, ToJson};
 #[cfg(feature = "alloc")]
 pub use ser::{
-    FmtWriteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string, to_string_pretty,
-    to_vec,
+    ByteSink, FmtWriteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string,
+    to_string_pretty, to_vec,
 };
 #[cfg(feature = "std")]
 pub use ser::{IoWriteSink, to_writer};
