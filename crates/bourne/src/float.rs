@@ -130,6 +130,14 @@ struct DecimalF64 {
 
 #[inline]
 fn remove_trailing_zeros(mut m: u64, mut e: i32) -> DecimalF64 {
+    // m == 0 only reachable from a speculative caller (branchless
+    // `to_decimal_centred` always computes this path even when it
+    // ends up unused). Return immediately so the loop below doesn't
+    // diverge / overflow `e`. The result is discarded by the cmov in
+    // that case.
+    if m == 0 {
+        return DecimalF64 { exponent: e, mantissa: 0 };
+    }
     let minv5: u64 = 0u64.wrapping_sub(u64::MAX / 5);
     let bound: u64 = u64::MAX / 10 + 1;
     loop {
@@ -164,6 +172,27 @@ fn to_decimal_small_integer(e: i32, m: u64) -> DecimalF64 {
     remove_trailing_zeros(m >> (-e) as u32, 0)
 }
 
+/// Branchless `is_multiple_of_pow5` — returns `false` if `f` is out of the
+/// MINVERSE table range, without branching. Used in the branchless
+/// tiebreak below where we compute both candidates speculatively and
+/// select with cmov; a panicky table index would break that.
+#[inline]
+fn is_multiple_of_pow5_safe(f: i32, n: u64) -> bool {
+    // Mask the index into a valid range; the result is gated by the
+    // `in_range` boolean below so out-of-range f values can never falsely
+    // claim divisibility.
+    let in_range = f >= 0 && (f as usize) < MINVERSE.len();
+    let idx = if in_range { f as usize } else { 0 };
+    let (inv, bound) = MINVERSE[idx];
+    let multiple = n.wrapping_mul(inv) <= bound;
+    in_range & multiple
+}
+
+#[inline]
+fn is_tie_neg_f_safe(f: i32, c_2: u64) -> bool {
+    is_multiple_of_pow5_safe(-f, c_2)
+}
+
 #[inline]
 fn to_decimal_centred(e: i32, m: u64) -> DecimalF64 {
     debug_assert!(is_centred(e, m));
@@ -179,28 +208,59 @@ fn to_decimal_centred(e: i32, m: u64) -> DecimalF64 {
     let q = div10(b);
     let s = 10 * q;
 
-    if can_test_pow5(f) {
-        let shortest = if s == b {
-            !is_multiple_of_pow5(f, m_b) || m % 2 == 0
-        } else if s == a {
-            is_multiple_of_pow5(f, m_a) && m % 2 == 0
-        } else {
-            s > a
-        };
-        if shortest {
-            return remove_trailing_zeros(q, f + 1);
-        }
-    } else if s > a {
-        return remove_trailing_zeros(q, f + 1);
-    }
+    // ── Branchless tiebreak. ─────────────────────────────────────────────
+    //
+    // The previous version had three nested branches with data-dependent
+    // outcomes (`if can_test_pow5(f)`, `if s == b ... else if s == a`,
+    // `if shortest`). Under random `f64` inputs each fired ~50/50 and
+    // none could be predicted; perf record on n=10000 showed the
+    // aggregate teju mispredict cost dominated the cliff.
+    //
+    // The rewrite computes BOTH candidates (the "shortest" result with
+    // `remove_trailing_zeros` and the "fallback" `m_c` mshift) and
+    // selects via a single boolean comparison that LLVM compiles to
+    // cmov. The fallback path was already always computed in the
+    // original after early-return — the extra work here is just the
+    // unconditional `remove_trailing_zeros`, which exits in iter 1 for
+    // any value not divisible by 10 (the common case).
+    let m_even = m & 1 == 0;
+    let m_b_mult_pow5 = is_multiple_of_pow5_safe(f, m_b);
+    let m_a_mult_pow5 = is_multiple_of_pow5_safe(f, m_a);
+    let allows_ties = can_test_pow5(f);
+
+    // Three sub-cases for the pow5-allowed branch, computed as booleans
+    // without short-circuit: `s == b ? cond_b : s == a ? cond_a : s > a`.
+    let cond_s_eq_b = !m_b_mult_pow5 || m_even;
+    let cond_s_eq_a = m_a_mult_pow5 && m_even;
+    let cond_else = s > a;
+    let shortest_pow5 = if s == b {
+        cond_s_eq_b
+    } else if s == a {
+        cond_s_eq_a
+    } else {
+        cond_else
+    };
+    // For non-pow5 case the test is just `s > a`.
+    let shortest = if allows_ties { shortest_pow5 } else { s > a };
+
+    // Always compute the "shortest" branch's result (a `remove_trailing_zeros`
+    // call) and the "fallback" branch's result (an extra mshift + tiebreak
+    // arithmetic). Both are cheap and side-effect-free; cmov selects.
+    let shortest_result = remove_trailing_zeros(q, f + 1);
 
     let m_c = (4 * m) << r;
     let c_2 = mshift(m_c, upper, lower);
     let c = c_2 / 2;
-    let pick_left = (is_tie_neg_f(f, c_2) && c % 2 == 0) || c_2 % 2 == 0;
-    DecimalF64 {
+    let pick_left = (is_tie_neg_f_safe(f, c_2) && c & 1 == 0) || c_2 & 1 == 0;
+    let fallback_result = DecimalF64 {
         exponent: f,
         mantissa: c + u64::from(!pick_left),
+    };
+
+    if shortest {
+        shortest_result
+    } else {
+        fallback_result
     }
 }
 
