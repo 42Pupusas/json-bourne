@@ -34,7 +34,7 @@
 extern crate alloc;
 
 use alloc::string::String;
-use core::fmt::Write as _;
+use core::fmt::{self, Write as _};
 
 // ===========================================================================
 // DiyFp: 64-bit mantissa with a power-of-2 exponent. value = f * 2^e.
@@ -259,6 +259,25 @@ const KCACHED_POWERS: [CachedPower; 87] = [
 /// table entry.
 const KD_1_LOG2_10: f64 = 0.30102999566398114;
 
+/// `ceil(x)` for a finite `f64` whose magnitude fits comfortably in
+/// `i32`. Hand-rolled because [`f64::ceil`] is in `std` (it's a libm
+/// intrinsic), and `bourne` aspires to build under `no_std + alloc`
+/// without an external `libm` dep.
+///
+/// Strategy: truncate toward zero via `as i64`, then add one when the
+/// truncation discarded a positive fractional part. The cast is safe
+/// because the only caller below feeds `n * KD_1_LOG2_10` where `n`
+/// is bounded in `[-1135, 962]` — magnitudes well under `i64::MAX`.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn ceil_f64(x: f64) -> f64 {
+    let t = x as i64 as f64;
+    if x > 0.0 && x > t {
+        t + 1.0
+    } else {
+        t
+    }
+}
+
 /// Pick the cached `10^k` entry whose binary exponent satisfies
 /// `min_exponent ≤ binary_exp ≤ max_exponent`. The table's step of 8
 /// (decimal) ensures exactly one entry lies in any 28-binary-wide
@@ -269,7 +288,7 @@ fn cached_power_for_binary_exponent_range(
     _max_exponent: i32,
 ) -> (DiyFp, i32) {
     let kq = DiyFp::SIGNIFICAND_SIZE;
-    let k = ((min_exponent + kq - 1) as f64 * KD_1_LOG2_10).ceil();
+    let k = ceil_f64((min_exponent + kq - 1) as f64 * KD_1_LOG2_10);
     let index =
         (KCACHED_POWERS_OFFSET + k as i32 - 1) / KDECIMAL_EXPONENT_DISTANCE + 1;
     let cached = KCACHED_POWERS[index as usize];
@@ -525,6 +544,10 @@ fn push_zeros(out: &mut String, n: usize) {
 /// Format a finite `f64` as JSON-compatible decimal text. Caller is
 /// responsible for the finite check; this function will panic on
 /// `NaN` / `inf` via the boundary computation.
+///
+/// The `String`-targeted entry point — the original hot path. Most
+/// production serializers go through this. For sinks that don't have
+/// a `String` to push into, see [`format_finite_fmt`].
 pub(crate) fn format_finite(f: f64, out: &mut String) {
     if f == 0.0 {
         if f.is_sign_negative() {
@@ -542,6 +565,32 @@ pub(crate) fn format_finite(f: f64, out: &mut String) {
         // Grisu3 declined to commit to its output (~0.5% of inputs).
         // libstd's `Display` finishes the job.
         let _ = write!(out, "{f}");
+    }
+}
+
+/// `fmt::Write`-targeted variant of [`format_finite`]. Used by the
+/// `FmtWriteSink` and `IoWriteSink` adapters. The `String` path stays
+/// on the hand-rolled push routine because it sidesteps the
+/// `Formatter` machinery; this generic path is fine for every other
+/// sink.
+///
+/// Errors propagate from the sink — `String` formats infallibly,
+/// `io::Write` formats wrap an `io::Error`.
+pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> fmt::Result {
+    if f == 0.0 {
+        return out.write_str(if f.is_sign_negative() { "-0.0" } else { "0.0" });
+    }
+    let negative = f.is_sign_negative();
+    let abs = f.abs();
+    if let Some(g) = grisu3(abs) {
+        // Stage Grisu3's digit emission into a small stack-sized
+        // String, then forward in one `write_str`. The Grisu3 output
+        // for an f64 fits comfortably in 24 bytes; we reserve more.
+        let mut buf = String::with_capacity(32);
+        write_grisu3(&g, negative, &mut buf);
+        out.write_str(&buf)
+    } else {
+        write!(out, "{f}")
     }
 }
 
@@ -595,7 +644,11 @@ mod tests {
 
     /// Every successful Grisu3 output must round-trip to the same
     /// `f64`. A non-roundtrip Some return is a correctness bug.
+    //
+    // `float_cmp`: bit-exact equality is the literal property under
+    // test — the parsed output of Grisu3 must equal the input f64.
     #[test]
+    #[allow(clippy::float_cmp)]
     fn grisu3_output_roundtrips_when_returned() {
         let mut state: u64 = 0x1234_5678_9ABC_DEF0;
         for _ in 0..2_000 {
@@ -623,7 +676,16 @@ mod tests {
     /// libstd parity on canonical inputs. Compare via the parsed
     /// value (their formatting choices are equivalent up to e-vs-e+
     /// conventions on scientific notation).
+    //
+    // `float_cmp`: comparing the *parsed* form of two formattings of
+    // the same f64 — they must be bit-identical, not approximately
+    // equal.
+    //
+    // `approx_constant`: 3.14159 is a deliberate "round but not exact"
+    // input chosen to exercise Grisu3 on a real-world-shaped literal,
+    // not a stand-in for `core::f64::consts::PI`.
     #[test]
+    #[allow(clippy::float_cmp, clippy::approx_constant)]
     fn grisu3_matches_libstd_display() {
         let cases = [
             1.0_f64,

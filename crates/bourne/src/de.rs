@@ -232,9 +232,20 @@ impl<'input> FromJson<'input> for f64 {
 }
 
 impl<'input> FromJson<'input> for f32 {
+    /// Reject literals whose magnitude can't fit `f32` instead of
+    /// silently coercing to `±inf`. Subnormals and finite-but-imprecise
+    /// values still narrow as a normal cast (the JSON spec doesn't
+    /// promise lossless f32 round-trip; libstd's `f64 as f32` rounds
+    /// to the nearest representable value).
     #[allow(clippy::cast_possible_truncation)]
     fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-        f64::from_lex(lex).map(|v| v as Self)
+        let v = f64::from_lex(lex)?;
+        let narrowed = v as Self;
+        if narrowed.is_finite() {
+            Ok(narrowed)
+        } else {
+            Err(Error::new(ErrorKind::NumberOutOfRange, lex.position()))
+        }
     }
 }
 
@@ -632,6 +643,38 @@ mod alloc_impls {
         }
     }
 
+    /// Parse a `SystemTime` from JSON `Number` (seconds since
+    /// `UNIX_EPOCH`, possibly fractional and possibly negative).
+    /// Mirrors the `Duration` adapter but allows negative values for
+    /// pre-epoch timestamps, which the `SystemTime` arithmetic model
+    /// supports.
+    ///
+    /// Subsecond precision is preserved to nanosecond resolution via
+    /// `Duration::from_secs_f64`.
+    #[cfg(feature = "std")]
+    impl<'input> FromJson<'input> for std::time::SystemTime {
+        #[allow(clippy::cast_precision_loss)]
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            let secs_f = match lex.peek_value_kind()? {
+                ValueKind::Number => lex.parse_f64_value()?,
+                _ => return Err(type_error(lex, ErrorKind::ExpectedNumber)),
+            };
+            // Reject non-finite inputs and clamp the magnitude to a
+            // range Duration::from_secs_f64 won't panic on.
+            if !secs_f.is_finite() || secs_f.abs() >= (u64::MAX as f64) {
+                return Err(type_error(lex, ErrorKind::NumberOutOfRange));
+            }
+            let abs = std::time::Duration::from_secs_f64(secs_f.abs());
+            let epoch = std::time::UNIX_EPOCH;
+            let st = if secs_f < 0.0 {
+                epoch.checked_sub(abs)
+            } else {
+                epoch.checked_add(abs)
+            };
+            st.ok_or_else(|| type_error(lex, ErrorKind::NumberOutOfRange))
+        }
+    }
+
     /// Generic adapter for any type whose canonical text form is parseable
     /// via `FromStr`. Used below for `IpAddr`, `Ipv4Addr`, `Ipv6Addr`,
     /// `SocketAddr`, and `PathBuf`. Failures map to `TypeMismatch`.
@@ -775,18 +818,19 @@ mod alloc_impls {
         // Two distinct cfg-gated function bodies — splitting them into
         // separate items per arch avoids a `return` inside one cfg
         // branch (which clippy flags as `needless_return`) while
-        // keeping each arm a single expression.
-        #[cfg(target_arch = "x86_64")]
+        // keeping each arm a single expression. The `bourne_no_simd`
+        // cfg disables the SIMD path (used by miri).
+        #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
         {
             find_backslash_sse2(bytes)
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", not(bourne_no_simd))))]
         {
             bytes.iter().position(|&b| b == b'\\')
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
     #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
     #[inline]
     fn find_backslash_sse2(bytes: &[u8]) -> Option<usize> {
@@ -939,4 +983,60 @@ mod alloc_impls {
     // direct reference. The trait impl above uses it transitively.
     #[allow(dead_code)]
     type _UseJsonStr = JsonStr;
+
+    // -----------------------------------------------------------------
+    // IndexMap / IndexSet (optional `indexmap` feature).
+    //
+    // Mirror image of the BTreeMap / HashMap impls. The novel property
+    // here is *insertion-order preservation*: the parsed map iterates
+    // in the order keys appeared in the JSON input, which downstream
+    // consumers depend on for stable output (canonical JSON, log
+    // round-trips, golden-file tests).
+    // -----------------------------------------------------------------
+
+    #[cfg(feature = "indexmap")]
+    impl<'input, K, V, S> FromJson<'input> for indexmap::IndexMap<K, V, S>
+    where
+        K: MapKey<'input> + ::core::hash::Hash + Eq,
+        V: FromJson<'input>,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            if !matches!(lex.peek_value_kind()?, ValueKind::Object) {
+                return Err(type_error(lex, ErrorKind::TypeMismatch));
+            }
+            lex.object_start()?;
+            let mut out = Self::with_hasher(S::default());
+            let mut maybe_key = lex.object_first_key_lex()?;
+            while let Some(js) = maybe_key {
+                let key_cow = key_to_cow(js, lex)?;
+                let key = K::from_key(key_cow, lex)?;
+                let v = V::from_lex(lex)?;
+                if out.insert(key, v).is_some() {
+                    return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
+                }
+                maybe_key = lex.object_next_key_lex()?;
+            }
+            Ok(out)
+        }
+    }
+
+    #[cfg(feature = "indexmap")]
+    impl<'input, T, S> FromJson<'input> for indexmap::IndexSet<T, S>
+    where
+        T: FromJson<'input> + ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            let mut out = Self::with_hasher(S::default());
+            if lex.array_start()? {
+                return Ok(out);
+            }
+            out.insert(T::from_lex(lex)?);
+            while !lex.array_continue(b']')? {
+                out.insert(T::from_lex(lex)?);
+            }
+            Ok(out)
+        }
+    }
 }

@@ -50,7 +50,7 @@
 //! type tokens are pattern-matchable for Option detection at every
 //! step.
 
-/// Emit a struct or enum together with its [`FromJson`] impl.
+/// Emit a struct or enum together with its [`FromJson`](crate::FromJson) impl.
 ///
 /// See the module-level docs for the supported shapes and limitations.
 #[macro_export]
@@ -2760,7 +2760,7 @@ macro_rules! __from_json_walk {
         cur_name: (),
         cur_rename: ($($rename:tt)?),
         cur_default: ($($default:tt)?),
-        input: ($fname:ident : $($rest:tt)*)
+        input: ($_fvis:vis $fname:ident : $($rest:tt)*)
     ) => {
         $crate::__from_json_walk!(
             lex: $lex,
@@ -5161,39 +5161,6 @@ macro_rules! __to_json_named_walk {
         )
     };
 
-    // ---------- Visibility on the next field. Discard. ----------
-    //
-    // ToJson reads `&self.fname`, which doesn't care about field
-    // visibility. We still have to consume the `pub`/`pub(...)`
-    // tokens so the field-name match below sees an ident.
-    (
-        self_ref: $self:ident,
-        sink: $w:ident,
-        first: $first:ident,
-        emit: $emit:tt,
-        cur_rename: ($($rename:tt)?),
-        cur_skip: ($($skip:tt)?),
-        cur_skip_if_none: ($($sin:tt)?),
-        cur_name: (),
-        ftokens: [],
-        static_first: ($($sf:tt)?),
-        input: ( pub $($rest:tt)* )
-    ) => {
-        $crate::__to_json_named_walk!(
-            self_ref: $self,
-            sink: $w,
-            first: $first,
-            emit: $emit,
-            cur_rename: ($($rename)?),
-            cur_skip: ($($skip)?),
-            cur_skip_if_none: ($($sin)?),
-            cur_name: (),
-            ftokens: [],
-            static_first: ($($sf)?),
-            input: ($($rest)*)
-        )
-    };
-
     // ---------- Phase 2 entry: read field name. ----------
     (
         self_ref: $self:ident,
@@ -5206,7 +5173,7 @@ macro_rules! __to_json_named_walk {
         cur_name: (),
         ftokens: [],
         static_first: ($($sf:tt)?),
-        input: ( $fname:ident : $($rest:tt)* )
+        input: ( $_fvis:vis $fname:ident : $($rest:tt)* )
     ) => {
         $crate::__to_json_named_walk!(
             self_ref: $self,
@@ -5511,4 +5478,571 @@ macro_rules! __to_json_named_walk {
 macro_rules! __to_json_field_key {
     ($fname:ident, ($renamed:literal)) => { $renamed };
     ($fname:ident, ()) => { ::core::stringify!($fname) };
+}
+
+// ============================================================================
+// `json!` — combined macro that emits the type definition once and
+// generates both `FromJson` and `ToJson` impls.
+//
+// Without this, users who need both traits must choose between
+// duplicating the struct definition or writing one impl by hand,
+// because `from_json!` and `to_json!` each emit the type definition
+// themselves.
+//
+// Every arm emits the type via the existing `__from_json_emit_struct_def!`
+// / `__from_json_emit_enum_def!`, then splices both impl blocks.
+// ============================================================================
+
+/// Emit a struct or enum together with both its [`FromJson`](crate::FromJson)
+/// and [`ToJson`](crate::ToJson) impls.
+///
+/// This is the combined form of [`from_json!`] and [`to_json!`]. Use it
+/// when a type needs to both parse and serialize — it emits the type
+/// definition once, avoiding the duplicate-definition error you'd get
+/// from invoking both single-trait macros on the same type.
+///
+/// ```
+/// use bourne::{json, parse_str, to_string};
+///
+/// json! {
+///     #[derive(Debug, PartialEq)]
+///     struct Point { x: i32, y: i32 }
+/// }
+///
+/// let p: Point = parse_str(r#"{"x":1,"y":2}"#).unwrap();
+/// assert_eq!(to_string(&p).unwrap(), r#"{"x":1,"y":2}"#);
+/// ```
+#[macro_export]
+macro_rules! json {
+    // -----------------------------------------------------------------
+    // Named-field struct, no generics.
+    // -----------------------------------------------------------------
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            body: ($($body)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(__lex, (Self), strict, $($body)*)
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::__to_json_named_body!(self, __w, $($body)*)
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Named-field struct, one lifetime.
+    // -----------------------------------------------------------------
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident < $lt:lifetime $(,)? > { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            body: ($($body)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(__lex, (Self), strict, $($body)*)
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::__to_json_named_body!(self, __w, $($body)*)
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Tuple struct, newtype, no generics.
+    // -----------------------------------------------------------------
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident ( $fty:ty $(,)? ) ;
+    ) => {
+        $(#[$attr])*
+        $vis struct $name($fty);
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                ::core::result::Result::Ok(Self(
+                    <$fty as $crate::FromJson<'_>>::from_lex(__lex)?,
+                ))
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::ToJson::write_json(&self.0, __w)
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Tuple struct, newtype, one lifetime.
+    // -----------------------------------------------------------------
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident < $lt:lifetime $(,)? > ( $fty:ty $(,)? ) ;
+    ) => {
+        $(#[$attr])*
+        $vis struct $name<$lt>($fty);
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                ::core::result::Result::Ok(Self(
+                    <$fty as $crate::FromJson<$lt>>::from_lex(__lex)?,
+                ))
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::ToJson::write_json(&self.0, __w)
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Tuple struct, multi-field, no generics.
+    // -----------------------------------------------------------------
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident ( $fty1:ty, $($ftyn:ty),+ $(,)? ) ;
+    ) => {
+        $(#[$attr])*
+        $vis struct $name($fty1, $($ftyn),+);
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                if __lex.array_start()? {
+                    return ::core::result::Result::Err(
+                        $crate::Error::new($crate::ErrorKind::TypeMismatch, __lex.position()),
+                    );
+                }
+                let __elem_0 = <$fty1 as $crate::FromJson<'_>>::from_lex(__lex)?;
+                $crate::__from_json_tuple_walk!(
+                    lex: __lex,
+                    self_ctor: (Self),
+                    accum: [ __elem_0 ],
+                    remaining: [ $(($ftyn))+ ]
+                )
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                __w.write_byte(b'[')?;
+                $crate::ToJson::write_json(&self.0, __w)?;
+                $crate::__to_json_tuple_walk!(
+                    self_ref: self,
+                    sink: __w,
+                    idx: 1,
+                    remaining: [ $(($ftyn))+ ]
+                );
+                __w.write_byte(b']')?;
+                ::core::result::Result::Ok(())
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Tuple struct, multi-field, one lifetime.
+    // -----------------------------------------------------------------
+    (
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident < $lt:lifetime $(,)? > ( $fty1:ty, $($ftyn:ty),+ $(,)? ) ;
+    ) => {
+        $(#[$attr])*
+        $vis struct $name<$lt>($fty1, $($ftyn),+);
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                if __lex.array_start()? {
+                    return ::core::result::Result::Err(
+                        $crate::Error::new($crate::ErrorKind::TypeMismatch, __lex.position()),
+                    );
+                }
+                let __elem_0 = <$fty1 as $crate::FromJson<$lt>>::from_lex(__lex)?;
+                $crate::__from_json_tuple_walk!(
+                    lex: __lex,
+                    self_ctor: (Self),
+                    accum: [ __elem_0 ],
+                    remaining: [ $(($ftyn))+ ]
+                )
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                __w.write_byte(b'[')?;
+                $crate::ToJson::write_json(&self.0, __w)?;
+                $crate::__to_json_tuple_walk!(
+                    self_ref: self,
+                    sink: __w,
+                    idx: 1,
+                    remaining: [ $(($ftyn))+ ]
+                );
+                __w.write_byte(b']')?;
+                ::core::result::Result::Ok(())
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Untagged enum, no generics.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(untagged)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_untagged_dispatch!(__lex, $name, ($($variants)*))
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_untagged_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    arms: { },
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Untagged enum, one lifetime.
+    (
+        #[bourne(untagged)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_untagged_dispatch!(__lex, $name, ($($variants)*))
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_untagged_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    arms: { },
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Adjacently-tagged enum, no generics.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(tag = $tag:literal, content = $content:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_adjacently_tagged_dispatch!(
+                    __lex, $name, $tag, $content, ($($variants)*)
+                )
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_adjacent_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    content: $content,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Adjacently-tagged enum, one lifetime.
+    (
+        #[bourne(tag = $tag:literal, content = $content:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_adjacently_tagged_dispatch!(
+                    __lex, $name, $tag, $content, ($($variants)*)
+                )
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_adjacent_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    content: $content,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Internally-tagged enum, no generics.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(tag = $tag:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_internally_tagged_dispatch!(
+                    __lex, $name, $tag, ($($variants)*)
+                )
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_internal_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Internally-tagged enum, one lifetime.
+    (
+        #[bourne(tag = $tag:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_internally_tagged_dispatch!(
+                    __lex, $name, $tag, ($($variants)*)
+                )
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_internal_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    tag: $tag,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Externally-tagged enum, no generics.
+    // -----------------------------------------------------------------
+    (
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_enum_dispatch!(__lex, $name, ($($variants)*))
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_enum_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Externally-tagged enum, one lifetime.
+    (
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_enum_dispatch!(__lex, $name, ($($variants)*))
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_enum_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
 }

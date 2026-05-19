@@ -315,9 +315,10 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         self.read_string_inner(true)
     }
 
-    /// Like [`read_string`], but skip the deferred `validate_escapes` pass.
-    /// The caller commits to performing equivalent validation as part of
-    /// decoding (the typed `String` / `Cow<str>` impls do exactly this).
+    /// Like [`read_string`](Self::read_string), but skip the deferred
+    /// `validate_escapes` pass. The caller commits to performing
+    /// equivalent validation as part of decoding (the typed `String`
+    /// / `Cow<str>` impls do exactly this).
     ///
     /// This exists because `validate_escapes` and an eager decoder do
     /// overlapping work: the deferred validation walks the body checking
@@ -800,7 +801,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 
     /// Like [`object_first_key`], but returns the key as a raw [`JsonStr`]
     /// span — borrowed if escape-free, recording `has_escapes()` if not.
-    /// Callers can decode escapes (typically into a [`alloc::borrow::Cow`])
+    /// Callers can decode escapes (typically into an `alloc::borrow::Cow`)
     /// when they may be present.
     ///
     /// [`object_first_key`]: Self::object_first_key
@@ -1036,7 +1037,9 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     #[inline]
     fn scan_ascii_string_run(&mut self) {
         // x86_64 ABI guarantees SSE2 — no runtime detection needed.
-        #[cfg(target_arch = "x86_64")]
+        // The `bourne_no_simd` cfg disables the SIMD path; used by miri
+        // (which doesn't model SSE2 intrinsics) and by curious users.
+        #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
         // SAFETY: SSE2 is part of the x86_64 ABI baseline. Every x86_64
         // CPU has it; rustc's default target features include `+sse2`.
         // The intrinsics are `unsafe` by signature, not because we're
@@ -1045,7 +1048,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         unsafe {
             self.scan_ascii_string_run_sse2();
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(all(target_arch = "x86_64", not(bourne_no_simd))))]
         self.scan_ascii_string_run_scalar();
     }
 
@@ -1084,7 +1087,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     ///
     /// Only the SSE2 target feature is required. On `x86_64` it's part of the
     /// ABI baseline; the cfg gate at the call site enforces this.
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
     #[target_feature(enable = "sse2")]
     #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
     unsafe fn scan_ascii_string_run_sse2(&mut self) {

@@ -1,16 +1,90 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-//! `bourne` — type-driven JSON parsing.
+//! Type-driven JSON: parse straight into the caller's chosen type and
+//! serialize from it, with no generic `Value` middle layer.
 //!
-//! The top-level entry point is [`parse`], which deserializes directly into
-//! the caller's chosen type. There is no generic `Value` middle layer.
+//! `bourne` skips the dynamic-tree intermediate that crates like
+//! `serde_json` use. Each type knows how to deserialize itself from a
+//! [`Lexer`] (via [`FromJson`](trait@FromJson)) or write itself to a [`JsonWrite`]
+//! sink (via [`ToJson`]). The typed structure already enforces JSON's
+//! grammar, so the per-event state machine is pure overhead for typed
+//! consumers — skipping it makes the typed path ~2× faster on
+//! integer / string-heavy payloads.
+//!
+//! - **No proc-macros.** [`from_json!`], [`to_json!`], and [`json!`]
+//!   are declarative `macro_rules!`. Empty dependency graph.
+//! - **`no_std` everywhere.** `bourne-core` is `no_std` always; this
+//!   crate is `no_std + alloc` with optional `std` for `HashMap` /
+//!   `std::net` / `std::path` / `std::io` adapters.
+//! - **Borrowed strings by default.** `&'input str` and `Cow<'input,
+//!   str>` parse zero-copy when the input contains no escapes.
+//! - **Bounded by construction.** Container nesting is depth-limited
+//!   (default 128, const-generic). The streaming parser is a state
+//!   machine with no recursion.
+//!
+//! # Quick start
+//!
+//! Parse a primitive directly into a Rust type:
 //!
 //! ```
 //! use bourne::parse_str;
-//!
 //! let n: u32 = parse_str("42").unwrap();
 //! assert_eq!(n, 42);
 //! ```
+//!
+//! Parse a struct (no proc-macro — `from_json!` is declarative):
+//!
+//! ```
+//! use bourne::{from_json, parse_str};
+//!
+//! from_json! {
+//!     #[derive(Debug, PartialEq)]
+//!     struct User<'input> {
+//!         id: u64,
+//!         name: &'input str,
+//!         active: bool,
+//!     }
+//! }
+//!
+//! let u: User<'_> = parse_str(r#"{"id":1,"name":"alice","active":true}"#).unwrap();
+//! assert_eq!(u.name, "alice");
+//! ```
+//!
+//! Serialize back out:
+//!
+//! ```
+//! use bourne::{to_json, to_string};
+//!
+//! to_json! {
+//!     struct Point { x: i32, y: i32 }
+//! }
+//!
+//! let s = to_string(&Point { x: 3, y: -7 }).unwrap();
+//! assert_eq!(s, r#"{"x":3,"y":-7}"#);
+//! ```
+//!
+//! # Output destinations
+//!
+//! | Sink                       | Entry point                 |
+//! |----------------------------|-----------------------------|
+//! | `String`                   | [`to_string`]               |
+//! | `Vec<u8>`                  | [`to_vec`]                  |
+//! | `String` (pretty-printed)  | [`to_string_pretty`]        |
+//! | any [`std::io::Write`]     | [`to_writer`] (std only)    |
+//! | any [`core::fmt::Write`]   | [`to_fmt`]                  |
+//!
+//! Custom sinks implement [`JsonWrite`] directly.
+//!
+//! # Features
+//!
+//! | Feature     | Default | Purpose                                     |
+//! |-------------|---------|---------------------------------------------|
+//! | `std`       | yes     | `HashMap`, `std::net`, `std::path`, `to_writer` |
+//! | `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, escape decoding |
+//! | `indexmap`  | no      | `IndexMap` / `IndexSet` (insertion order)   |
+//!
+//! `default-features = false` plus `["alloc"]` gives a `no_std + alloc`
+//! build. For pure `no_std` use the `bourne-core` crate directly.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -28,7 +102,12 @@ pub use de::{FromJson, parse, parse_str};
 pub use de::{MapKey, key_to_cow};
 pub use ser::{JsonWrite, ToJson};
 #[cfg(feature = "alloc")]
-pub use ser::{MapKeyOut, StringSink, to_string, to_vec};
+pub use ser::{
+    FmtWriteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string, to_string_pretty,
+    to_vec,
+};
+#[cfg(feature = "std")]
+pub use ser::{IoWriteSink, to_writer};
 
 mod macros;
 
@@ -237,6 +316,26 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
+    fn system_time_round_trips_around_epoch() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        // Exact epoch.
+        let t: SystemTime = parse_str("0").unwrap();
+        assert_eq!(t, UNIX_EPOCH);
+        // Positive: 1.5s after epoch.
+        let t: SystemTime = parse_str("1.5").unwrap();
+        assert_eq!(t, UNIX_EPOCH + Duration::new(1, 500_000_000));
+        // Negative: 2s before epoch — the SystemTime model supports
+        // pre-epoch timestamps.
+        let t: SystemTime = parse_str("-2").unwrap();
+        assert_eq!(t, UNIX_EPOCH - Duration::from_secs(2));
+        // Wire round-trip.
+        let s = to_string(&(UNIX_EPOCH + Duration::from_secs(42))).unwrap();
+        let back: SystemTime = parse_str(&s).unwrap();
+        assert_eq!(back, UNIX_EPOCH + Duration::from_secs(42));
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
     fn ip_and_socket_addrs_parse_from_strings() {
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
         let v4: Ipv4Addr = parse_str(r#""127.0.0.1""#).unwrap();
@@ -435,6 +534,19 @@ mod tests {
     /// matters is *finite* literals whose magnitude overflows `f64` —
     /// `str::parse::<f64>` silently returns `±inf` on those, and we
     /// must reject them.
+    #[test]
+    fn f32_rejects_overflow_to_infinity() {
+        // 1e40 fits f64 but exceeds f32::MAX (~3.4e38), so the
+        // narrowing cast would round to ±inf. The impl rejects.
+        let r = parse_str::<f32>("1e40");
+        assert_eq!(r.unwrap_err().kind, ErrorKind::NumberOutOfRange);
+        let r = parse_str::<f32>("-1e40");
+        assert_eq!(r.unwrap_err().kind, ErrorKind::NumberOutOfRange);
+        // f32::MAX itself round-trips.
+        let v: f32 = parse_str("3.4028235e38").unwrap();
+        assert!(v.is_finite());
+    }
+
     #[test]
     fn f64_rejects_overflow_to_infinity() {
         let r = parse_str::<f64>("1e400");
@@ -1500,5 +1612,415 @@ mod to_json_macro_tests {
     fn untagged_struct_emits_object() {
         let v = Mixed::Body { name: String::from("x") };
         assert_eq!(to_string(&v).unwrap(), r#"{"name":"x"}"#);
+    }
+}
+
+/// Sink-adapter tests: `to_writer` (`io::Write`) and `to_fmt` (`fmt::Write`)
+/// must produce identical bytes to the canonical `to_string` path.
+#[cfg(all(test, feature = "alloc"))]
+mod sink_adapter_tests {
+    use super::{to_fmt, to_string};
+
+    #[test]
+    fn fmt_sink_matches_to_string_for_struct() {
+        let m = vec![("a", 1_i32), ("b", 2)]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let canonical = to_string(&m).unwrap();
+        let mut out = String::new();
+        to_fmt(&m, &mut out).unwrap();
+        assert_eq!(out, canonical);
+    }
+
+    #[test]
+    fn fmt_sink_handles_floats_with_grisu3() {
+        let canonical = to_string(&1.5_f64).unwrap();
+        let mut out = String::new();
+        to_fmt(&1.5_f64, &mut out).unwrap();
+        assert_eq!(out, canonical);
+    }
+
+    #[test]
+    fn fmt_sink_rejects_non_finite() {
+        let mut out = String::new();
+        let err = to_fmt(&f64::INFINITY, &mut out).unwrap_err();
+        assert_eq!(err.kind, crate::ErrorKind::NonFiniteFloat);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn io_writer_matches_to_string_for_struct() {
+        use super::to_writer;
+        let v = vec![1_i32, 2, 3];
+        let canonical = to_string(&v).unwrap();
+        let mut buf = Vec::<u8>::new();
+        to_writer(&v, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), canonical);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn io_writer_handles_floats() {
+        use super::to_writer;
+        let canonical = to_string(&-2.7e-5_f64).unwrap();
+        let mut buf = Vec::<u8>::new();
+        to_writer(&-2.7e-5_f64, &mut buf).unwrap();
+        assert_eq!(String::from_utf8(buf).unwrap(), canonical);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn io_writer_rejects_non_finite() {
+        use super::to_writer;
+        let mut buf = Vec::<u8>::new();
+        let err = to_writer(&f64::NAN, &mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn pretty_empty_object_compact() {
+        use super::to_string_pretty;
+        let m: std::collections::BTreeMap<String, i32> = std::collections::BTreeMap::new();
+        assert_eq!(to_string_pretty(&m).unwrap(), "{}");
+    }
+
+    #[test]
+    fn pretty_empty_array_compact() {
+        use super::to_string_pretty;
+        let v: Vec<i32> = Vec::new();
+        assert_eq!(to_string_pretty(&v).unwrap(), "[]");
+    }
+
+    #[test]
+    fn pretty_array_indents_two_spaces() {
+        use super::to_string_pretty;
+        let v = vec![1_i32, 2, 3];
+        assert_eq!(to_string_pretty(&v).unwrap(), "[\n  1,\n  2,\n  3\n]");
+    }
+
+    #[test]
+    fn pretty_object_keys_have_one_space_after_colon() {
+        use super::to_string_pretty;
+        let m: std::collections::BTreeMap<&str, i32> =
+            [("a", 1), ("b", 2)].into_iter().collect();
+        assert_eq!(
+            to_string_pretty(&m).unwrap(),
+            "{\n  \"a\": 1,\n  \"b\": 2\n}",
+        );
+    }
+
+    #[test]
+    fn pretty_nested_indents_proportionally() {
+        use super::to_string_pretty;
+        let v: Vec<Vec<i32>> = vec![vec![1, 2], vec![3]];
+        assert_eq!(
+            to_string_pretty(&v).unwrap(),
+            "[\n  [\n    1,\n    2\n  ],\n  [\n    3\n  ]\n]",
+        );
+    }
+
+    #[cfg(feature = "indexmap")]
+    #[test]
+    fn indexmap_preserves_insertion_order_on_parse() {
+        use crate::parse_str;
+        // Distinct, non-alphabetical order so a hash-bucket walk
+        // would visibly reshuffle. IndexMap must yield the keys in
+        // the order they appeared in the JSON.
+        let json = r#"{"zebra":1,"alpha":2,"mango":3}"#;
+        let m: indexmap::IndexMap<String, i32> = parse_str(json).unwrap();
+        let keys: Vec<&str> = m.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["zebra", "alpha", "mango"]);
+        assert_eq!(m["alpha"], 2);
+    }
+
+    #[cfg(feature = "indexmap")]
+    #[test]
+    fn indexmap_round_trips_preserving_order() {
+        use super::to_string;
+        use crate::parse_str;
+        let mut m = indexmap::IndexMap::<String, i32>::new();
+        m.insert("z".into(), 1);
+        m.insert("a".into(), 2);
+        m.insert("m".into(), 3);
+        let s = to_string(&m).unwrap();
+        // Wire shape should preserve declaration order.
+        assert_eq!(s, r#"{"z":1,"a":2,"m":3}"#);
+        // Round-trip back into IndexMap must keep that order.
+        let back: indexmap::IndexMap<String, i32> = parse_str(&s).unwrap();
+        assert_eq!(
+            back.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["z", "a", "m"],
+        );
+    }
+
+    #[cfg(feature = "indexmap")]
+    #[test]
+    fn indexmap_rejects_duplicate_keys() {
+        use crate::parse_str;
+        let r: Result<indexmap::IndexMap<String, i32>, _> = parse_str(r#"{"a":1,"a":2}"#);
+        assert_eq!(r.unwrap_err().kind, crate::ErrorKind::DuplicateKey);
+    }
+
+    #[cfg(feature = "indexmap")]
+    #[test]
+    fn indexset_round_trips() {
+        use super::to_string;
+        use crate::parse_str;
+        let mut s = indexmap::IndexSet::<i32>::new();
+        s.insert(3);
+        s.insert(1);
+        s.insert(2);
+        let json = to_string(&s).unwrap();
+        assert_eq!(json, "[3,1,2]");
+        let back: indexmap::IndexSet<i32> = parse_str(&json).unwrap();
+        assert_eq!(back.iter().copied().collect::<Vec<_>>(), [3, 1, 2]);
+    }
+
+    #[test]
+    fn pretty_round_trips_through_compact_parse() {
+        use super::{parse_str, to_string_pretty};
+        let m: std::collections::BTreeMap<String, Vec<i32>> = [
+            (String::from("a"), vec![1, 2]),
+            (String::from("b"), vec![3]),
+        ]
+        .into_iter()
+        .collect();
+        let pretty = to_string_pretty(&m).unwrap();
+        // Whitespace is irrelevant to the parser; the pretty form must
+        // re-parse to the same map.
+        let back: std::collections::BTreeMap<String, Vec<i32>> = parse_str(&pretty).unwrap();
+        assert_eq!(back, m);
+    }
+
+    #[cfg(feature = "std")]
+    #[test]
+    fn io_writer_propagates_underlying_error() {
+        use super::to_writer;
+        // A writer that always errors: assert the io::Error reaches us
+        // unmolested instead of getting flattened to a generic kind.
+        struct FailingWriter;
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut w = FailingWriter;
+        let err = to_writer(&"hi", &mut w).unwrap_err();
+        assert_eq!(err.to_string(), "disk full");
+    }
+}
+
+/// `json!` combined macro tests. Each type gets both `FromJson` and
+/// `ToJson` from a single invocation — the struct/enum is emitted once.
+#[cfg(all(test, feature = "alloc"))]
+mod json_macro_tests {
+    use super::{parse_str, to_string};
+
+    crate::json! {
+        #[derive(Debug, PartialEq)]
+        struct Plain {
+            id: u32,
+            name: String,
+        }
+    }
+
+    #[test]
+    fn plain_struct_round_trips() {
+        let v = Plain { id: 7, name: String::from("alice") };
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, r#"{"id":7,"name":"alice"}"#);
+        let back: Plain = parse_str(&s).unwrap();
+        assert_eq!(back, v);
+    }
+
+    crate::json! {
+        #[derive(Debug, PartialEq)]
+        struct Borrowed<'input> {
+            tag: &'input str,
+            count: u32,
+        }
+    }
+
+    #[test]
+    fn struct_with_lifetime_round_trips() {
+        let json = r#"{"tag":"hi","count":3}"#;
+        let v: Borrowed<'_> = parse_str(json).unwrap();
+        assert_eq!(v, Borrowed { tag: "hi", count: 3 });
+        assert_eq!(to_string(&v).unwrap(), json);
+    }
+
+    crate::json! {
+        #[derive(Debug, PartialEq)]
+        struct Decorated {
+            #[bourne(rename = "user-id")]
+            user_id: u32,
+            #[bourne(skip)]
+            cached: u32,
+            #[bourne(skip_if_none)]
+            note: Option<String>,
+            value: u32,
+        }
+    }
+
+    #[test]
+    fn rename_skip_skip_if_none() {
+        let v = Decorated { user_id: 1, cached: 99, note: None, value: 42 };
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, r#"{"user-id":1,"value":42}"#);
+        let back: Decorated = parse_str(&s).unwrap();
+        assert_eq!(back.user_id, 1);
+        assert_eq!(back.value, 42);
+    }
+
+    crate::json! {
+        #[derive(Debug, PartialEq)]
+        struct UserId(u64);
+    }
+
+    #[test]
+    fn newtype_round_trips() {
+        let v = UserId(42);
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, "42");
+        let back: UserId = parse_str(&s).unwrap();
+        assert_eq!(back, v);
+    }
+
+    crate::json! {
+        #[derive(Debug, PartialEq)]
+        struct Pair(i32, i32);
+    }
+
+    #[test]
+    fn tuple_struct_round_trips() {
+        let v = Pair(3, -7);
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, "[3,-7]");
+        let back: Pair = parse_str(&s).unwrap();
+        assert_eq!(back, v);
+    }
+
+    crate::json! {
+        #[derive(Debug, PartialEq)]
+        enum Shape {
+            Circle,
+            Wrapper(u32),
+            Pair(u32, String),
+            Box { w: u32, h: u32 },
+            #[bourne(rename = "tri")]
+            Triangle,
+        }
+    }
+
+    #[test]
+    fn externally_tagged_enum_round_trips() {
+        let cases: Vec<(Shape, &str)> = vec![
+            (Shape::Circle, r#""Circle""#),
+            (Shape::Wrapper(7), r#"{"Wrapper":7}"#),
+            (Shape::Pair(1, String::from("x")), r#"{"Pair":[1,"x"]}"#),
+            (Shape::Box { w: 10, h: 20 }, r#"{"Box":{"w":10,"h":20}}"#),
+            (Shape::Triangle, r#""tri""#),
+        ];
+        for (val, expected) in cases {
+            let s = to_string(&val).unwrap();
+            assert_eq!(s, expected);
+            let back: Shape = parse_str(&s).unwrap();
+            assert_eq!(back, val);
+        }
+    }
+
+    crate::json! {
+        #[bourne(tag = "type")]
+        #[derive(Debug, PartialEq)]
+        enum Event {
+            Heartbeat,
+            #[bourne(rename = "click")]
+            Click { x: u32, y: u32 },
+        }
+    }
+
+    #[test]
+    fn internally_tagged_enum_round_trips() {
+        let hb = Event::Heartbeat;
+        let s = to_string(&hb).unwrap();
+        assert_eq!(s, r#"{"type":"Heartbeat"}"#);
+        let back: Event = parse_str(&s).unwrap();
+        assert_eq!(back, hb);
+
+        let click = Event::Click { x: 1, y: 2 };
+        let s = to_string(&click).unwrap();
+        assert_eq!(s, r#"{"type":"click","x":1,"y":2}"#);
+        let back: Event = parse_str(&s).unwrap();
+        assert_eq!(back, click);
+    }
+
+    crate::json! {
+        #[bourne(tag = "t", content = "c")]
+        #[derive(Debug, PartialEq)]
+        enum Msg {
+            Ping,
+            Echo(String),
+            Pair(u32, u32),
+            Body { text: String },
+        }
+    }
+
+    #[test]
+    fn adjacently_tagged_enum_round_trips() {
+        let cases: Vec<(Msg, &str)> = vec![
+            (Msg::Ping, r#"{"t":"Ping"}"#),
+            (Msg::Echo(String::from("hi")), r#"{"t":"Echo","c":"hi"}"#),
+            (Msg::Pair(1, 2), r#"{"t":"Pair","c":[1,2]}"#),
+            (Msg::Body { text: String::from("ok") }, r#"{"t":"Body","c":{"text":"ok"}}"#),
+        ];
+        for (val, expected) in cases {
+            let s = to_string(&val).unwrap();
+            assert_eq!(s, expected);
+            let back: Msg = parse_str(&s).unwrap();
+            assert_eq!(back, val);
+        }
+    }
+
+    crate::json! {
+        #[bourne(untagged)]
+        #[derive(Debug, PartialEq)]
+        enum Mixed {
+            Nothing,
+            One(u32),
+            Two(u32, u32),
+            Body { name: String },
+        }
+    }
+
+    crate::json! {
+        #[derive(Debug, PartialEq)]
+        pub struct PubFields {
+            pub id: u32,
+            pub(crate) name: String,
+            value: u32,
+        }
+    }
+
+    #[test]
+    fn pub_fields_round_trip() {
+        let v = PubFields { id: 1, name: String::from("hi"), value: 2 };
+        let s = to_string(&v).unwrap();
+        assert_eq!(s, r#"{"id":1,"name":"hi","value":2}"#);
+        let back: PubFields = parse_str(&s).unwrap();
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn untagged_enum_serializes() {
+        assert_eq!(to_string(&Mixed::Nothing).unwrap(), "null");
+        assert_eq!(to_string(&Mixed::One(42)).unwrap(), "42");
+        assert_eq!(to_string(&Mixed::Two(1, 2)).unwrap(), "[1,2]");
+        assert_eq!(
+            to_string(&Mixed::Body { name: String::from("x") }).unwrap(),
+            r#"{"name":"x"}"#,
+        );
     }
 }

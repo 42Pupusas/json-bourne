@@ -1,4 +1,44 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+//! Streaming JSON lexer and parser. `no_std`, zero alloc, zero deps.
+//!
+//! `bourne-core` is the byte-walking layer that the higher-level
+//! [`bourne`](https://docs.rs/bourne) crate builds on. Most users want
+//! `bourne`; reach for `bourne-core` directly only when you need the
+//! event stream without the typed `FromJson` / `ToJson` traits — for
+//! example to write a custom dispatcher or to parse on a no-alloc
+//! target.
+//!
+//! # Two layers
+//!
+//! - [`Parser`] — pull-based event stream. Each [`next_event`] call
+//!   returns one [`Event`] (`StartObject`, `Key`, `Number`, …) and
+//!   enforces JSON's grammar via an internal state machine.
+//! - [`Lexer`] — stateless token reader. The `Parser` wraps a
+//!   `Lexer`; typed consumers in `bourne` drive the lexer directly
+//!   to skip the per-event grammar dispatch.
+//!
+//! # Example
+//!
+//! ```
+//! use bourne_core::{Event, Parser};
+//!
+//! let mut p: Parser<'_> = Parser::new(br#"{"id":42}"#);
+//! assert!(matches!(p.next_event().unwrap(), Some(Event::StartObject)));
+//! assert!(matches!(p.next_event().unwrap(), Some(Event::Key(_))));
+//! assert!(matches!(p.next_event().unwrap(), Some(Event::Number(_))));
+//! assert!(matches!(p.next_event().unwrap(), Some(Event::EndObject)));
+//! assert!(p.next_event().unwrap().is_none());
+//! ```
+//!
+//! # Bounds
+//!
+//! - Maximum input size: ~2 GB ([`MAX_INPUT_LEN`]). Offsets are stored
+//!   as 31-bit values; the top bit is reserved for the `has_escapes`
+//!   flag in [`JsonStr`].
+//! - Maximum nesting depth: 128 by default ([`DEFAULT_MAX_DEPTH`]).
+//!   Override at construction by parameterizing `Parser<'_, N>`.
+//!
+//! [`next_event`]: Parser::next_event
 // Targeted uses of `unsafe`:
 //   1. `from_utf8_unchecked` after the lexer has validated every byte against
 //      the RFC 3629 byte ranges inline. The safe alternative re-walks the

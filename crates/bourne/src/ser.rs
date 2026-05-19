@@ -427,6 +427,337 @@ pub fn to_vec<T: ToJson + ?Sized>(value: &T) -> Result<alloc::vec::Vec<u8>, Erro
 }
 
 // ---------------------------------------------------------------------------
+// fmt::Write sink
+// ---------------------------------------------------------------------------
+
+/// `JsonWrite` sink that forwards to any `core::fmt::Write` implementor.
+///
+/// Useful when the destination is something other than a `String` —
+/// `&mut String` is the obvious case, but any `fmt::Write` works (a
+/// `Formatter`, a custom buffered writer, a tracing-style accumulator).
+///
+/// The error type is [`core::fmt::Error`] for byte/string writes and
+/// [`Error`] for the float path; the unified sink-level error is
+/// [`Error`], with `core::fmt::Error` mapped to a generic write
+/// failure.
+#[cfg(feature = "alloc")]
+#[derive(Debug)]
+pub struct FmtWriteSink<'a, W: ?Sized> {
+    out: &'a mut W,
+}
+
+#[cfg(feature = "alloc")]
+impl<'a, W: core::fmt::Write + ?Sized> FmtWriteSink<'a, W> {
+    pub const fn new(out: &'a mut W) -> Self {
+        Self { out }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<W: core::fmt::Write + ?Sized> JsonWrite for FmtWriteSink<'_, W> {
+    type Error = Error;
+
+    #[inline]
+    fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
+        self.out
+            .write_char(b as char)
+            .map_err(|_| fmt_write_error())
+    }
+
+    #[inline]
+    fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
+        self.out.write_str(s).map_err(|_| fmt_write_error())
+    }
+
+    #[inline]
+    fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
+        if !f.is_finite() {
+            return Err(Error::new(ErrorKind::NonFiniteFloat, Position::START));
+        }
+        crate::float::format_finite_fmt(f, self.out).map_err(|_| fmt_write_error())
+    }
+}
+
+/// `fmt::Write` errors don't carry detail. Map to a typed parse-style
+/// error so callers can distinguish the failure mode without losing
+/// the trait's error contract.
+#[cfg(feature = "alloc")]
+#[inline]
+const fn fmt_write_error() -> Error {
+    Error::new(ErrorKind::TypeMismatch, Position::START)
+}
+
+// ---------------------------------------------------------------------------
+// io::Write sink (std-only)
+// ---------------------------------------------------------------------------
+
+/// `JsonWrite` sink that forwards to any `std::io::Write` implementor.
+///
+/// The natural target for serializing JSON to a file, socket, or other
+/// byte stream. Errors propagate through the sink's `Self::Error`,
+/// which is [`std::io::Error`].
+#[cfg(feature = "std")]
+#[derive(Debug)]
+pub struct IoWriteSink<'a, W: ?Sized> {
+    out: &'a mut W,
+}
+
+#[cfg(feature = "std")]
+impl<'a, W: std::io::Write + ?Sized> IoWriteSink<'a, W> {
+    pub const fn new(out: &'a mut W) -> Self {
+        Self { out }
+    }
+}
+
+/// Adapter that lets `core::fmt::Write` write into an `io::Write` sink.
+/// `format_finite_fmt` only needs `fmt::Write`; this carries the
+/// underlying I/O error out so the float path's failures don't get
+/// flattened into a generic "fmt failed".
+#[cfg(feature = "std")]
+struct IoFmtAdapter<'a, W: std::io::Write + ?Sized> {
+    inner: &'a mut W,
+    err: Option<std::io::Error>,
+}
+
+#[cfg(feature = "std")]
+impl<W: std::io::Write + ?Sized> core::fmt::Write for IoFmtAdapter<'_, W> {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        match self.inner.write_all(s.as_bytes()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.err = Some(e);
+                Err(core::fmt::Error)
+            }
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl<W: std::io::Write + ?Sized> JsonWrite for IoWriteSink<'_, W> {
+    type Error = std::io::Error;
+
+    #[inline]
+    fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
+        self.out.write_all(&[b])
+    }
+
+    #[inline]
+    fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
+        self.out.write_all(s.as_bytes())
+    }
+
+    #[inline]
+    fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
+        if !f.is_finite() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "non-finite float not representable in JSON",
+            ));
+        }
+        let mut adapter = IoFmtAdapter {
+            inner: self.out,
+            err: None,
+        };
+        match crate::float::format_finite_fmt(f, &mut adapter) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(adapter.err.unwrap_or_else(|| {
+                std::io::Error::other("fmt error in float formatter")
+            })),
+        }
+    }
+}
+
+/// Serialize `value` directly into a [`std::io::Write`] sink.
+///
+/// The standard "stream JSON to a file/socket" entry point. For an
+/// in-memory build use [`to_string`] / [`to_vec`].
+#[cfg(feature = "std")]
+pub fn to_writer<T: ToJson + ?Sized, W: std::io::Write>(
+    value: &T,
+    writer: &mut W,
+) -> Result<(), std::io::Error> {
+    let mut sink = IoWriteSink::new(writer);
+    value.write_json(&mut sink)
+}
+
+/// Serialize `value` into any [`core::fmt::Write`] sink.
+///
+/// Returns the underlying [`Error`] (typed) on failure — including
+/// non-finite floats. For `String` targets prefer [`to_string`]; this
+/// entry point is for arbitrary `fmt::Write` consumers.
+#[cfg(feature = "alloc")]
+pub fn to_fmt<T: ToJson + ?Sized, W: core::fmt::Write + ?Sized>(
+    value: &T,
+    writer: &mut W,
+) -> Result<(), Error> {
+    let mut sink = FmtWriteSink::new(writer);
+    value.write_json(&mut sink)
+}
+
+// ---------------------------------------------------------------------------
+// Pretty-print sink
+// ---------------------------------------------------------------------------
+
+/// `JsonWrite` sink that emits indented, multi-line JSON.
+///
+/// Wraps a `String` and tracks container depth + a one-byte lookahead
+/// (`pending_open`). When an opener (`[` / `{`) is followed immediately
+/// by the matching closer (no contents), the sink emits the compact
+/// form `[]` / `{}`. Otherwise it inserts a newline plus the current
+/// indent before each element and before the closing bracket.
+///
+/// Indent unit defaults to two spaces; configure via [`Self::with_indent`].
+#[cfg(feature = "alloc")]
+#[derive(Debug)]
+pub struct PrettyStringSink<'a> {
+    out: &'a mut String,
+    indent: &'static str,
+    depth: usize,
+    /// `Some(b)` when we wrote `[` or `{` and haven't yet decided
+    /// whether the container is empty. The next structural byte
+    /// resolves it: a matching close → emit `[]` / `{}`; anything
+    /// else → flush the open + newline + indent for the first
+    /// element, then continue.
+    pending_open: Option<u8>,
+}
+
+#[cfg(feature = "alloc")]
+impl<'a> PrettyStringSink<'a> {
+    /// Build a pretty sink writing to `out` with the default 2-space
+    /// indent.
+    #[must_use]
+    pub const fn new(out: &'a mut String) -> Self {
+        Self {
+            out,
+            indent: "  ",
+            depth: 0,
+            pending_open: None,
+        }
+    }
+
+    /// Build a pretty sink with a custom indent string. Pass `"\t"`
+    /// for tabs, `"    "` for four spaces, etc. The indent must be
+    /// pure whitespace — JSON doesn't validate it on the wire, but
+    /// emitting non-whitespace would corrupt the output.
+    #[must_use]
+    pub const fn with_indent(out: &'a mut String, indent: &'static str) -> Self {
+        Self {
+            out,
+            indent,
+            depth: 0,
+            pending_open: None,
+        }
+    }
+
+    /// Resolve any pending open by emitting it and dropping the
+    /// pending state. Used before writing any non-structural byte
+    /// (a value's first byte).
+    fn flush_pending_open(&mut self) {
+        if let Some(b) = self.pending_open.take() {
+            self.out.push(b as char);
+            self.depth += 1;
+            self.newline_and_indent();
+        }
+    }
+
+    fn newline_and_indent(&mut self) {
+        self.out.push('\n');
+        for _ in 0..self.depth {
+            self.out.push_str(self.indent);
+        }
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl JsonWrite for PrettyStringSink<'_> {
+    type Error = Error;
+
+    fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
+        match b {
+            b'[' | b'{' => {
+                // Resolve any prior pending open: the prior container
+                // is non-empty, so emit it + indent for our position.
+                self.flush_pending_open();
+                // Defer this open — we don't know yet if it's empty.
+                self.pending_open = Some(b);
+                Ok(())
+            }
+            b']' | b'}' => {
+                if let Some(open) = self.pending_open.take() {
+                    // Empty container: write the open and matching
+                    // close back-to-back with no whitespace.
+                    self.out.push(open as char);
+                    self.out.push(b as char);
+                    return Ok(());
+                }
+                self.depth -= 1;
+                self.newline_and_indent();
+                self.out.push(b as char);
+                Ok(())
+            }
+            b',' => {
+                // After a value inside a container: newline + indent
+                // before the next element. The pending_open state
+                // can't be live here — we must have written at least
+                // one value to be at a comma.
+                debug_assert!(self.pending_open.is_none());
+                self.out.push(',');
+                self.newline_and_indent();
+                Ok(())
+            }
+            b':' => {
+                // Object key/value separator. JSON-pretty convention
+                // is `key: value` (one space after the colon, none
+                // before).
+                self.out.push_str(": ");
+                Ok(())
+            }
+            _ => {
+                // Any other single byte (rare via this entry — most
+                // bulk text comes through write_str_raw or
+                // write_escaped_str).
+                self.flush_pending_open();
+                self.out.push(b as char);
+                Ok(())
+            }
+        }
+    }
+
+    fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
+        if s.is_empty() {
+            return Ok(());
+        }
+        self.flush_pending_open();
+        self.out.push_str(s);
+        Ok(())
+    }
+
+    fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
+        self.flush_pending_open();
+        // Reuse the StringSink escape walk by constructing one
+        // transiently. The borrow lasts only for this call.
+        let mut inner = StringSink::new(self.out);
+        inner.write_escaped_str(s)
+    }
+
+    fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
+        self.flush_pending_open();
+        float::format_f64_write(f, self.out)
+    }
+}
+
+/// Pretty-printed equivalent of [`to_string`]. Two-space indent, one
+/// space after `:`, newline between every element. Empty containers
+/// are kept compact (`[]` / `{}`).
+#[cfg(feature = "alloc")]
+pub fn to_string_pretty<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> {
+    let mut out = String::with_capacity(256);
+    let mut sink = PrettyStringSink::new(&mut out);
+    value.write_json(&mut sink)?;
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Primitive impls
 // ---------------------------------------------------------------------------
 
@@ -796,6 +1127,23 @@ mod alloc_impls {
         }
     }
 
+    /// Encode `SystemTime` as fractional seconds since `UNIX_EPOCH`.
+    /// Times before the epoch serialize as negative numbers; the
+    /// parse side accepts the same shape.
+    #[cfg(feature = "std")]
+    impl ToJson for std::time::SystemTime {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            // `duration_since(UNIX_EPOCH)` returns Err with the negated
+            // duration when self < UNIX_EPOCH. Encode the sign back.
+            let secs = match self.duration_since(std::time::UNIX_EPOCH) {
+                Ok(d) => d.as_secs_f64(),
+                Err(e) => -e.duration().as_secs_f64(),
+            };
+            w.write_float_f64(secs)
+        }
+    }
+
     /// Encode `Duration` as fractional seconds, mirroring the parse-side
     /// `from_secs_f64` adapter. Negative durations are unrepresentable
     /// (`Duration` is unsigned), and the float impl already rejects
@@ -883,6 +1231,38 @@ mod alloc_impls {
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_escaped_str(&self.to_string_lossy())
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // IndexMap / IndexSet (optional `indexmap` feature).
+    //
+    // Insertion-order iteration is the differentiator from
+    // HashMap/BTreeMap; the wire shape is the same.
+    // -----------------------------------------------------------------
+
+    #[cfg(feature = "indexmap")]
+    impl<K, V, S> ToJson for indexmap::IndexMap<K, V, S>
+    where
+        K: super::MapKeyOut + ::core::hash::Hash + Eq,
+        V: ToJson,
+        S: ::core::hash::BuildHasher,
+    {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            write_object(self.iter(), w)
+        }
+    }
+
+    #[cfg(feature = "indexmap")]
+    impl<T, S> ToJson for indexmap::IndexSet<T, S>
+    where
+        T: ToJson + ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher,
+    {
+        #[inline]
+        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+            super::write_array(self.iter(), w)
         }
     }
 }

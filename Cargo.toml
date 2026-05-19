@@ -4,7 +4,7 @@ members = ["crates/bourne-core", "crates/bourne", "crates/bourne-bench", "crates
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/illuminodes/bourne"
@@ -16,6 +16,10 @@ rust-version = "1.85"
 # `#![allow(unsafe_code)]` at its crate root. Every other crate stays clean.
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
+# `bourne_no_simd` is a custom cfg flag CI sets when running under miri,
+# which doesn't model SSE2 intrinsics. Register it so `unexpected_cfgs`
+# doesn't warn.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(bourne_no_simd)"] }
 
 # Custom profile inheriting from release. Used by the perf-driven `profile`
 # binary in bourne-bench. Keeps debug symbols and frame pointers on so

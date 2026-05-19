@@ -9,11 +9,18 @@ description = "Type-driven JSON parser. no_std-first. Zero-dep."
 
 [features]
 default = ["std"]
-std = ["alloc", "bourne-core/std"]
+std = ["alloc", "bourne-core/std", "indexmap?/std"]
 alloc = []
+# Optional: FromJson/ToJson impls for `indexmap::{IndexMap, IndexSet}`
+# preserving insertion order. Pulls in the `indexmap` crate. With our
+# `std` feature on, indexmap's `std` is also enabled, which provides
+# `RandomState` as the default hasher. Without `std`, users must
+# specify a hasher explicitly.
+indexmap = ["dep:indexmap", "alloc"]
 
 [dependencies]
-bourne-core = { path = "../bourne-core", version = "0.0.0" }
+bourne-core = { path = "../bourne-core", version = "0.1.0" }
+indexmap = { version = "2", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = "1"
