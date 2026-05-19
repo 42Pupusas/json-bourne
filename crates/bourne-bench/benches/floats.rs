@@ -113,3 +113,63 @@ mod serde_json {
             });
     }
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostic: same float repeated.
+//
+// All elements are identical, so the teju math hits the *same* MULTIPLIERS
+// entry every time and the digit-write LUT hits stay on the same cache
+// lines. If bourne's cliff between n=1000 and n=10000 is data-dependent
+// (random input → scattered LUT access pattern → L1d misses), the cliff
+// should disappear here. If the cliff persists, the bottleneck is in the
+// output-write loop, not the data-dependent inner work.
+// ---------------------------------------------------------------------------
+
+mod bourne_write_same {
+    use super::*;
+
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
+        let floats = vec![12345.6789_f64; n];
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench(|| {
+                let s = to_string(divan::black_box(&floats)).unwrap();
+                divan::black_box(s);
+            });
+    }
+}
+
+mod serde_json_same {
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
+        let floats = vec![12345.6789_f64; n];
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench(|| {
+                let s = ::serde_json::to_string(divan::black_box(&floats)).unwrap();
+                divan::black_box(s);
+            });
+    }
+}
+
+// 4 distinct floats cycling — bounded branch-prediction state but still
+// multi-magnitude. Tests whether the cliff comes from *unbounded variance*
+// vs any variance at all.
+mod bourne_write_four {
+    use super::*;
+    fn make(n: usize) -> Vec<f64> {
+        let vals = [1.234567890123456_f64, 9876.54321e-3, 0.000123456789, 1.5e15];
+        (0..n).map(|i| vals[i % 4]).collect()
+    }
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
+        let floats = make(n);
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench(|| {
+                let s = to_string(divan::black_box(&floats)).unwrap();
+                divan::black_box(s);
+            });
+    }
+}

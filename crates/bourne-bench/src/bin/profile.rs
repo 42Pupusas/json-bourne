@@ -268,6 +268,17 @@ fn run_to_json_floats(data: &[f64], iters: u64) {
     }
 }
 
+// Head-to-head counterpart of `run_to_json_floats`. Same input, same call
+// shape (`to_string(&Vec<f64>)`) but via `serde_json` instead of `bourne`.
+// Produces a flamegraph we can diff against bourne's `to_json_floats_10k`
+// to spot what serde_json is *not* doing that bourne is.
+fn run_serde_to_json_floats(data: &[f64], iters: u64) {
+    for _ in 0..iters {
+        let out = serde_json::to_string(black_box(data)).unwrap();
+        black_box(out);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Workload registry
 // ---------------------------------------------------------------------------
@@ -291,6 +302,7 @@ const fn workloads() -> &'static [&'static str] {
         "to_json_metric",
         "to_json_int_struct",
         "to_json_floats_10k",
+        "serde_to_json_floats_10k",
     ]
 }
 
@@ -382,6 +394,12 @@ fn run(name: &str) {
             // Divan measured ~720 µs/iter, so ~7k iters ≈ 5s.
             let data = float_ser_vec(10_000);
             run_to_json_floats(&data, 7_000);
+        }
+        "serde_to_json_floats_10k" => {
+            // Mirrors `benches/floats.rs::serde_json::bench(10_000)`.
+            // Divan measured ~217 µs/iter, so ~23k iters ≈ 5s.
+            let data = float_ser_vec(10_000);
+            run_serde_to_json_floats(&data, 23_000);
         }
         other => {
             eprintln!("unknown workload: {other}");

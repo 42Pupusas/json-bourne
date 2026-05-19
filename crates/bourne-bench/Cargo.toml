@@ -38,8 +38,11 @@ dhat-heap = ["dep:dhat"]
 compare-mem = ["dep:bourne-alloctest", "dep:serde", "dep:serde_json"]
 # Enables the perf-friendly profiling binary. Builds a long-running
 # tight loop suitable for `perf record` / flamegraph capture. See
-# PROFILING.md for the runbook.
-profile = []
+# PROFILING.md for the runbook. The serde_json + serde deps let the
+# binary host head-to-head workloads against the canonical implementation
+# (e.g. `serde_to_json_floats_10k`) so a pprof flamegraph captures both
+# libraries' profiles under identical conditions.
+profile = ["dep:serde", "dep:serde_json"]
 
 [[example]]
 name = "profile_heap"
