@@ -453,12 +453,14 @@ pub(crate) unsafe fn format_finite_to_ptr(value: f64, dst: *mut u8) -> usize {
     let negative = value.is_sign_negative();
     let d = teju(value.abs());
     let digits_count = mantissa_digit_count(d.mantissa);
+    // Always write '-' at dst[0]; the cursor advances past it only when
+    // negative. For positive values the next field's write at offset 0
+    // overwrites the '-'. This removes the sign branch (which was the
+    // largest remaining mispredictor: 4% of all branch-misses at random
+    // input, since `is_sign_negative` is 50/50 by construction).
+    // SAFETY: caller guarantees ≥ 32 writable bytes; offset 0 is in bounds.
+    unsafe { dst.write(b'-') };
     let pos = usize::from(negative);
-    if negative {
-        // SAFETY: caller guarantees at least 32 writable bytes; pos==1 is
-        // inside.
-        unsafe { dst.write(b'-') };
-    }
 
     let point = digits_count as i32 + d.exponent;
 
