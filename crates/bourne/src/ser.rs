@@ -40,6 +40,17 @@ pub trait JsonWrite {
     /// widens to [`bourne_core::Error`] so non-finite floats can surface.
     type Error;
 
+    /// Hint that at least `additional` more bytes will be written. Sinks
+    /// backed by a growable buffer (like [`ByteSink`]) can amortize
+    /// capacity growth across a known-size sequence; sinks without a
+    /// reservation concept treat this as a no-op.
+    ///
+    /// Hot path: the array writer in this module calls this once at the
+    /// start of a slice/Vec serialization so per-element `reserve` calls
+    /// become predictable no-ops.
+    #[inline]
+    fn reserve_hint(&mut self, _additional: usize) {}
+
     /// Append a single ASCII byte. Used for structural punctuation
     /// (`{`, `}`, `[`, `]`, `,`, `:`, `"`).
     fn write_byte(&mut self, b: u8) -> Result<(), Self::Error>;
@@ -263,6 +274,11 @@ impl JsonWrite for ByteSink<'_> {
     type Error = Error;
 
     #[inline]
+    fn reserve_hint(&mut self, additional: usize) {
+        self.out.reserve(additional);
+    }
+
+    #[inline]
     fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
         self.out.push(b);
         Ok(())
@@ -339,7 +355,12 @@ impl JsonWrite for ByteSink<'_> {
 
     #[inline]
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
-        if !f.is_finite() {
+        // Cheap bit-pattern finiteness test: the exponent field is all-ones
+        // only for ±inf and NaN. Both libstd's `f64::is_finite` and `f64.abs`
+        // routed through the FP unit (a 6.5% standalone frame in pprof);
+        // this stays in the integer ALU using the bits we already loaded.
+        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+        if f.to_bits() & EXP_MASK == EXP_MASK {
             return Err(Error::new(ErrorKind::NonFiniteFloat, Position::START));
         }
         crate::float::format_finite_to_vec(f, self.out);
@@ -643,6 +664,15 @@ pub trait ToJson {
     /// Used by [`to_vec`] / [`to_string`] to size the initial allocation.
     /// Defaults to `0` so existing impls aren't forced to provide it.
     const MIN_SERIALIZED_LEN: usize = 0;
+
+    /// Upper bound on the bytes a single `write_json` call emits, used by
+    /// sequence impls to pre-reserve buffer capacity. `0` means "no useful
+    /// upper bound" — sequence impls skip the reservation in that case.
+    ///
+    /// Primitives with a known maximum output length (floats, ints, bools)
+    /// override this. Variable-length types (`str`, `Vec<T>`, structs) keep
+    /// the default, since their per-element size depends on payload.
+    const MAX_SERIALIZED_LEN: usize = 0;
 
     /// Serialize `self` into `w`.
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error>;
@@ -1028,6 +1058,7 @@ pub fn to_string_pretty<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> 
 
 impl ToJson for bool {
     const MIN_SERIALIZED_LEN: usize = 4; // "true"
+    const MAX_SERIALIZED_LEN: usize = 5; // "false"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_str_raw(if *self { "true" } else { "false" })
@@ -1036,6 +1067,7 @@ impl ToJson for bool {
 
 impl ToJson for () {
     const MIN_SERIALIZED_LEN: usize = 4; // "null"
+    const MAX_SERIALIZED_LEN: usize = 4;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_str_raw("null")
@@ -1058,6 +1090,8 @@ macro_rules! impl_int_signed {
         $(
             impl ToJson for $t {
                 const MIN_SERIALIZED_LEN: usize = 1;
+                // sign + digits. i64::MIN is "-9223372036854775808" = 20 chars.
+                const MAX_SERIALIZED_LEN: usize = 20;
                 #[inline]
                 fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
                     w.write_int_i64(i64::from(*self))
@@ -1072,6 +1106,8 @@ macro_rules! impl_int_unsigned {
         $(
             impl ToJson for $t {
                 const MIN_SERIALIZED_LEN: usize = 1;
+                // u64::MAX = "18446744073709551615" = 20 chars.
+                const MAX_SERIALIZED_LEN: usize = 20;
                 #[inline]
                 fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
                     w.write_int_u64(u64::from(*self))
@@ -1090,6 +1126,7 @@ impl_int_unsigned!(u8, u16, u32, u64);
 #[allow(clippy::cast_possible_wrap, clippy::cast_lossless, clippy::use_self)]
 impl ToJson for isize {
     const MIN_SERIALIZED_LEN: usize = 1;
+    const MAX_SERIALIZED_LEN: usize = 20;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_i64(*self as i64)
@@ -1099,6 +1136,7 @@ impl ToJson for isize {
 #[allow(clippy::cast_lossless, clippy::use_self)]
 impl ToJson for usize {
     const MIN_SERIALIZED_LEN: usize = 1;
+    const MAX_SERIALIZED_LEN: usize = 20;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_u64(*self as u64)
@@ -1107,6 +1145,8 @@ impl ToJson for usize {
 
 impl ToJson for i128 {
     const MIN_SERIALIZED_LEN: usize = 1;
+    // sign + 39 digits for i128::MIN.
+    const MAX_SERIALIZED_LEN: usize = 40;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_i128(*self)
@@ -1115,6 +1155,8 @@ impl ToJson for i128 {
 
 impl ToJson for u128 {
     const MIN_SERIALIZED_LEN: usize = 1;
+    // u128::MAX has 39 digits.
+    const MAX_SERIALIZED_LEN: usize = 39;
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_int_u128(*self)
@@ -1177,6 +1219,19 @@ impl<T: ToJson> ToJson for [T] {
     const MIN_SERIALIZED_LEN: usize = 2; // "[]"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+        // Pre-reserve when the element type has a known upper bound, so the
+        // per-element `reserve` inside `format_finite_to_vec` /
+        // `format_u64_direct` becomes a no-op the branch predictor learns
+        // on the first iteration.
+        if T::MAX_SERIALIZED_LEN != 0 {
+            // bytes_for_elements + commas + brackets, saturating to avoid
+            // overflow on absurd slice sizes.
+            let hint = self
+                .len()
+                .saturating_mul(T::MAX_SERIALIZED_LEN.saturating_add(1))
+                .saturating_add(2);
+            w.reserve_hint(hint);
+        }
         write_array(self.iter(), w)
     }
 }
@@ -1185,7 +1240,7 @@ impl<T: ToJson, const N: usize> ToJson for [T; N] {
     const MIN_SERIALIZED_LEN: usize = 2; // "[]"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
-        write_array(self.iter(), w)
+        (self as &[T]).write_json(w)
     }
 }
 
@@ -1249,6 +1304,10 @@ mod alloc_impls {
 
     impl ToJson for f64 {
         const MIN_SERIALIZED_LEN: usize = 1;
+        // Worst-case f64 string: sign + 17 digits + '.' + 'e' + sign +
+        // 3-digit exponent = 25 bytes. Round to 32 to match the
+        // formatter's stack-buffer size.
+        const MAX_SERIALIZED_LEN: usize = 32;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(*self)
@@ -1259,6 +1318,7 @@ mod alloc_impls {
     /// form on the parse side narrows via `as f32`, mirroring this.
     impl ToJson for f32 {
         const MIN_SERIALIZED_LEN: usize = 1;
+        const MAX_SERIALIZED_LEN: usize = 32;
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(f64::from(*self))
