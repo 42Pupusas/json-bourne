@@ -308,6 +308,28 @@ const DIGIT_LUT: &[u8; 200] = b"\
 6061626364656667686970717273747576777879\
 8081828384858687888990919293949596979899";
 
+/// Four-digit ASCII LUT: for each `n` in `0..10_000`, `QUAD_LUT[n*4..n*4+4]`
+/// holds the four ASCII digits of `n` (with leading zeros). Lets the digit
+/// writer emit four characters per iteration with one 4-byte store instead
+/// of two 2-byte LUT lookups + stores.
+///
+/// 40 KB in `.rodata`, generated at compile time. Indexed by `(u32) % 10_000`,
+/// so the access pattern is bounded and cache-friendly when the same
+/// magnitude is processed repeatedly (typical for float-heavy serialization).
+static QUAD_LUT: [u8; 40_000] = {
+    let mut buf = [0u8; 40_000];
+    let mut n: u32 = 0;
+    while n < 10_000 {
+        let off = (n * 4) as usize;
+        buf[off]     = b'0' + (n / 1000)         as u8;
+        buf[off + 1] = b'0' + ((n / 100) % 10)   as u8;
+        buf[off + 2] = b'0' + ((n / 10) % 10)    as u8;
+        buf[off + 3] = b'0' + (n % 10)           as u8;
+        n += 1;
+    }
+    buf
+};
+
 /// Digit count for any post-teju mantissa (≤ 17 digits — that's what
 /// shortest-roundtrip guarantees). Branch chain ordered high-to-low: most
 /// mantissas have 15–17 digits, so the predictor lands on the right branch
@@ -468,7 +490,8 @@ unsafe fn write_digits_at_ptr(n: u64, dst: *mut u8, digits: usize) {
 
     // `pos` is the offset of the next byte to write (counts down).
     let mut pos = digits;
-    let lut = DIGIT_LUT.as_ptr();
+    let lut2 = DIGIT_LUT.as_ptr();
+    let lut4 = QUAD_LUT.as_ptr();
 
     // Split a >32-bit value into (upper, lower 8 digits) with one
     // expensive 64-bit divide. Both halves then fit in u32.
@@ -478,49 +501,41 @@ unsafe fn write_digits_at_ptr(n: u64, dst: *mut u8, digits: usize) {
         let low = (n - 100_000_000 * (n / 100_000_000)) as u32;
         let upper = (n / 100_000_000) as u32;
 
-        // Write the bottom 8 digits as two 4-digit chunks via 4 LUT copies.
-        let c = low % 10_000;
-        let d = low / 10_000;
-        let c0 = ((c % 100) * 2) as usize;
-        let c1 = ((c / 100) * 2) as usize;
-        let d0 = ((d % 100) * 2) as usize;
-        let d1 = ((d / 100) * 2) as usize;
+        // Write the bottom 8 digits as two 4-digit chunks via two 4-byte copies.
+        let lo4 = (low % 10_000) as usize;
+        let hi4 = (low / 10_000) as usize;
         // SAFETY: pos starts at digits ≥ 9 (we are in the >32-bit branch),
-        // and decreases by 8 across the four 2-byte copies below.
+        // and decreases by 8 across the two 4-byte copies below; both
+        // 4-byte LUT slots are inside the 40_000-byte table.
         unsafe {
-            pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(c0), dst.add(pos), 2);
-            pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(c1), dst.add(pos), 2);
-            pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(d0), dst.add(pos), 2);
-            pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(d1), dst.add(pos), 2);
+            pos -= 4;
+            core::ptr::copy_nonoverlapping(lut4.add(lo4 * 4), dst.add(pos), 4);
+            pos -= 4;
+            core::ptr::copy_nonoverlapping(lut4.add(hi4 * 4), dst.add(pos), 4);
         }
         upper
     };
 
-    // 32-bit tail. Process 4 digits per iteration.
+    // 32-bit tail. Process 4 digits per iteration via one 4-byte copy.
     while output32 >= 10_000 {
-        let c = output32 - 10_000 * (output32 / 10_000);
+        let c = (output32 - 10_000 * (output32 / 10_000)) as usize;
         output32 /= 10_000;
-        let c0 = ((c % 100) * 2) as usize;
-        let c1 = ((c / 100) * 2) as usize;
-        // SAFETY: digit count was precomputed; pos always reaches 0 cleanly.
+        // SAFETY: digit count was precomputed; pos decreases by 4 here
+        // and the LUT slot is inside the 40_000-byte table.
         unsafe {
-            pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(c0), dst.add(pos), 2);
-            pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(c1), dst.add(pos), 2);
+            pos -= 4;
+            core::ptr::copy_nonoverlapping(lut4.add(c * 4), dst.add(pos), 4);
         }
     }
+    // Tail: 1..=3 leading digits. The 2-digit LUT (200 bytes) handles
+    // 2-digit chunks; we keep the single-byte fallback for a lone digit.
     if output32 >= 100 {
         let c = ((output32 % 100) * 2) as usize;
         output32 /= 100;
         // SAFETY: see loop above.
         unsafe {
             pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(c), dst.add(pos), 2);
+            core::ptr::copy_nonoverlapping(lut2.add(c), dst.add(pos), 2);
         }
     }
     if output32 >= 10 {
@@ -528,7 +543,7 @@ unsafe fn write_digits_at_ptr(n: u64, dst: *mut u8, digits: usize) {
         // SAFETY: see loop above.
         unsafe {
             pos -= 2;
-            core::ptr::copy_nonoverlapping(lut.add(c), dst.add(pos), 2);
+            core::ptr::copy_nonoverlapping(lut2.add(c), dst.add(pos), 2);
         }
     } else {
         // SAFETY: see loop above.
