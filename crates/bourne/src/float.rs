@@ -601,10 +601,23 @@ pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> 
 /// the worst-case 32 bytes, writes through a raw pointer into the tail,
 /// then bumps the length — no intermediate stack buffer, no
 /// `extend_from_slice` memcpy of the rendered bytes.
+///
+/// Returns `true` for finite `f` (writing its decimal form), `false` for
+/// non-finite inputs (writing nothing). Folding the finiteness check in
+/// here lets the caller pass `f` once via `xmm0`; doing the check at the
+/// call site forced a store/reload roundtrip in the per-element loop
+/// (LLVM spilled `xmm0` because the bit-pattern test went through a GPR).
 #[cfg(feature = "alloc")]
 #[allow(unsafe_code)]
 #[inline]
-pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) {
+pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) -> bool {
+    // Cheap bit-pattern finiteness test: the exponent field is all-ones only
+    // for ±inf and NaN. The bits are also what `decompose` will load
+    // immediately below, so this check is essentially free.
+    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+    if f.to_bits() & EXP_MASK == EXP_MASK {
+        return false;
+    }
     out.reserve(FORMAT_BUF_LEN);
     // SAFETY:
     //   - `reserve` guarantees `out.capacity() - out.len() >= FORMAT_BUF_LEN`.
@@ -620,6 +633,7 @@ pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) {
         let written = format_finite_to_ptr(f, dst);
         out.set_len(len + written);
     }
+    true
 }
 
 // ===========================================================================

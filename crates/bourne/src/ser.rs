@@ -355,16 +355,15 @@ impl JsonWrite for ByteSink<'_> {
 
     #[inline]
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
-        // Cheap bit-pattern finiteness test: the exponent field is all-ones
-        // only for ±inf and NaN. Both libstd's `f64::is_finite` and `f64.abs`
-        // routed through the FP unit (a 6.5% standalone frame in pprof);
-        // this stays in the integer ALU using the bits we already loaded.
-        const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
-        if f.to_bits() & EXP_MASK == EXP_MASK {
-            return Err(Error::new(ErrorKind::NonFiniteFloat, Position::START));
+        // `format_finite_to_vec` returns false for non-finite inputs (after
+        // doing its own bit-pattern check); folding the check in there keeps
+        // `f` in `xmm0` across the call and avoids the spill/reload LLVM
+        // produced when the check sat at this call site.
+        if crate::float::format_finite_to_vec(f, self.out) {
+            Ok(())
+        } else {
+            Err(Error::new(ErrorKind::NonFiniteFloat, Position::START))
         }
-        crate::float::format_finite_to_vec(f, self.out);
-        Ok(())
     }
 }
 
