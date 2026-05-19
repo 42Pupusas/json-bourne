@@ -93,6 +93,8 @@ mod de;
 #[cfg(feature = "alloc")]
 mod float;
 mod ser;
+#[cfg(test)]
+mod teju_gen;
 
 pub use bourne_core::{
     Checkpoint, Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position, ValueKind,
