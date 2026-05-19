@@ -55,6 +55,41 @@ pub trait JsonWrite {
     /// (`{`, `}`, `[`, `]`, `,`, `:`, `"`).
     fn write_byte(&mut self, b: u8) -> Result<(), Self::Error>;
 
+    /// Append a single ASCII byte WITHOUT a per-write capacity check.
+    ///
+    /// # Safety
+    ///
+    /// The caller MUST have previously called [`Self::reserve_hint`] with
+    /// at least enough bytes to cover this write plus all subsequent
+    /// writes up to the next `reserve_hint` (or the end of writing).
+    /// Sinks that don't track a tail capacity (e.g. `fmt::Write`-backed)
+    /// fall back to the safe `write_byte`.
+    ///
+    /// Why this exists: under random `f64` inputs the per-element
+    /// capacity-check branch in `Vec::push` at the comma site mispredicts
+    /// at ~13% in `perf record -e branch-misses` — the single largest
+    /// mispredict source in the array hot loop. Hoisting the check via
+    /// `reserve_hint` and emitting the byte unchecked removes that
+    /// branch entirely from the inner loop.
+    ///
+    /// Default impl forwards to `write_byte` (safe but checked) so
+    /// non-`ByteSink` sinks aren't required to opt in.
+    ///
+    /// # Safety contract example (matches what `write_array` does)
+    /// ```ignore
+    /// w.reserve_hint(n * MAX + brackets_and_commas);
+    /// for _ in 0..count {
+    ///     // SAFETY: reserve_hint covered all of these.
+    ///     unsafe { w.write_byte_unchecked(b','); }
+    ///     w.write_int_u64(...);  // also covered by reserve_hint
+    /// }
+    /// ```
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn write_byte_unchecked(&mut self, b: u8) -> Result<(), Self::Error> {
+        self.write_byte(b)
+    }
+
     /// Append a `&str` verbatim. Caller is responsible for any escaping
     /// — this is the structural / pre-escaped path. For user string
     /// payloads, call [`Self::write_escaped_str`] instead.
@@ -129,6 +164,25 @@ pub trait JsonWrite {
     /// without fmt overhead override with a direct ryu call.
     #[cfg(feature = "alloc")]
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error>;
+
+    /// Write a finite `f64` ASSUMING the caller has reserved at least
+    /// `f64::MAX_SERIALIZED_LEN` (32) bytes of sink capacity. Skips the
+    /// per-call cap check in `Vec::extend_from_slice` — the second-largest
+    /// mispredict source after the comma `Vec::push`.
+    ///
+    /// Default impl forwards to `write_float_f64`. `ByteSink` overrides
+    /// with a raw-pointer write directly into the Vec's reserved tail.
+    ///
+    /// # Safety
+    /// `f64::MAX_SERIALIZED_LEN` (32) bytes of sink capacity must be
+    /// guaranteed available before this call. Used by `[f64]::
+    /// write_json_in_reserved` after `[T]::write_json`'s `reserve_hint`.
+    #[cfg(feature = "alloc")]
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn write_float_f64_unchecked(&mut self, f: f64) -> Result<(), Self::Error> {
+        self.write_float_f64(f)
+    }
 }
 
 /// Write one byte of a string body, applying JSON escape rules.
@@ -284,6 +338,29 @@ impl JsonWrite for ByteSink<'_> {
         Ok(())
     }
 
+    /// Branchless byte append. Skips `Vec::push`'s capacity check; relies
+    /// on the caller having reserved enough via `reserve_hint`.
+    ///
+    /// # Safety
+    /// `self.out.len() < self.out.capacity()` must hold. The caller's
+    /// `reserve_hint` is what makes this safe in `write_array` for
+    /// primitive slices.
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn write_byte_unchecked(&mut self, b: u8) -> Result<(), Self::Error> {
+        // SAFETY: caller-asserted len < capacity. Equivalent to
+        // `Vec::push` minus the cap check + grow path. Writing directly
+        // to the tail and bumping len keeps the per-call cost to two
+        // memory ops with no branches.
+        unsafe {
+            let len = self.out.len();
+            let ptr = self.out.as_mut_ptr().add(len);
+            core::ptr::write(ptr, b);
+            self.out.set_len(len + 1);
+        }
+        Ok(())
+    }
+
     #[inline]
     fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
         self.out.extend_from_slice(s.as_bytes());
@@ -365,6 +442,38 @@ impl JsonWrite for ByteSink<'_> {
             Err(Error::new(ErrorKind::NonFiniteFloat, Position::START))
         }
     }
+
+    /// SAFETY-relying override: caller must have reserved ≥ 32 bytes via
+    /// `reserve_hint`. Skips `Vec::extend_from_slice`'s per-call cap
+    /// check that the per-element float loop otherwise pays.
+    ///
+    /// The non-finite arm is outlined via `#[cold]` so the branch
+    /// predictor gets a strong static hint that the error path is rare.
+    /// On `perf record -e branch-misses` the inlined `Err::new(...)`
+    /// path inflated the finiteness `jg`'s mispredict rate; outlining
+    /// it pushed the cold-arm PCs out of the hot loop's history.
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn write_float_f64_unchecked(&mut self, f: f64) -> Result<(), Self::Error> {
+        // SAFETY: caller-guaranteed capacity (≥ 32) is exactly what
+        // `format_finite_to_vec_unchecked` requires.
+        if unsafe { crate::float::format_finite_to_vec_unchecked(f, self.out) } {
+            Ok(())
+        } else {
+            cold_nonfinite_byte_sink()
+        }
+    }
+}
+
+/// Outlined non-finite error path for `ByteSink`. `#[cold]` biases the
+/// branch predictor's static hint toward not-taken (the always-correct
+/// guess for well-formed input) and keeps the error-construction code
+/// out of the hot icache footprint.
+#[cfg(feature = "alloc")]
+#[cold]
+#[inline(never)]
+const fn cold_nonfinite_byte_sink() -> Result<(), Error> {
+    Err(Error::new(ErrorKind::NonFiniteFloat, Position::START))
 }
 
 // ---------------------------------------------------------------------------
@@ -675,6 +784,27 @@ pub trait ToJson {
 
     /// Serialize `self` into `w`.
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error>;
+
+    /// Serialize `self` into `w` ASSUMING the caller has already reserved
+    /// at least `MAX_SERIALIZED_LEN` writable bytes in the sink. Used by
+    /// [`[T]::write_json`] after its `reserve_hint` call so the per-element
+    /// path skips its own cap checks.
+    ///
+    /// Default impl forwards to `write_json` (safe + checked). Primitives
+    /// override with sink-specific unchecked variants. For `MAX_SERIALIZED_LEN
+    /// == 0` types this method is never called.
+    ///
+    /// # Safety
+    /// `Self::MAX_SERIALIZED_LEN` bytes of sink capacity must be guaranteed
+    /// available before this call.
+    #[inline]
+    #[allow(unsafe_code)]
+    unsafe fn write_json_in_reserved<W: JsonWrite + ?Sized>(
+        &self,
+        w: &mut W,
+    ) -> Result<(), W::Error> {
+        self.write_json(w)
+    }
 }
 
 /// Serialize `value` into a fresh `String`.
@@ -1214,22 +1344,67 @@ fn write_array<T: ToJson, I: IntoIterator<Item = T>, W: JsonWrite + ?Sized>(
     w.write_byte(b']')
 }
 
+/// Like `write_array`, but emits the brackets and commas via
+/// `write_byte_unchecked`. Callable only after `reserve_hint` has been
+/// invoked with at least `2 + len + len * MAX_SERIALIZED_LEN` bytes.
+///
+/// Why this exists: `perf record -e branch-misses` on the n=10000
+/// float-array workload identified the comma capacity-check branch
+/// (`cmp len, cap; jne grow`) as the single largest mispredict source —
+/// 12.96% of all mispredicts in `to_string`. Hoisting the capacity check
+/// via `reserve_hint` and emitting the comma unchecked removes that
+/// branch from the inner loop entirely.
+///
+/// # Safety
+/// Caller must have reserved enough sink capacity to cover `2 + len +
+/// per_elem_max * len` bytes after the call to `reserve_hint`.
+#[allow(unsafe_code)]
+unsafe fn write_array_reserved<T: ToJson, W: JsonWrite + ?Sized>(
+    slice: &[T],
+    w: &mut W,
+) -> Result<(), W::Error> {
+    // SAFETY: brackets fit in the reserved space (we accounted for 2
+    // bracket bytes in the hint). Per-element writes also fit because
+    // each is bounded by `MAX_SERIALIZED_LEN + 1` (the +1 covers the
+    // comma).
+    unsafe {
+        w.write_byte_unchecked(b'[')?;
+    }
+    if let Some((first, rest)) = slice.split_first() {
+        // SAFETY: `MAX_SERIALIZED_LEN` was included in the caller's
+        // `reserve_hint`, so each element write fits in the reserved
+        // tail.
+        unsafe { first.write_json_in_reserved(w) }?;
+        for v in rest {
+            // SAFETY: see function-level safety contract.
+            unsafe { w.write_byte_unchecked(b',') }?;
+            unsafe { v.write_json_in_reserved(w) }?;
+        }
+    }
+    // SAFETY: same as the opening bracket.
+    unsafe { w.write_byte_unchecked(b']') }
+}
+
 impl<T: ToJson> ToJson for [T] {
     const MIN_SERIALIZED_LEN: usize = 2; // "[]"
     #[inline]
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
-        // Pre-reserve when the element type has a known upper bound, so the
-        // per-element `reserve` inside `format_finite_to_vec` /
-        // `format_u64_direct` becomes a no-op the branch predictor learns
-        // on the first iteration.
+        // Pre-reserve when the element type has a known upper bound. The
+        // hint covers brackets (`[`, `]`), commas (1 per element), and
+        // the per-element max payload. After this, *every* byte the
+        // primitive path writes fits in the reserved tail.
         if T::MAX_SERIALIZED_LEN != 0 {
-            // bytes_for_elements + commas + brackets, saturating to avoid
-            // overflow on absurd slice sizes.
             let hint = self
                 .len()
                 .saturating_mul(T::MAX_SERIALIZED_LEN.saturating_add(1))
                 .saturating_add(2);
             w.reserve_hint(hint);
+            // SAFETY: hint above covers brackets + per-element max +
+            // commas. The sink's `write_byte_unchecked` skips the
+            // capacity check, eliminating the mispredict-heavy
+            // `Vec::push` cap branch.
+            #[allow(unsafe_code)]
+            return unsafe { write_array_reserved(self, w) };
         }
         write_array(self.iter(), w)
     }
@@ -1311,6 +1486,17 @@ mod alloc_impls {
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(*self)
         }
+        /// SAFETY: caller (`write_array_reserved`) has reserved
+        /// `MAX_SERIALIZED_LEN` bytes via `reserve_hint`.
+        #[inline]
+        #[allow(unsafe_code)]
+        unsafe fn write_json_in_reserved<W: JsonWrite + ?Sized>(
+            &self,
+            w: &mut W,
+        ) -> Result<(), W::Error> {
+            // SAFETY: forwarded to the sink's unchecked path.
+            unsafe { w.write_float_f64_unchecked(*self) }
+        }
     }
 
     /// `f32` widens losslessly to `f64` for serialization. The decoded
@@ -1321,6 +1507,16 @@ mod alloc_impls {
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_float_f64(f64::from(*self))
+        }
+        /// SAFETY: see `f64::write_json_in_reserved`.
+        #[inline]
+        #[allow(unsafe_code)]
+        unsafe fn write_json_in_reserved<W: JsonWrite + ?Sized>(
+            &self,
+            w: &mut W,
+        ) -> Result<(), W::Error> {
+            // SAFETY: forwarded to the sink's unchecked path.
+            unsafe { w.write_float_f64_unchecked(f64::from(*self)) }
         }
     }
 
