@@ -342,9 +342,7 @@ impl JsonWrite for ByteSink<'_> {
         if !f.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, Position::START));
         }
-        let mut scratch = String::with_capacity(24);
-        crate::float::format_finite(f, &mut scratch);
-        self.out.extend_from_slice(scratch.as_bytes());
+        crate::float::format_finite_to_vec(f, self.out);
         Ok(())
     }
 }

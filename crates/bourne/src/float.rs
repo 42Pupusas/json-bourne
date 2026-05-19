@@ -27,7 +27,7 @@
 extern crate alloc;
 
 use alloc::string::String;
-use core::fmt::{self, Write as _};
+use core::fmt;
 
 // ===========================================================================
 // IEEE 754 constants and decomposition.
@@ -44,6 +44,7 @@ struct BinaryF64 {
     mantissa: u64,
 }
 
+#[inline]
 fn decompose(value: f64) -> BinaryF64 {
     debug_assert!(value.is_finite() && value > 0.0);
     let bits = value.to_bits();
@@ -127,6 +128,7 @@ struct DecimalF64 {
     mantissa: u64,
 }
 
+#[inline]
 fn remove_trailing_zeros(mut m: u64, mut e: i32) -> DecimalF64 {
     let minv5: u64 = 0u64.wrapping_sub(u64::MAX / 5);
     let bound: u64 = u64::MAX / 10 + 1;
@@ -162,6 +164,7 @@ fn to_decimal_small_integer(e: i32, m: u64) -> DecimalF64 {
     remove_trailing_zeros(m >> (-e) as u32, 0)
 }
 
+#[inline]
 fn to_decimal_centred(e: i32, m: u64) -> DecimalF64 {
     debug_assert!(is_centred(e, m));
 
@@ -269,6 +272,7 @@ fn is_tie_uncentred(f: i32, m: u64) -> bool {
     m % 5 == 0 && can_test_pow5(f) && is_multiple_of_pow5(f, m)
 }
 
+#[inline]
 fn teju(value: f64) -> DecimalF64 {
     let b = decompose(value);
     let e = b.exponent;
@@ -285,34 +289,17 @@ fn teju(value: f64) -> DecimalF64 {
 
 // ===========================================================================
 // Decimal-to-string formatting.
+//
+// Output is written forward into a 32-byte stack buffer (worst case for an
+// f64 in scientific or fixed form is ≤ 25 bytes). Single `extend_from_slice`
+// hands the result to the caller; no `String` reallocation, no `copy_within`
+// shift, no `fmt::Display` route for the exponent.
 // ===========================================================================
 
-fn render_mantissa(mut n: u64, buf: &mut [u8; 20]) -> usize {
-    if n == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-    let mut pos = 20usize;
-    while n >= 100 {
-        let r = (n % 100) as usize;
-        n /= 100;
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[r * 2];
-        buf[pos + 1] = DIGIT_LUT[r * 2 + 1];
-    }
-    if n >= 10 {
-        let r = n as usize;
-        pos -= 2;
-        buf[pos] = DIGIT_LUT[r * 2];
-        buf[pos + 1] = DIGIT_LUT[r * 2 + 1];
-    } else {
-        pos -= 1;
-        buf[pos] = b'0' + n as u8;
-    }
-    let len = 20 - pos;
-    buf.copy_within(pos..20, 0);
-    len
-}
+/// Worst-case byte length for any finite `f64` printed by `format_finite_to_buf`.
+/// 25 bytes covers: sign + 17 significant digits + decimal point + `e` + sign
+/// + 3-digit exponent. Round up to 32 for a power-of-two stack buffer.
+pub(crate) const FORMAT_BUF_LEN: usize = 32;
 
 const DIGIT_LUT: &[u8; 200] = b"\
 0001020304050607080910111213141516171819\
@@ -321,47 +308,249 @@ const DIGIT_LUT: &[u8; 200] = b"\
 6061626364656667686970717273747576777879\
 8081828384858687888990919293949596979899";
 
-fn write_decimal(d: &DecimalF64, negative: bool, out: &mut String) {
-    let mut buf = [0u8; 20];
-    let len = render_mantissa(d.mantissa, &mut buf);
-    #[allow(unsafe_code)]
-    let digits: &str = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+/// Digit count for any post-teju mantissa (≤ 17 digits — that's what
+/// shortest-roundtrip guarantees). Branch chain ordered high-to-low: most
+/// mantissas have 15–17 digits, so the predictor lands on the right branch
+/// fast. Avoids the 1 KB lzcnt table that was 41% of the profile.
+#[inline]
+fn mantissa_digit_count(n: u64) -> usize {
+    debug_assert!(n < 100_000_000_000_000_000); // < 10^17
+    if n >= 10_000_000_000_000_000 { 17 }
+    else if n >= 1_000_000_000_000_000 { 16 }
+    else if n >= 100_000_000_000_000 { 15 }
+    else if n >= 10_000_000_000_000 { 14 }
+    else if n >= 1_000_000_000_000 { 13 }
+    else if n >= 100_000_000_000 { 12 }
+    else if n >= 10_000_000_000 { 11 }
+    else if n >= 1_000_000_000 { 10 }
+    else if n >= 100_000_000 { 9 }
+    else if n >= 10_000_000 { 8 }
+    else if n >= 1_000_000 { 7 }
+    else if n >= 100_000 { 6 }
+    else if n >= 10_000 { 5 }
+    else if n >= 1_000 { 4 }
+    else if n >= 100 { 3 }
+    else if n >= 10 { 2 }
+    else { 1 }
+}
 
-    if negative {
-        out.push('-');
-    }
-    let point = len as i32 + d.exponent;
-    if (-6..=21).contains(&point) {
-        if point <= 0 {
-            out.push_str("0.");
-            push_zeros(out, -point as usize);
-            out.push_str(digits);
-        } else if (point as usize) >= digits.len() {
-            out.push_str(digits);
-            push_zeros(out, point as usize - digits.len());
-            out.push_str(".0");
-        } else {
-            let p = point as usize;
-            out.push_str(&digits[..p]);
-            out.push('.');
-            out.push_str(&digits[p..]);
-        }
+/// Write `n`'s digits into `buf[end-digits..end]`.
+///
+/// Algorithm (transcribed from ryu):
+///   1. If `n` has more than 32 bits, peel off the bottom 8 decimal digits
+///      with a single 64-bit divmod and process them as a `u32`. Any remaining
+///      bits also fit in `u32`. This costs one expensive 64-bit divide
+///      instead of one per pair of digits.
+///   2. For the 32-bit portion, process 4 decimal digits per loop iteration
+///      via two 2-digit LUT lookups, then handle the leading 1-3 digits.
+///
+/// Why 32-bit math matters: `u64 / 100` is ~20 cycles on x86, `u32 / 100`
+/// is ~5 cycles. The old `while n >= 100 { n /= 100; ... }` loop was paying
+/// the 64-bit divide cost every iteration even for the lower digits.
+///
+/// `pos` ends at `end - digits` — caller wrote those bytes to a known offset.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+fn write_digits_at(n: u64, buf: &mut [u8], digits: usize, end: usize) {
+    debug_assert!(end <= buf.len() && digits <= end);
+    debug_assert_eq!(mantissa_digit_count(n), digits);
+
+    let mut pos = end;
+
+    // Split a >32-bit value into (upper, lower 8 digits) with one
+    // expensive 64-bit divide. Both halves then fit in u32.
+    let mut output32 = if n >> 32 == 0 {
+        n as u32
     } else {
-        out.push_str(&digits[..1]);
-        if len > 1 {
-            out.push('.');
-            out.push_str(&digits[1..]);
-        }
-        out.push('e');
-        let exp = point - 1;
-        let _ = write!(out, "{exp}");
+        let low = (n - 100_000_000 * (n / 100_000_000)) as u32;
+        let upper = (n / 100_000_000) as u32;
+
+        // Write the bottom 8 digits as two 4-digit chunks.
+        let c = low % 10_000;
+        let d = low / 10_000;
+        let c0 = ((c % 100) * 2) as usize;
+        let c1 = ((c / 100) * 2) as usize;
+        let d0 = ((d % 100) * 2) as usize;
+        let d1 = ((d / 100) * 2) as usize;
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[c0];
+        buf[pos + 1] = DIGIT_LUT[c0 + 1];
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[c1];
+        buf[pos + 1] = DIGIT_LUT[c1 + 1];
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[d0];
+        buf[pos + 1] = DIGIT_LUT[d0 + 1];
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[d1];
+        buf[pos + 1] = DIGIT_LUT[d1 + 1];
+        upper
+    };
+
+    // 32-bit tail. Process 4 digits per iteration.
+    while output32 >= 10_000 {
+        let c = output32 - 10_000 * (output32 / 10_000);
+        output32 /= 10_000;
+        let c0 = ((c % 100) * 2) as usize;
+        let c1 = ((c / 100) * 2) as usize;
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[c0];
+        buf[pos + 1] = DIGIT_LUT[c0 + 1];
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[c1];
+        buf[pos + 1] = DIGIT_LUT[c1 + 1];
+    }
+    if output32 >= 100 {
+        let c = ((output32 % 100) * 2) as usize;
+        output32 /= 100;
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[c];
+        buf[pos + 1] = DIGIT_LUT[c + 1];
+    }
+    if output32 >= 10 {
+        let c = (output32 * 2) as usize;
+        pos -= 2;
+        buf[pos] = DIGIT_LUT[c];
+        buf[pos + 1] = DIGIT_LUT[c + 1];
+    } else {
+        pos -= 1;
+        buf[pos] = b'0' + output32 as u8;
+    }
+    debug_assert_eq!(pos, end - digits);
+}
+
+/// Fill `buf[pos..pos+n]` with ASCII `'0'`. `n` is bounded by 22 in practice
+/// (point ∈ [-6, 21]).
+#[inline]
+fn write_zeros(buf: &mut [u8], pos: usize, n: usize) {
+    debug_assert!(pos + n <= buf.len());
+    for b in &mut buf[pos..pos + n] {
+        *b = b'0';
     }
 }
 
-fn push_zeros(out: &mut String, n: usize) {
-    const ZEROS: &str = "00000000000000000000000";
-    debug_assert!(n <= ZEROS.len());
-    out.push_str(&ZEROS[..n]);
+/// Write a small i32 exponent in the range [-324, 308] into `buf[pos..]`,
+/// returning the number of bytes written. Replaces a `write!(out, "{exp}")`
+/// call that went through `fmt::Display`.
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn write_exponent(buf: &mut [u8], pos: usize, exp: i32) -> usize {
+    let (mag, sign_bytes) = if exp < 0 {
+        ((-exp) as u32, 1)
+    } else {
+        (exp as u32, 0)
+    };
+    if sign_bytes == 1 {
+        buf[pos] = b'-';
+    }
+    let start = pos + sign_bytes;
+    if mag >= 100 {
+        let hundreds = mag / 100;
+        let rem = ((mag % 100) * 2) as usize;
+        buf[start] = b'0' + hundreds as u8;
+        buf[start + 1] = DIGIT_LUT[rem];
+        buf[start + 2] = DIGIT_LUT[rem + 1];
+        sign_bytes + 3
+    } else if mag >= 10 {
+        let r = (mag * 2) as usize;
+        buf[start] = DIGIT_LUT[r];
+        buf[start + 1] = DIGIT_LUT[r + 1];
+        sign_bytes + 2
+    } else {
+        buf[start] = b'0' + mag as u8;
+        sign_bytes + 1
+    }
+}
+
+/// Core formatter: write `value`'s shortest-roundtrip decimal into `buf`,
+/// returning the byte length. `buf` must hold at least `FORMAT_BUF_LEN` (32)
+/// bytes. The output is ASCII.
+///
+/// Handles zero and sign internally so callers can stay dest-agnostic.
+pub(crate) fn format_finite_to_buf(value: f64, buf: &mut [u8; FORMAT_BUF_LEN]) -> usize {
+    if value == 0.0 {
+        if value.is_sign_negative() {
+            buf[..4].copy_from_slice(b"-0.0");
+            return 4;
+        }
+        buf[..3].copy_from_slice(b"0.0");
+        return 3;
+    }
+
+    let negative = value.is_sign_negative();
+    let d = teju(value.abs());
+    let digits_count = mantissa_digit_count(d.mantissa);
+    let mut pos = if negative {
+        buf[0] = b'-';
+        1usize
+    } else {
+        0
+    };
+
+    // `point` is the position of the decimal point relative to the leading
+    // digit: `point == 1` means "1.xxxx", `point == 0` means "0.dxxx",
+    // `point == digits_count` means "ddddd.0". Same convention as the
+    // previous Grisu3-era implementation.
+    let point = digits_count as i32 + d.exponent;
+
+    if (-6..=21).contains(&point) {
+        // Fixed-point form.
+        if point <= 0 {
+            // "0." + (−point) zeros + digits
+            let zeros = (-point) as usize;
+            buf[pos] = b'0';
+            buf[pos + 1] = b'.';
+            pos += 2;
+            write_zeros(buf, pos, zeros);
+            pos += zeros;
+            write_digits_at(d.mantissa, buf, digits_count, pos + digits_count);
+            pos + digits_count
+        } else if (point as usize) >= digits_count {
+            // digits + (point − digits_count) zeros + ".0"
+            let trail_zeros = point as usize - digits_count;
+            write_digits_at(d.mantissa, buf, digits_count, pos + digits_count);
+            pos += digits_count;
+            write_zeros(buf, pos, trail_zeros);
+            pos += trail_zeros;
+            buf[pos] = b'.';
+            buf[pos + 1] = b'0';
+            pos + 2
+        } else {
+            // digits[..p] + '.' + digits[p..]
+            let p = point as usize;
+            // Render all digits at offsets [pos+1 .. pos+1+digits_count],
+            // then shift the leading `p` digits down by one to insert '.'.
+            write_digits_at(d.mantissa, buf, digits_count, pos + digits_count + 1);
+            // After render, buf[pos+1 .. pos+1+digits_count] holds digits.
+            // We want buf[pos .. pos+p] = leading p digits, buf[pos+p] = '.',
+            // buf[pos+p+1 .. pos+p+1+(digits_count-p)] = trailing digits.
+            // The trailing digits already sit at the right place
+            // (buf[pos+p+1 .. pos+1+digits_count]). Shift the leading p
+            // digits left by one and drop '.' into the freed slot.
+            buf.copy_within(pos + 1..pos + 1 + p, pos);
+            buf[pos + p] = b'.';
+            pos + digits_count + 1
+        }
+    } else {
+        // Scientific form: "d.dddde±N".
+        // Render digits into buf[pos+1 .. pos+1+digits_count], then drop
+        // the first digit down to buf[pos] and overwrite buf[pos+1] with '.'.
+        // If there's only one digit, omit the '.'.
+        write_digits_at(d.mantissa, buf, digits_count, pos + 1 + digits_count);
+        let lead = buf[pos + 1];
+        buf[pos] = lead;
+        if digits_count > 1 {
+            buf[pos + 1] = b'.';
+            pos += 1 + digits_count;
+        } else {
+            pos += 1;
+        }
+        buf[pos] = b'e';
+        pos += 1;
+        let exp = point - 1;
+        pos += write_exponent(buf, pos, exp);
+        pos
+    }
 }
 
 // ===========================================================================
@@ -369,28 +558,30 @@ fn push_zeros(out: &mut String, n: usize) {
 // ===========================================================================
 
 pub(crate) fn format_finite(f: f64, out: &mut String) {
-    if f == 0.0 {
-        if f.is_sign_negative() {
-            out.push_str("-0.0");
-        } else {
-            out.push_str("0.0");
-        }
-        return;
-    }
-    let negative = f.is_sign_negative();
-    let d = teju(f.abs());
-    write_decimal(&d, negative, out);
+    let mut buf = [0u8; FORMAT_BUF_LEN];
+    let len = format_finite_to_buf(f, &mut buf);
+    #[allow(unsafe_code)]
+    // SAFETY: format_finite_to_buf only writes ASCII (digits, '.', 'e',
+    // '-', '+'), so buf[..len] is valid UTF-8.
+    out.push_str(unsafe { core::str::from_utf8_unchecked(&buf[..len]) });
 }
 
 pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> fmt::Result {
-    if f == 0.0 {
-        return out.write_str(if f.is_sign_negative() { "-0.0" } else { "0.0" });
-    }
-    let negative = f.is_sign_negative();
-    let d = teju(f.abs());
-    let mut buf = String::with_capacity(32);
-    write_decimal(&d, negative, &mut buf);
-    out.write_str(&buf)
+    let mut buf = [0u8; FORMAT_BUF_LEN];
+    let len = format_finite_to_buf(f, &mut buf);
+    #[allow(unsafe_code)]
+    // SAFETY: see format_finite.
+    out.write_str(unsafe { core::str::from_utf8_unchecked(&buf[..len]) })
+}
+
+/// Direct-to-`Vec<u8>` path used by `ByteSink::write_float_f64`. Avoids the
+/// per-call `String::with_capacity(24)` allocation the old `format_finite`
+/// wrapper paid.
+#[cfg(feature = "alloc")]
+pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) {
+    let mut buf = [0u8; FORMAT_BUF_LEN];
+    let len = format_finite_to_buf(f, &mut buf);
+    out.extend_from_slice(&buf[..len]);
 }
 
 // ===========================================================================
