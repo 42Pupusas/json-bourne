@@ -612,42 +612,37 @@ pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> 
     out.write_str(unsafe { core::str::from_utf8_unchecked(&buf[..len]) })
 }
 
-/// Direct-to-`Vec<u8>` path used by `ByteSink::write_float_f64`. Reserves
-/// the worst-case 32 bytes, writes through a raw pointer into the tail,
-/// then bumps the length — no intermediate stack buffer, no
-/// `extend_from_slice` memcpy of the rendered bytes.
+/// `Vec<u8>` path used by `ByteSink::write_float_f64`. Renders to a 32-byte
+/// stack buffer, then `extend_from_slice`s into the output Vec.
+///
+/// Why the scratch buffer (vs writing the bytes straight into `out`'s tail):
+/// `format_finite_to_ptr` emits scattered byte writes (the integer prefix,
+/// the `'.'` byte, the trailing digits) at different offsets within the
+/// output. Routing them through `dst.add(...).write(b)` on the output Vec's
+/// tail interleaves stores into pages that may be cold (large outputs
+/// exceed L1). The same stores into a 32-byte stack buffer hit a single
+/// cache line every iteration, then a single `extend_from_slice` lets the
+/// optimized memcpy stream the result into the output Vec contiguously.
+/// This is exactly what `zmij` (serde_json's float formatter) does, and
+/// it's what keeps its per-element cost flat as output grows past L1.
 ///
 /// Returns `true` for finite `f` (writing its decimal form), `false` for
 /// non-finite inputs (writing nothing). Folding the finiteness check in
-/// here lets the caller pass `f` once via `xmm0`; doing the check at the
-/// call site forced a store/reload roundtrip in the per-element loop
-/// (LLVM spilled `xmm0` because the bit-pattern test went through a GPR).
+/// here keeps `f` live in `xmm0` across the call.
 #[cfg(feature = "alloc")]
 #[allow(unsafe_code)]
 #[inline]
 pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) -> bool {
     // Cheap bit-pattern finiteness test: the exponent field is all-ones only
-    // for ±inf and NaN. The bits are also what `decompose` will load
-    // immediately below, so this check is essentially free.
+    // for ±inf and NaN.
     const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
     if f.to_bits() & EXP_MASK == EXP_MASK {
         return false;
     }
-    out.reserve(FORMAT_BUF_LEN);
-    // SAFETY:
-    //   - `reserve` guarantees `out.capacity() - out.len() >= FORMAT_BUF_LEN`.
-    //   - `out.as_mut_ptr().add(out.len())` is a valid writable address for
-    //     `FORMAT_BUF_LEN` bytes (the reserved tail of the Vec).
-    //   - `format_finite_to_ptr` returns the number of bytes it wrote,
-    //     bounded by `FORMAT_BUF_LEN`.
-    //   - All written bytes are ASCII (digits, '.', 'e', '-'), so the new
-    //     length is still a valid `Vec<u8>`.
-    unsafe {
-        let len = out.len();
-        let dst = out.as_mut_ptr().add(len);
-        let written = format_finite_to_ptr(f, dst);
-        out.set_len(len + written);
-    }
+    let mut buf = [0u8; FORMAT_BUF_LEN];
+    // SAFETY: `buf` is FORMAT_BUF_LEN = 32 bytes, the documented worst case.
+    let len = unsafe { format_finite_to_ptr(f, buf.as_mut_ptr()) };
+    out.extend_from_slice(&buf[..len]);
     true
 }
 
