@@ -308,99 +308,52 @@ const DIGIT_LUT: &[u8; 200] = b"\
 6061626364656667686970717273747576777879\
 8081828384858687888990919293949596979899";
 
-// QUAD_LUT removed: the previous variable-length writer used a
-// 40 KB 4-digit table for one 4-byte store per chunk. The new
-// `render_mantissa_17` uses BCD8 arithmetic (no LUT) for an 8-byte
-// store per chunk, halving the store count and freeing 40 KB of cold
-// L1 footprint that competed with the output buffer at large N.
-
-/// Branchless digit-count lookup indexed by `leading_zeros(n | 1)`.
+/// Four-digit ASCII LUT: for each `n` in `0..10_000`, `QUAD_LUT[n*4..n*4+4]`
+/// holds the four ASCII digits of `n` (with leading zeros). Lets the digit
+/// writer emit four characters per iteration with one 4-byte store instead
+/// of two 2-byte LUT lookups + stores.
 ///
-/// Each entry is `(threshold, candidate_digits)`. The true digit count
-/// is `candidate_digits + usize::from(n > threshold)`. Entries for
-/// lzcnt < 7 are unreachable in our domain (mantissa < 10^17 ⇒
-/// lzcnt ≥ 7) but populated for completeness.
-static DIGIT_COUNT_TABLE: [(u64, u8); 64] = [
-    (9_999_999_999_999_999_999, 19),
-    (9_223_372_036_854_775_807, 19),
-    (4_611_686_018_427_387_903, 19),
-    (2_305_843_009_213_693_951, 19),
-    (  999_999_999_999_999_999, 18),
-    (  576_460_752_303_423_487, 18),
-    (  288_230_376_151_711_743, 18),
-    (   99_999_999_999_999_999, 17),
-    (   72_057_594_037_927_935, 17),
-    (   36_028_797_018_963_967, 17),
-    (    9_999_999_999_999_999, 16),
-    (    9_007_199_254_740_991, 16),
-    (    4_503_599_627_370_495, 16),
-    (    2_251_799_813_685_247, 16),
-    (      999_999_999_999_999, 15),
-    (      562_949_953_421_311, 15),
-    (      281_474_976_710_655, 15),
-    (       99_999_999_999_999, 14),
-    (       70_368_744_177_663, 14),
-    (       35_184_372_088_831, 14),
-    (        9_999_999_999_999, 13),
-    (        8_796_093_022_207, 13),
-    (        4_398_046_511_103, 13),
-    (        2_199_023_255_551, 13),
-    (          999_999_999_999, 12),
-    (          549_755_813_887, 12),
-    (          274_877_906_943, 12),
-    (           99_999_999_999, 11),
-    (           68_719_476_735, 11),
-    (           34_359_738_367, 11),
-    (            9_999_999_999, 10),
-    (            8_589_934_591, 10),
-    (            4_294_967_295, 10),
-    (            2_147_483_647, 10),
-    (              999_999_999,  9),
-    (              536_870_911,  9),
-    (              268_435_455,  9),
-    (               99_999_999,  8),
-    (               67_108_863,  8),
-    (               33_554_431,  8),
-    (                9_999_999,  7),
-    (                8_388_607,  7),
-    (                4_194_303,  7),
-    (                2_097_151,  7),
-    (                  999_999,  6),
-    (                  524_287,  6),
-    (                  262_143,  6),
-    (                   99_999,  5),
-    (                   65_535,  5),
-    (                   32_767,  5),
-    (                    9_999,  4),
-    (                    8_191,  4),
-    (                    4_095,  4),
-    (                    2_047,  4),
-    (                      999,  3),
-    (                      511,  3),
-    (                      255,  3),
-    (                       99,  2),
-    (                       63,  2),
-    (                       31,  2),
-    (                        9,  1),
-    (                        7,  1),
-    (                        3,  1),
-    (                        1,  1),
-];
+/// 40 KB in `.rodata`, generated at compile time. Indexed by `(u32) % 10_000`,
+/// so the access pattern is bounded and cache-friendly when the same
+/// magnitude is processed repeatedly (typical for float-heavy serialization).
+static QUAD_LUT: [u8; 40_000] = {
+    let mut buf = [0u8; 40_000];
+    let mut n: u32 = 0;
+    while n < 10_000 {
+        let off = (n * 4) as usize;
+        buf[off]     = b'0' + (n / 1000)         as u8;
+        buf[off + 1] = b'0' + ((n / 100) % 10)   as u8;
+        buf[off + 2] = b'0' + ((n / 10) % 10)    as u8;
+        buf[off + 3] = b'0' + (n % 10)           as u8;
+        n += 1;
+    }
+    buf
+};
 
-/// Digit count for any post-teju mantissa (≤ 17 digits). Branchless:
-/// `lzcnt(n | 1)` → table lookup → one final compare.
-///
-/// Why branchless: with random `f64` inputs the digit count is essentially
-/// random in `[15, 17]`. The previous if-chain ate ~15 cycles of
-/// mispredict penalty per element because the predictor cannot lock onto
-/// a pattern across thousands of varied inputs. The lzcnt+table form is
-/// data-independent.
+/// Digit count for any post-teju mantissa (≤ 17 digits — that's what
+/// shortest-roundtrip guarantees). Branch chain ordered high-to-low: most
+/// mantissas have 15–17 digits, so the predictor lands on the right branch
+/// fast. Avoids the 1 KB lzcnt table that was 41% of the profile.
 #[inline]
 fn mantissa_digit_count(n: u64) -> usize {
     debug_assert!(n < 100_000_000_000_000_000); // < 10^17
-    let lz = (n | 1).leading_zeros() as usize;
-    let (threshold, candidate) = DIGIT_COUNT_TABLE[lz];
-    candidate as usize + usize::from(n > threshold)
+    if n >= 10_000_000_000_000_000 { 17 }
+    else if n >= 1_000_000_000_000_000 { 16 }
+    else if n >= 100_000_000_000_000 { 15 }
+    else if n >= 10_000_000_000_000 { 14 }
+    else if n >= 1_000_000_000_000 { 13 }
+    else if n >= 100_000_000_000 { 12 }
+    else if n >= 10_000_000_000 { 11 }
+    else if n >= 1_000_000_000 { 10 }
+    else if n >= 100_000_000 { 9 }
+    else if n >= 10_000_000 { 8 }
+    else if n >= 1_000_000 { 7 }
+    else if n >= 100_000 { 6 }
+    else if n >= 10_000 { 5 }
+    else if n >= 1_000 { 4 }
+    else if n >= 100 { 3 }
+    else if n >= 10 { 2 }
+    else { 1 }
 }
 
 /// Core formatter: write `value`'s shortest-roundtrip decimal into `buf`,
@@ -426,171 +379,84 @@ pub(crate) fn format_finite_to_buf(value: f64, buf: &mut [u8; FORMAT_BUF_LEN]) -
 /// bounds checks); the slice-and-debug-assert version is `format_finite_to_buf`.
 #[allow(unsafe_code)]
 pub(crate) unsafe fn format_finite_to_ptr(value: f64, dst: *mut u8) -> usize {
-    // ── 1. Sign + zero shortcut. ──────────────────────────────────────────
-    //
-    // The `value == 0.0` short-circuit is rare in practice (random `f64`
-    // workloads almost never produce exact zero), but cheap. The sign
-    // branch below is genuinely 50/50 — handled via a cmov-style write.
     if value == 0.0 {
         let (src, len) = if value.is_sign_negative() {
             (b"-0.0".as_ptr(), 4)
         } else {
             (b"0.0".as_ptr(), 3)
         };
-        // SAFETY: caller guarantees ≥ 32 writable bytes; len ≤ 4.
+        // SAFETY: caller guarantees at least 32 writable bytes.
         unsafe { core::ptr::copy_nonoverlapping(src, dst, len) };
         return len;
     }
 
-    // Sign: always write '-' to dst[0]; advance the write cursor by 1 only
-    // when the sign bit is set. The write is unconditional (the byte either
-    // becomes the visible '-' or gets overwritten by the next field), so
-    // there's no data-dependent branch for the predictor.
     let negative = value.is_sign_negative();
-    // SAFETY: dst has ≥ 32 writable bytes; this writes byte 0.
-    unsafe { dst.write(b'-') };
-    let pos = usize::from(negative);
-
     let d = teju(value.abs());
-
-    // ── 2. Render the mantissa once as a fixed-shape 17-byte ASCII block. ─
-    //
-    // `render_mantissa_17` always emits exactly 17 bytes (1 leading digit
-    // + two 8-digit BCD8 chunks) plus a returned `leading_zeros` count
-    // for the post-render strip. The function has the SAME instruction
-    // sequence regardless of the mantissa value — no branches scale with
-    // digit count.
-    //
-    // We render into a 24-byte scratch slot inside `dst[pos + 1 ..]`,
-    // then copy out into the final layout below. The scratch overlap is
-    // safe because all copies below use `ptr::copy` (handles overlap).
-    let mut scratch = [core::mem::MaybeUninit::<u8>::uninit(); 24];
-    let scratch_ptr = scratch.as_mut_ptr().cast::<u8>();
-    // SAFETY: scratch is 24 ≥ 17 bytes; `render_mantissa_17` writes
-    // exactly 17 bytes to offsets [0..17].
-    let leading_zeros = unsafe { render_mantissa_17(d.mantissa, scratch_ptr) };
-    let digits_count = 17 - leading_zeros;
-
-    // Pointer to the first *significant* digit inside the scratch.
-    // SAFETY: leading_zeros ≤ 16 (the leading byte of the 17-byte render
-    // is always ≥ '1' when the mantissa is non-zero, because teju guarantees
-    // `d.mantissa >= 1`... actually it can produce mantissa < 10^16 so the
-    // leading byte CAN be '0'. The render strips leading zeros via
-    // `leading_zeros`).
-    // SAFETY: scratch[leading_zeros..17] is initialized ASCII bytes.
-    let digits = unsafe { scratch_ptr.add(leading_zeros) };
+    let digits_count = mantissa_digit_count(d.mantissa);
+    let pos = usize::from(negative);
+    if negative {
+        // SAFETY: caller guarantees at least 32 writable bytes; pos==1 is
+        // inside.
+        unsafe { dst.write(b'-') };
+    }
 
     let point = digits_count as i32 + d.exponent;
 
-    // ── 3. Form selection: scientific vs fixed. ──────────────────────────
-    //
-    // For typical JSON workloads `point` sits inside `[-6, 21]` almost
-    // always (the bench inputs all land here). This outer branch is
-    // well-predicted even with random input. The mispredict source we
-    // care about is the 3-way *sub-form* branch inside the fixed arm —
-    // replaced below with branchless layout arithmetic.
     if (-6..=21).contains(&point) {
-        // ── Fixed-point unified layout. ──────────────────────────────────
-        //
-        // All three former sub-cases (`point ≤ 0`, middle, `point ≥
-        // digits_count`) fit one parameterized 7-segment template:
-        //
-        //   [lead:           "0." when point ≤ 0  ─ INCLUDES the dot]
-        //   [leading_zeros:  max(-point, 0) bytes of '0']
-        //   [first_n digits: min(max(point,0), digits_count) leading digits]
-        //   [mid_dot:        "."  for the middle case only]
-        //   [tail_n digits:  digits_count - first_n trailing digits]
-        //   [trailing_zeros: max(point - digits_count, 0) bytes of '0']
-        //   [tail:           ".0" when point ≥ digits_count ─ contains dot]
-        //
-        // Exactly one of `lead` / `mid_dot` / `tail` carries the dot
-        // (cases are mutually exclusive). Each segment is written
-        // unconditionally to its computed offset; the segment lengths
-        // are arithmetic on `point` and `digits_count` (cmov-friendly),
-        // not data-dependent branches. No segment ever overlaps
-        // another, so no shifts or overwrites are needed — the writes
-        // can pipeline freely.
-
-        let point_nonneg = if point < 0 { 0 } else { point as usize };
-        let leading_zero_count = if point < 0 { (-point) as usize } else { 0 };
-        let first_n = point_nonneg.min(digits_count);
-        let tail_n = digits_count - first_n;
-        let trailing_zero_count = point_nonneg.saturating_sub(digits_count);
-
-        // Mutually exclusive cmov-style flags. Compile to compares +
-        // cmov, not branches.
-        let lead_prefix = point <= 0;
-        let tail_suffix = point_nonneg >= digits_count && point > 0;
-        let mid_dot_present = !lead_prefix && !tail_suffix;
-
-        let lead_len = (lead_prefix as usize) * 2;
-        let mid_dot_len = mid_dot_present as usize;
-        let tail_len = (tail_suffix as usize) * 2;
-
-        // Layout offsets, computed once.
-        let off_after_lead = pos + lead_len;
-        let off_after_leading_zeros = off_after_lead + leading_zero_count;
-        let off_after_first_digits = off_after_leading_zeros + first_n;
-        let off_after_mid_dot = off_after_first_digits + mid_dot_len;
-        let off_after_tail_digits = off_after_mid_dot + tail_n;
-        let off_after_trailing_zeros = off_after_tail_digits + trailing_zero_count;
-        let total_len = off_after_trailing_zeros + tail_len;
-
-        // SAFETY: total_len ≤ 1 (sign) + 2 (lead) + 6 (leading zeros:
-        // -point ≤ 6) + 17 (digits) + 1 (mid_dot) + 20 (trailing zeros:
-        // point ≤ 21, digits_count ≥ 1) + 2 (tail) ≤ 32. The exclusivity
-        // of lead/mid_dot/tail means the dot is counted once.
-        unsafe {
-            // Lead: always store "0." at dst[pos..pos+2]. lead_len is 0
-            // when not lead_prefix, so the subsequent fields' offsets
-            // start back at pos and overwrite both bytes.
-            core::ptr::copy_nonoverlapping(b"0.".as_ptr(), dst.add(pos), 2);
-
-            // Leading zeros (no-op when count == 0).
-            ptr_fill(dst.add(off_after_lead), b'0', leading_zero_count);
-
-            // First-n digits (no-op when first_n == 0).
-            core::ptr::copy_nonoverlapping(digits, dst.add(off_after_leading_zeros), first_n);
-
-            // Middle dot: always write '.' here. mid_dot_len gates
-            // whether this byte is counted (and so whether subsequent
-            // fields land after it or overlap it).
-            dst.add(off_after_first_digits).write(b'.');
-
-            // Tail-n digits (no-op when tail_n == 0). Source = scratch
-            // pointer advanced past the first_n leading digits.
-            core::ptr::copy_nonoverlapping(
-                digits.add(first_n),
-                dst.add(off_after_mid_dot),
-                tail_n,
-            );
-
-            // Trailing zeros (no-op when count == 0).
-            ptr_fill(dst.add(off_after_tail_digits), b'0', trailing_zero_count);
-
-            // Tail ".0" — always store; tail_len gates inclusion.
-            core::ptr::copy_nonoverlapping(b".0".as_ptr(), dst.add(off_after_trailing_zeros), 2);
+        // Fixed-point form.
+        if point <= 0 {
+            // "0." + (−point) zeros + digits
+            let zeros = (-point) as usize;
+            // SAFETY: pos + 2 + zeros + digits_count ≤ 1 + 2 + 6 + 17 = 26 ≤ 32.
+            unsafe {
+                dst.add(pos).write(b'0');
+                dst.add(pos + 1).write(b'.');
+                ptr_fill(dst.add(pos + 2), b'0', zeros);
+                write_digits_at_ptr(d.mantissa, dst.add(pos + 2 + zeros), digits_count);
+            }
+            pos + 2 + zeros + digits_count
+        } else if (point as usize) >= digits_count {
+            // digits + (point − digits_count) zeros + ".0"
+            let trail_zeros = point as usize - digits_count;
+            // SAFETY: pos + digits_count + trail_zeros + 2 ≤ 1 + 21 + 2 = 24 ≤ 32.
+            unsafe {
+                write_digits_at_ptr(d.mantissa, dst.add(pos), digits_count);
+                ptr_fill(dst.add(pos + digits_count), b'0', trail_zeros);
+                let tail = dst.add(pos + digits_count + trail_zeros);
+                tail.write(b'.');
+                tail.add(1).write(b'0');
+            }
+            pos + digits_count + trail_zeros + 2
+        } else {
+            // digits[..p] + '.' + digits[p..]
+            // Render digits into [pos+1 .. pos+1+digits_count] then shift the
+            // leading p digits down by one to free the slot for '.'.
+            let p = point as usize;
+            // SAFETY: pos + 1 + digits_count ≤ 1 + 1 + 17 = 19 ≤ 32.
+            unsafe {
+                write_digits_at_ptr(d.mantissa, dst.add(pos + 1), digits_count);
+                // Shift leading p digits left by 1. Overlapping copy ⇒ ptr::copy.
+                core::ptr::copy(dst.add(pos + 1), dst.add(pos), p);
+                dst.add(pos + p).write(b'.');
+            }
+            pos + digits_count + 1
         }
-        total_len
     } else {
-        // ── Scientific form: "d.dddde±N". ────────────────────────────────
-        //
-        // Same shape regardless of input; the only data-dependent
-        // branches are inside `write_exponent_ptr` (exp sign + 3-way
-        // magnitude). For our typical inputs this branch is rare
-        // (`point` outside [-6, 21] only for extreme magnitudes), so it
-        // doesn't dominate mispredict cost in practice.
+        // Scientific form: "d.dddde±N".
+        // Render digits into [pos+1 .. pos+1+digits_count], then drop the
+        // first digit down to pos and overwrite pos+1 with '.' (when there
+        // are ≥ 2 digits).
+        // SAFETY: pos + 1 + digits_count + 5 ≤ 1 + 1 + 17 + 5 = 24 ≤ 32.
         unsafe {
-            // Copy the leading digit, then '.', then the remaining digits.
-            // When digits_count == 1 we still write a dot (we'll skip past
-            // it for the "exp tail" position). For `digits_count == 1` the
-            // canonical form is `d e±N` without the dot — handled by the
-            // `after_mantissa` computation below.
-            dst.add(pos).write(*digits);
-            dst.add(pos + 1).write(b'.');
-            core::ptr::copy_nonoverlapping(digits.add(1), dst.add(pos + 2), digits_count - 1);
-            let after_mantissa =
-                pos + if digits_count > 1 { 1 + digits_count } else { 1 };
+            write_digits_at_ptr(d.mantissa, dst.add(pos + 1), digits_count);
+            let lead = dst.add(pos + 1).read();
+            dst.add(pos).write(lead);
+            let after_mantissa = if digits_count > 1 {
+                dst.add(pos + 1).write(b'.');
+                pos + 1 + digits_count
+            } else {
+                pos + 1
+            };
             dst.add(after_mantissa).write(b'e');
             let exp = point - 1;
             let exp_len = write_exponent_ptr(dst.add(after_mantissa + 1), exp);
@@ -611,92 +477,82 @@ unsafe fn ptr_fill(dst: *mut u8, byte: u8, n: usize) {
     unsafe { core::ptr::write_bytes(dst, byte, n) };
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// 8-digit binary-coded decimal conversion (Xiang JunBo's algorithm, via
-// the zmij crate). Turns a u64 ≤ 99_999_999 into a u64 whose bytes hold
-// the eight decimal digits in left-to-right order on a little-endian
-// host. Adding `ZEROS` (`0x30...`) converts to ASCII; the whole thing
-// then writes out as one 8-byte unaligned store.
-//
-// No LUT load. ~10 ALU ops per 8 digits. Used by `render_mantissa_17`
-// so the digit pipeline has zero data-dependent branches.
-// ────────────────────────────────────────────────────────────────────────────
-
-const DIV10K_SIG: u32 = ((1u64 << 40) / 10_000 + 1) as u32;
-const DIV10K_EXP: u32 = 40;
-const NEG10K: u32 = ((1u64 << 32) - 10_000) as u32;
-const DIV100_SIG: u32 = (1u32 << 19) / 100 + 1;
-const DIV100_EXP: u32 = 19;
-const NEG100: u32 = (1u32 << 16) - 100;
-const DIV10_SIG: u32 = (1u32 << 10) / 10 + 1;
-const DIV10_EXP: u32 = 10;
-const NEG10: u32 = (1u32 << 8) - 10;
-const ZEROS: u64 = 0x3030_3030_3030_3030;
-
-#[inline]
-fn to_bcd8(abcdefgh: u64) -> u64 {
-    debug_assert!(abcdefgh < 100_000_000);
-    let abcd_efgh = abcdefgh
-        + (NEG10K as u64) * ((abcdefgh * DIV10K_SIG as u64) >> DIV10K_EXP);
-    let ab_cd_ef_gh = abcd_efgh
-        + (NEG100 as u64)
-            * (((abcd_efgh * DIV100_SIG as u64) >> DIV100_EXP) & 0x7f_0000_007f);
-    let a_b_c_d_e_f_g_h = ab_cd_ef_gh
-        + (NEG10 as u64)
-            * (((ab_cd_ef_gh * DIV10_SIG as u64) >> DIV10_EXP) & 0xf_000f_000f_000f);
-    a_b_c_d_e_f_g_h.to_be()
-}
-
-/// Render a teju mantissa `n` (1 ≤ n < 10^17) as exactly 17 ASCII digit
-/// bytes at `dst[0..17]`, returning the count of leading-zero bytes the
-/// caller should skip (`0..=16`). The remaining `17 - leading_zeros`
-/// bytes are the significant digits.
-///
-/// Why fixed-shape: the previous variable-length writer had a 3-way
-/// branch (`digits ≤ 8`, `≤ 16`, `else`) that mispredicted under random
-/// input. Always emitting 17 bytes removes that branch — the function's
-/// instruction sequence is now data-independent, and the only varying
-/// cost is the few cycles to compute leading_zeros via a final
-/// branch-chain (which the predictor still mispredicts a bit, but on a
-/// single byte it's much cheaper than the structural branches we
-/// removed).
-///
-/// Layout written (always 17 bytes):
-///   [0]      lead digit       (highest place; '0' when n < 10^16)
-///   [1..9]   high BCD8 chunk  ('0'-padded if 10^8 ≤ n < 10^16)
-///   [9..17]  low BCD8 chunk
+/// Pointer-flavored `write_digits_at`. Writes `digits` decimal digits of `n`
+/// to `dst[0..digits]`. Same algorithm as the slice version but unchecked.
 ///
 /// # Safety
-/// `dst` must point to ≥ 17 writable bytes.
+/// `dst` must point to ≥ `digits` writable bytes, and
+/// `digits == mantissa_digit_count(n)`.
 #[inline]
 #[allow(unsafe_code, clippy::cast_possible_truncation)]
-unsafe fn render_mantissa_17(n: u64, dst: *mut u8) -> usize {
-    debug_assert!((1..100_000_000_000_000_000).contains(&n)); // < 10^17
+unsafe fn write_digits_at_ptr(n: u64, dst: *mut u8, digits: usize) {
+    debug_assert_eq!(mantissa_digit_count(n), digits);
 
-    // Split into (lead, high8, low8): one 64-bit divide for `n / 10^16`
-    // gives the lead digit; one more for the lower 16 digits split.
-    let lead = (n / 10_000_000_000_000_000) as u8; // 0..=9
-    let rest = n % 10_000_000_000_000_000; // < 10^16
-    let high = rest / 100_000_000;
-    let low = rest % 100_000_000;
+    // `pos` is the offset of the next byte to write (counts down).
+    let mut pos = digits;
+    let lut2 = DIGIT_LUT.as_ptr();
+    let lut4 = QUAD_LUT.as_ptr();
 
-    // BCD-encode both 8-digit chunks. `to_bcd8` returns a u64 whose
-    // little-endian bytes hold the ASCII digits (after adding `ZEROS`)
-    // in left-to-right order — see the `to_bcd8` doc.
-    let high_ascii = to_bcd8(high) + ZEROS;
-    let low_ascii = to_bcd8(low) + ZEROS;
+    // Split a >32-bit value into (upper, lower 8 digits) with one
+    // expensive 64-bit divide. Both halves then fit in u32.
+    let mut output32 = if n >> 32 == 0 {
+        n as u32
+    } else {
+        let low = (n - 100_000_000 * (n / 100_000_000)) as u32;
+        let upper = (n / 100_000_000) as u32;
 
-    // SAFETY: dst has ≥ 17 writable bytes; we touch [0..17] exactly.
-    unsafe {
-        dst.write(b'0' + lead);
-        dst.add(1).cast::<u64>().write_unaligned(high_ascii);
-        dst.add(9).cast::<u64>().write_unaligned(low_ascii);
+        // Write the bottom 8 digits as two 4-digit chunks via two 4-byte copies.
+        let lo4 = (low % 10_000) as usize;
+        let hi4 = (low / 10_000) as usize;
+        // SAFETY: pos starts at digits ≥ 9 (we are in the >32-bit branch),
+        // and decreases by 8 across the two 4-byte copies below; both
+        // 4-byte LUT slots are inside the 40_000-byte table.
+        unsafe {
+            pos -= 4;
+            core::ptr::copy_nonoverlapping(lut4.add(lo4 * 4), dst.add(pos), 4);
+            pos -= 4;
+            core::ptr::copy_nonoverlapping(lut4.add(hi4 * 4), dst.add(pos), 4);
+        }
+        upper
+    };
+
+    // 32-bit tail. Process 4 digits per iteration via one 4-byte copy.
+    while output32 >= 10_000 {
+        let c = (output32 - 10_000 * (output32 / 10_000)) as usize;
+        output32 /= 10_000;
+        // SAFETY: digit count was precomputed; pos decreases by 4 here
+        // and the LUT slot is inside the 40_000-byte table.
+        unsafe {
+            pos -= 4;
+            core::ptr::copy_nonoverlapping(lut4.add(c * 4), dst.add(pos), 4);
+        }
     }
-
-    // Compute leading_zeros = 17 - mantissa_digit_count(n).
-    // Inlining mantissa_digit_count's table lookup gives a branchless
-    // result; the caller will skip the zero-prefix bytes.
-    17 - mantissa_digit_count(n)
+    // Tail: 1..=3 leading digits. The 2-digit LUT (200 bytes) handles
+    // 2-digit chunks; we keep the single-byte fallback for a lone digit.
+    if output32 >= 100 {
+        let c = ((output32 % 100) * 2) as usize;
+        output32 /= 100;
+        // SAFETY: see loop above.
+        unsafe {
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut2.add(c), dst.add(pos), 2);
+        }
+    }
+    if output32 >= 10 {
+        let c = (output32 * 2) as usize;
+        // SAFETY: see loop above.
+        unsafe {
+            pos -= 2;
+            core::ptr::copy_nonoverlapping(lut2.add(c), dst.add(pos), 2);
+        }
+    } else {
+        // SAFETY: see loop above.
+        unsafe {
+            pos -= 1;
+            dst.add(pos).write(b'0' + output32 as u8);
+        }
+    }
+    debug_assert_eq!(pos, 0);
 }
 
 /// Pointer-flavored `write_exponent`. Writes the exponent to `dst[0..]` and
