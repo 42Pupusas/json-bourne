@@ -305,17 +305,19 @@ impl JsonWrite for ByteSink<'_> {
 
     #[inline]
     fn write_int_i64(&mut self, n: i64) -> Result<(), Self::Error> {
-        let mut buf = [0u8; 20];
-        let s = format_i64(n, &mut buf);
-        self.out.extend_from_slice(s.as_bytes());
-        Ok(())
+        if n >= 0 {
+            #[allow(clippy::cast_sign_loss)]
+            return self.write_int_u64(n as u64);
+        }
+        self.out.push(b'-');
+        #[allow(clippy::cast_possible_truncation)]
+        let mag = i128::from(n).unsigned_abs() as u64;
+        self.write_int_u64(mag)
     }
 
     #[inline]
     fn write_int_u64(&mut self, n: u64) -> Result<(), Self::Error> {
-        let mut buf = [0u8; 20];
-        let s = format_u64(n, &mut buf);
-        self.out.extend_from_slice(s.as_bytes());
+        format_u64_direct(n, self.out);
         Ok(())
     }
 
@@ -348,7 +350,7 @@ impl JsonWrite for ByteSink<'_> {
 }
 
 // ---------------------------------------------------------------------------
-// Integer formatters (jeaiii-style two-digit LUT).
+// Integer formatters — forward-write with digit-count precomputation.
 // ---------------------------------------------------------------------------
 //
 // `format!("{n}")` routes through `core::fmt::Formatter`, which on profile
@@ -356,9 +358,10 @@ impl JsonWrite for ByteSink<'_> {
 // two-digit-at-a-time formatting using a 200-byte LUT runs ~4× faster on
 // a `Vec<i64>` workload and produces byte-for-byte identical output.
 //
-// The LUT is the digit pairs `"00".."99"`; we index it with the bottom
-// two decimal digits of the running value and write them out backward
-// into a stack buffer. Then we reverse-slice the buffer.
+// The digit count is computed upfront via `leading_zeros()` + a lookup
+// table (Champagne-Gareau & Lemire, SPE 2026), then digits are written
+// forward from the end of the buffer toward the front. This eliminates
+// the backward-fill + `ptr::copy` shift the previous implementation paid.
 
 const DIGIT_LUT: &[u8; 200] = b"\
 0001020304050607080910111213141516171819\
@@ -367,60 +370,176 @@ const DIGIT_LUT: &[u8; 200] = b"\
 6061626364656667686970717273747576777879\
 8081828384858687888990919293949596979899";
 
-/// Format a `u64` into `buf` (big-endian text). Returns the slice of
-/// `buf` that holds the digits.
-//
-// Truncating casts are bounded by the loop guards: `n % 100 < 100` fits
-// `usize` on every supported target (≥16-bit), and the `n < 10` arm fits
-// `u8`. Allowing crate-locally is more honest than per-line allows.
+/// Branchless digit count for a `u64`.
+///
+/// Uses `leading_zeros()` to index into a table of candidate digit counts,
+/// then one comparison resolves the off-by-one boundary. The table stores
+/// `(candidate_digit_count, threshold)` pairs: if `n > threshold` the true
+/// count is `candidate + 1`, otherwise it's `candidate`. This runs in ~3
+/// cycles on x86-64 (`lzcnt` + table load + compare).
+#[inline]
 #[allow(clippy::cast_possible_truncation)]
-fn format_u64(mut n: u64, buf: &mut [u8; 20]) -> &str {
-    let mut pos = buf.len();
+fn fast_digit_count(n: u64) -> usize {
+    // Table indexed by `leading_zeros(n | 1)`. Each entry is the largest
+    // value with `digit_count` digits; if `n` exceeds it, the true count
+    // is one more. Entry 63 covers n=0 and n=1 (lzcnt=63).
+    //
+    // Built from: for each lzcnt value z, the candidate digit count is
+    // floor(log10(2^(63-z))) + 1 when the range is unambiguous, with the
+    // threshold being 10^candidate - 1.
+    // Each entry is `(candidate, threshold)` where `candidate` is the
+    // digit count when `n <= threshold`, and `candidate + 1` when
+    // `n > threshold`. For lzcnt buckets where all values share the
+    // same digit count, threshold is set to the bucket's max so the
+    // `+1` never fires.
+    static TABLE: [(u8, u64); 64] = [
+        (19, 9_999_999_999_999_999_999), // lzcnt  0: 19 or 20 digits
+        (19, 9_223_372_036_854_775_807), // lzcnt  1: always 19
+        (19, 4_611_686_018_427_387_903), // lzcnt  2: always 19
+        (19, 2_305_843_009_213_693_951), // lzcnt  3: always 19
+        (18,   999_999_999_999_999_999), // lzcnt  4: 18 or 19
+        (18,   576_460_752_303_423_487), // lzcnt  5: always 18
+        (18,   288_230_376_151_711_743), // lzcnt  6: always 18
+        (17,    99_999_999_999_999_999), // lzcnt  7: 17 or 18
+        (17,    72_057_594_037_927_935), // lzcnt  8: always 17
+        (17,    36_028_797_018_963_967), // lzcnt  9: always 17
+        (16,     9_999_999_999_999_999), // lzcnt 10: 16 or 17
+        (16,     9_007_199_254_740_991), // lzcnt 11: always 16
+        (16,     4_503_599_627_370_495), // lzcnt 12: always 16
+        (16,     2_251_799_813_685_247), // lzcnt 13: always 16
+        (15,       999_999_999_999_999), // lzcnt 14: 15 or 16
+        (15,       562_949_953_421_311), // lzcnt 15: always 15
+        (15,       281_474_976_710_655), // lzcnt 16: always 15
+        (14,        99_999_999_999_999), // lzcnt 17: 14 or 15
+        (14,        70_368_744_177_663), // lzcnt 18: always 14
+        (14,        35_184_372_088_831), // lzcnt 19: always 14
+        (13,         9_999_999_999_999), // lzcnt 20: 13 or 14
+        (13,         8_796_093_022_207), // lzcnt 21: always 13
+        (13,         4_398_046_511_103), // lzcnt 22: always 13
+        (13,         2_199_023_255_551), // lzcnt 23: always 13
+        (12,           999_999_999_999), // lzcnt 24: 12 or 13
+        (12,           549_755_813_887), // lzcnt 25: always 12
+        (12,           274_877_906_943), // lzcnt 26: always 12
+        (11,            99_999_999_999), // lzcnt 27: 11 or 12
+        (11,            68_719_476_735), // lzcnt 28: always 11
+        (11,            34_359_738_367), // lzcnt 29: always 11
+        (10,             9_999_999_999), // lzcnt 30: 10 or 11
+        (10,             8_589_934_591), // lzcnt 31: always 10
+        (10,             4_294_967_295), // lzcnt 32: always 10
+        (10,             2_147_483_647), // lzcnt 33: always 10
+        ( 9,               999_999_999), // lzcnt 34: 9 or 10
+        ( 9,               536_870_911), // lzcnt 35: always 9
+        ( 9,               268_435_455), // lzcnt 36: always 9
+        ( 8,                99_999_999), // lzcnt 37: 8 or 9
+        ( 8,                67_108_863), // lzcnt 38: always 8
+        ( 8,                33_554_431), // lzcnt 39: always 8
+        ( 7,                 9_999_999), // lzcnt 40: 7 or 8
+        ( 7,                 8_388_607), // lzcnt 41: always 7
+        ( 7,                 4_194_303), // lzcnt 42: always 7
+        ( 7,                 2_097_151), // lzcnt 43: always 7
+        ( 6,                   999_999), // lzcnt 44: 6 or 7
+        ( 6,                   524_287), // lzcnt 45: always 6
+        ( 6,                   262_143), // lzcnt 46: always 6
+        ( 5,                    99_999), // lzcnt 47: 5 or 6
+        ( 5,                    65_535), // lzcnt 48: always 5
+        ( 5,                    32_767), // lzcnt 49: always 5
+        ( 4,                     9_999), // lzcnt 50: 4 or 5
+        ( 4,                     8_191), // lzcnt 51: always 4
+        ( 4,                     4_095), // lzcnt 52: always 4
+        ( 4,                     2_047), // lzcnt 53: always 4
+        ( 3,                       999), // lzcnt 54: 3 or 4
+        ( 3,                       511), // lzcnt 55: always 3
+        ( 3,                       255), // lzcnt 56: always 3
+        ( 2,                        99), // lzcnt 57: 2 or 3
+        ( 2,                        63), // lzcnt 58: always 2
+        ( 2,                        31), // lzcnt 59: always 2
+        ( 1,                         9), // lzcnt 60: 1 or 2
+        ( 1,                         7), // lzcnt 61: always 1
+        ( 1,                         3), // lzcnt 62: always 1
+        ( 1,                         1), // lzcnt 63: always 1
+    ];
+    let lz = (n | 1).leading_zeros() as usize;
+    let (candidate, threshold) = TABLE[lz];
+    candidate as usize + usize::from(n > threshold)
+}
+
+/// Write `n` as decimal digits into `buf[0..end]`, filling from the tail
+/// toward index 0. Caller must ensure `buf` points to at least `end`
+/// writable bytes and that `end == fast_digit_count(n)`.
+#[inline]
+#[allow(clippy::cast_possible_truncation, unsafe_code)]
+fn write_digits_backward(mut n: u64, buf: *mut u8, end: usize) {
+    let mut pos = end;
     while n >= 100 {
         let r = (n % 100) as usize;
         n /= 100;
         pos -= 2;
-        buf[pos] = DIGIT_LUT[r * 2];
-        buf[pos + 1] = DIGIT_LUT[r * 2 + 1];
+        // SAFETY: `pos` decreases in steps of 2 from `end` (which equals
+        // the digit count of the original `n`). The loop exits before
+        // `pos` underflows because each iteration consumes two decimal
+        // digits. Caller guarantees `buf[0..end]` is writable.
+        unsafe {
+            *buf.add(pos) = DIGIT_LUT[r * 2];
+            *buf.add(pos + 1) = DIGIT_LUT[r * 2 + 1];
+        }
     }
     if n >= 10 {
         let r = n as usize;
         pos -= 2;
-        buf[pos] = DIGIT_LUT[r * 2];
-        buf[pos + 1] = DIGIT_LUT[r * 2 + 1];
+        unsafe {
+            *buf.add(pos) = DIGIT_LUT[r * 2];
+            *buf.add(pos + 1) = DIGIT_LUT[r * 2 + 1];
+        }
     } else {
         pos -= 1;
-        buf[pos] = b'0' + n as u8;
+        unsafe {
+            *buf.add(pos) = b'0' + n as u8;
+        }
     }
-    // SAFETY: every byte written is from the digit LUT (ASCII '0'..'9'),
-    // which is valid UTF-8.
+}
+
+/// Format a `u64` directly into a `Vec<u8>`. Precomputes digit count so
+/// digits land at their final position — no post-copy shift needed.
+#[cfg(feature = "alloc")]
+#[allow(clippy::cast_possible_truncation)]
+fn format_u64_direct(n: u64, out: &mut alloc::vec::Vec<u8>) {
+    let digits = fast_digit_count(n);
+    out.reserve(digits);
+    let old_len = out.len();
     #[allow(unsafe_code)]
     unsafe {
-        core::str::from_utf8_unchecked(&buf[pos..])
+        let base = out.as_mut_ptr().add(old_len);
+        write_digits_backward(n, base, digits);
+        out.set_len(old_len + digits);
+    }
+}
+
+/// Format a `u64` into `buf` (big-endian text). Returns the slice of
+/// `buf` that holds the digits.
+#[allow(clippy::cast_possible_truncation)]
+fn format_u64(n: u64, buf: &mut [u8; 20]) -> &str {
+    let digits = fast_digit_count(n);
+    #[allow(unsafe_code)]
+    unsafe {
+        write_digits_backward(n, buf.as_mut_ptr(), digits);
+        core::str::from_utf8_unchecked(&buf[..digits])
     }
 }
 
 fn format_i64(n: i64, buf: &mut [u8; 20]) -> &str {
     if n >= 0 {
-        // n is non-negative so `as u64` is the unsigned-equivalent value.
         #[allow(clippy::cast_sign_loss)]
         return format_u64(n as u64, buf);
     }
-    // Negate via unsigned magnitude so `i64::MIN` round-trips. Widening
-    // through i128 keeps `-i64::MIN` representable; `unsigned_abs()` then
-    // collapses to a u128 which fits u64 because the magnitude of any
-    // i64 value is ≤ 2^63.
     #[allow(clippy::cast_possible_truncation)]
     let mag = i128::from(n).unsigned_abs() as u64;
-    let mut tmp = [0u8; 20];
-    let s = format_u64(mag, &mut tmp);
-    let len = s.len();
-    let pos = buf.len() - len - 1;
-    buf[pos] = b'-';
-    buf[pos + 1..pos + 1 + len].copy_from_slice(s.as_bytes());
+    let digits = fast_digit_count(mag);
+    buf[0] = b'-';
+    write_digits_backward(mag, buf[1..].as_mut_ptr(), digits);
+    let total = 1 + digits;
     #[allow(unsafe_code)]
     unsafe {
-        core::str::from_utf8_unchecked(&buf[pos..])
+        core::str::from_utf8_unchecked(&buf[..total])
     }
 }
 
@@ -454,17 +573,16 @@ fn format_i128(n: i128, buf: &mut [u8; 40]) -> &str {
         #[allow(clippy::cast_sign_loss)]
         return format_u128(n as u128, buf);
     }
-    // Same `i128::MIN` round-trip trick as the i64 path.
     let mag = n.unsigned_abs();
     let mut tmp = [0u8; 40];
     let s = format_u128(mag, &mut tmp);
     let len = s.len();
-    let pos = buf.len() - len - 1;
-    buf[pos] = b'-';
-    buf[pos + 1..pos + 1 + len].copy_from_slice(s.as_bytes());
+    buf[0] = b'-';
+    buf[1..=len].copy_from_slice(s.as_bytes());
+    let total = 1 + len;
     #[allow(unsafe_code)]
     unsafe {
-        core::str::from_utf8_unchecked(&buf[pos..])
+        core::str::from_utf8_unchecked(&buf[..total])
     }
 }
 
