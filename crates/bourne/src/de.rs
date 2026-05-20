@@ -272,7 +272,9 @@ impl<'input, T: FromJson<'input>, const N: usize> FromJson<'input> for [T; N] {
         let empty = lex.array_start()?;
         if empty {
             if N == 0 {
-                return Ok(core::array::from_fn(|i| slots[i].take().expect("slot filled")));
+                return Ok(core::array::from_fn(|i| {
+                    slots[i].take().expect("slot filled")
+                }));
             }
             return Err(type_error(lex, ErrorKind::TypeMismatch));
         }
@@ -282,7 +284,9 @@ impl<'input, T: FromJson<'input>, const N: usize> FromJson<'input> for [T; N] {
             let closed = lex.array_continue(b']')?;
             if closed {
                 if i + 1 == N {
-                    return Ok(core::array::from_fn(|i| slots[i].take().expect("slot filled")));
+                    return Ok(core::array::from_fn(|i| {
+                        slots[i].take().expect("slot filled")
+                    }));
                 }
                 return Err(type_error(lex, ErrorKind::TypeMismatch));
             }
@@ -406,8 +410,7 @@ mod alloc_impls {
                     // small allocation is fine; we still error if the
                     // decoded content isn't exactly one scalar.
                     let decoded = decode_owned(js, lex)?;
-                    single_char(&decoded)
-                        .ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch))
+                    single_char(&decoded).ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch))
                 }
                 _ => Err(type_error(lex, ErrorKind::ExpectedString)),
             }
@@ -431,10 +434,7 @@ mod alloc_impls {
 
     /// Materialize an object key from a [`JsonStr`] span. Borrows when the
     /// key is escape-free; decodes into an owned `String` otherwise.
-    pub fn key_to_cow<'input>(
-        js: JsonStr,
-        lex: &Lexer<'input>,
-    ) -> Result<Cow<'input, str>, Error> {
+    pub fn key_to_cow<'input>(js: JsonStr, lex: &Lexer<'input>) -> Result<Cow<'input, str>, Error> {
         if let Some(borrowed) = js.as_str(lex.input()) {
             return Ok(Cow::Borrowed(borrowed));
         }
@@ -620,10 +620,7 @@ mod alloc_impls {
         #[allow(clippy::cast_precision_loss)]
         fn vec_from_lex(lex: &mut Lexer<'input>) -> Result<alloc::vec::Vec<Self>, Error> {
             #[inline]
-            fn convert(
-                lex: &Lexer<'_>,
-                secs_f: f64,
-            ) -> Result<std::time::Duration, Error> {
+            fn convert(lex: &Lexer<'_>, secs_f: f64) -> Result<std::time::Duration, Error> {
                 if !secs_f.is_finite() || secs_f < 0.0 || secs_f >= (u64::MAX as f64) {
                     return Err(type_error(lex, ErrorKind::NumberOutOfRange));
                 }
@@ -858,7 +855,10 @@ mod alloc_impls {
             }
         }
         // Tail: scalar walk for the final <16 bytes.
-        bytes[i..].iter().position(|&b| b == b'\\').map(|off| i + off)
+        bytes[i..]
+            .iter()
+            .position(|&b| b == b'\\')
+            .map(|off| i + off)
     }
 
     /// Decode a JSON string body into `dst`, expanding escape sequences.
@@ -882,16 +882,23 @@ mod alloc_impls {
     /// scans (see `Parser::consume_utf8_multibyte` and `scan_ascii_string_run`
     /// in `bourne-core`). The bytes between escapes are therefore valid
     /// UTF-8 by construction — re-validating them in safe code is the
-    /// `from_utf8` re-walk that perf showed at ~12% of total time.
+    /// `from_utf8` re-walk that perf showed at ~12% of total time (the
+    /// audit on 2026-05-19 measured the safe variant at 1.68× slower,
+    /// pushing bourne below `serde_json` on the escape-heavy workload).
     /// `bourne`'s `unsafe_code = "deny"` lint is overridden for this one
     /// function with `#[allow]`, mirroring the same localized exception
     /// `bourne-core` makes at the equivalent site.
+    ///
+    /// The outer loop dispatches between literal-byte runs and escape
+    /// sequences. Escape decoding is delegated to `decode_simple_escape`
+    /// (the 8 single-byte arms) and `decode_unicode_escape` (the `\u`
+    /// branch including surrogate-pair logic) so this fn stays inside
+    /// the project's cyclomatic-complexity budget.
     #[allow(unsafe_code)]
     fn decode_escapes(raw: &[u8], dst: &mut String) -> Result<(), ErrorKind> {
         let mut i = 0;
         while i < raw.len() {
-            let b = raw[i];
-            if b != b'\\' {
+            if raw[i] != b'\\' {
                 // Literal byte run: find the next `\` (or end) and append the
                 // whole stretch in one push. This is the hot path for strings
                 // with sparse escapes (most production payloads).
@@ -911,55 +918,83 @@ mod alloc_impls {
             if i >= raw.len() {
                 return Err(ErrorKind::InvalidEscape);
             }
-            match raw[i] {
-                b'"' => dst.push('"'),
-                b'\\' => dst.push('\\'),
-                b'/' => dst.push('/'),
-                b'b' => dst.push('\u{0008}'),
-                b'f' => dst.push('\u{000C}'),
-                b'n' => dst.push('\n'),
-                b'r' => dst.push('\r'),
-                b't' => dst.push('\t'),
-                b'u' => {
-                    if i + 5 > raw.len() {
-                        return Err(ErrorKind::InvalidUnicodeEscape);
-                    }
-                    let cp = parse_hex4(&raw[i + 1..i + 5])?;
-                    i += 4; // advance past the four hex digits; the +1 below covers `u`
-                    if (0xD800..=0xDBFF).contains(&cp) {
-                        // High surrogate — must be followed by `\uXXXX` low.
-                        // After the four hex digits, i points one before
-                        // the next byte; bump past it then check for `\u`.
-                        if i + 7 > raw.len() || raw[i + 1] != b'\\' || raw[i + 2] != b'u' {
-                            return Err(ErrorKind::UnpairedSurrogate);
-                        }
-                        let low = parse_hex4(&raw[i + 3..i + 7])?;
-                        if !(0xDC00..=0xDFFF).contains(&low) {
-                            return Err(ErrorKind::UnpairedSurrogate);
-                        }
-                        // Combine surrogate pair into a codepoint.
-                        let high_off = cp - 0xD800;
-                        let low_off = low - 0xDC00;
-                        let scalar = 0x1_0000 + (high_off << 10) + low_off;
-                        let ch = char::from_u32(scalar)
-                            .ok_or(ErrorKind::InvalidUnicodeEscape)?;
-                        dst.push(ch);
-                        i += 6; // skip `\uXXXX`
-                    } else if (0xDC00..=0xDFFF).contains(&cp) {
-                        return Err(ErrorKind::UnpairedSurrogate);
-                    } else {
-                        // BMP scalar — char::from_u32 always succeeds for
-                        // values outside the surrogate range.
-                        let ch = char::from_u32(cp)
-                            .ok_or(ErrorKind::InvalidUnicodeEscape)?;
-                        dst.push(ch);
-                    }
-                }
-                _ => return Err(ErrorKind::InvalidEscape),
+            if raw[i] == b'u' {
+                i = decode_unicode_escape(raw, i, dst)?;
+            } else {
+                dst.push(decode_simple_escape(raw[i])?);
             }
             i += 1;
         }
         Ok(())
+    }
+
+    /// Decode a single non-`u` JSON escape byte to its char. The 8
+    /// match arms (`"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`) plus the
+    /// catch-all error arm live here so `decode_escapes` doesn't carry
+    /// their cyclomatic complexity.
+    #[inline]
+    const fn decode_simple_escape(b: u8) -> Result<char, ErrorKind> {
+        Ok(match b {
+            b'"' => '"',
+            b'\\' => '\\',
+            b'/' => '/',
+            b'b' => '\u{0008}',
+            b'f' => '\u{000C}',
+            b'n' => '\n',
+            b'r' => '\r',
+            b't' => '\t',
+            _ => return Err(ErrorKind::InvalidEscape),
+        })
+    }
+
+    /// Decode `\uXXXX` (and optionally a surrogate-pair `\uYYYY`) into
+    /// a char, push it to `dst`, and return the new index of the last
+    /// byte consumed inside `raw`. `i` points at the `u` of the first
+    /// escape. Returns the index of the last hex digit (the caller
+    /// bumps by 1 to move past it).
+    fn decode_unicode_escape(raw: &[u8], i: usize, dst: &mut String) -> Result<usize, ErrorKind> {
+        if i + 5 > raw.len() {
+            return Err(ErrorKind::InvalidUnicodeEscape);
+        }
+        let cp = parse_hex4(&raw[i + 1..i + 5])?;
+        // After the four hex digits, the consumed-up-to index is i + 4.
+        let new_i = i + 4;
+        if (0xD800..=0xDBFF).contains(&cp) {
+            return decode_surrogate_pair(raw, new_i, cp, dst);
+        }
+        if (0xDC00..=0xDFFF).contains(&cp) {
+            return Err(ErrorKind::UnpairedSurrogate);
+        }
+        // BMP scalar — char::from_u32 always succeeds for values
+        // outside the surrogate range.
+        let ch = char::from_u32(cp).ok_or(ErrorKind::InvalidUnicodeEscape)?;
+        dst.push(ch);
+        Ok(new_i)
+    }
+
+    /// Combine a high surrogate at position `i` with the low surrogate
+    /// at `i+3..i+7`. Caller has validated the high half is in
+    /// 0xD800..=0xDBFF. Returns the index of the last hex digit of the
+    /// low half so the outer loop can resume.
+    fn decode_surrogate_pair(
+        raw: &[u8],
+        i: usize,
+        cp: u32,
+        dst: &mut String,
+    ) -> Result<usize, ErrorKind> {
+        if i + 7 > raw.len() || raw[i + 1] != b'\\' || raw[i + 2] != b'u' {
+            return Err(ErrorKind::UnpairedSurrogate);
+        }
+        let low = parse_hex4(&raw[i + 3..i + 7])?;
+        if !(0xDC00..=0xDFFF).contains(&low) {
+            return Err(ErrorKind::UnpairedSurrogate);
+        }
+        let high_off = cp - 0xD800;
+        let low_off = low - 0xDC00;
+        let scalar = 0x1_0000 + (high_off << 10) + low_off;
+        let ch = char::from_u32(scalar).ok_or(ErrorKind::InvalidUnicodeEscape)?;
+        dst.push(ch);
+        Ok(i + 6) // skip `\uXXXX`
     }
 
     /// Same digit-walk as `bourne-core`'s `parse_hex4`. Duplicated here

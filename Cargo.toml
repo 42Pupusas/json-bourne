@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/bourne-core", "crates/bourne", "crates/bourne-bench", "crates/bourne-alloctest"]
+members = ["crates/bourne-core", "crates/bourne", "benches/bourne-bench"]
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -11,9 +11,10 @@ repository = "https://github.com/illuminodes/bourne"
 rust-version = "1.85"
 
 [workspace.lints.rust]
-# `deny` (overridable), not `forbid`. The bourne-alloctest harness needs
-# to implement GlobalAlloc, which is fundamentally unsafe; that crate
-# `#![allow(unsafe_code)]` at its crate root. Every other crate stays clean.
+# `deny` (overridable), not `forbid`. Two places implement GlobalAlloc and
+# need to opt out file-locally: `crates/bourne/tests/zero_alloc.rs` (the
+# zero-copy regression gate) and `benches/bourne-bench/src/bin/compare_mem.rs`
+# (the bourne-vs-serde_json memory binary). Every other file stays clean.
 unsafe_code = "deny"
 missing_debug_implementations = "warn"
 # `bourne_no_simd` is a custom cfg flag CI sets when running under miri,

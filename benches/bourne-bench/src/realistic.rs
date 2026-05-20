@@ -150,12 +150,8 @@ pub fn jwt_id_array(n: usize) -> String {
 ///      blobs, embedded JSON-in-string). The ceiling here is deliberately
 ///      up to 64 KB — production JSON regularly has fields this size and
 ///      a 4 KB ceiling under-represents that reality.
-const MIXED_LEN_BUCKETS: &[(u32, usize, usize)] = &[
-    (10, 4, 15),
-    (6, 20, 80),
-    (3, 100, 400),
-    (1, 1024, 65_536),
-];
+const MIXED_LEN_BUCKETS: &[(u32, usize, usize)] =
+    &[(10, 4, 15), (6, 20, 80), (3, 100, 400), (1, 1024, 65_536)];
 
 /// Body source for `mixed_length_string_array`. Repeated until it covers
 /// the largest declared bucket, so bucket bounds and source size stay

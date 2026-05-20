@@ -27,6 +27,23 @@ use crate::event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 /// is legal even though `+9223372036854775808` is not.
 const I64_MIN_MAGNITUDE: u64 = (i64::MAX as u64) + 1;
 
+/// Sign-aware bounds check shared by `parse_i64_value` and its inner
+/// digit loop. Maps an unsigned magnitude `acc` and a sign bit to the
+/// final `i64`, or returns `Err(())` if the magnitude doesn't fit.
+#[inline]
+fn i64_from_unsigned_magnitude(acc: u64, negative: bool) -> Result<i64, ()> {
+    if negative {
+        // `i64::MIN`'s magnitude is exactly `I64_MIN_MAGNITUDE`; any
+        // larger magnitude doesn't fit. `0i64.wrapping_sub_unsigned(acc)`
+        // produces `i64::MIN` when `acc == I64_MIN_MAGNITUDE`.
+        if acc <= I64_MIN_MAGNITUDE {
+            return Ok(0i64.wrapping_sub_unsigned(acc));
+        }
+        return Err(());
+    }
+    i64::try_from(acc).map_err(|_| ())
+}
+
 /// `i128::MIN`'s magnitude as a `u128`. Same trick as `I64_MIN_MAGNITUDE`,
 /// scaled up. `parse_i128_value` accumulates into `u128` so the negative
 /// edge case (`-170141183460469231731687303715884105728`) is representable
@@ -232,7 +249,9 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     /// `UnexpectedEof` if there is no next byte.
     pub fn peek_value_kind(&mut self) -> Result<ValueKind, Error> {
         self.skip_whitespace();
-        let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
+        let b = self
+            .peek()
+            .ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
         match b {
             b'{' => Ok(ValueKind::Object),
             b'[' => Ok(ValueKind::Array),
@@ -252,7 +271,9 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     /// `read_object_continue` (or by going through `Parser`).
     pub fn read_value(&mut self) -> Result<Event, Error> {
         self.skip_whitespace();
-        let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
+        let b = self
+            .peek()
+            .ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
         match b {
             b'{' => {
                 self.bump();
@@ -338,7 +359,9 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         let start = self.offset;
         let mut has_escapes = false;
         loop {
-            let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
+            let b = self
+                .peek()
+                .ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
             match b {
                 b'"' => {
                     let end = self.offset;
@@ -435,7 +458,6 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     pub fn parse_i64_value(&mut self) -> Result<i64, Error> {
         let start = self.offset;
         let bytes = self.input;
-        let end = bytes.len();
         let mut i = start;
 
         let negative = matches!(bytes.get(i), Some(&b'-'));
@@ -443,79 +465,66 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
             i += 1;
         }
 
-        let digits_start = i;
         match bytes.get(i).copied() {
-            Some(b'0') => i += 1,
-            Some(b'1'..=b'9') => {
-                // Accumulate as u64 so positive `i64::MIN.unsigned_abs()`
-                // (= 9223372036854775808) fits during the lex pass. The
-                // sign-aware bounds check happens at the end.
-                let mut acc: u64 = 0;
-                let mut count: u32 = 0;
-                while i < end {
-                    let d = bytes[i].wrapping_sub(b'0');
-                    if d >= 10 {
-                        break;
-                    }
-                    if count < 19 {
-                        // Up to 19 digits fit in u64 without overflow; the
-                        // 20-digit boundary is u64::MAX.
-                        acc = acc * 10 + u64::from(d);
-                    } else {
-                        acc = acc
-                            .checked_mul(10)
-                            .and_then(|v| v.checked_add(u64::from(d)))
-                            .ok_or_else(|| {
-                                self.offset = i;
-                                self.err(ErrorKind::NumberOutOfRange)
-                            })?;
-                    }
-                    i += 1;
-                    count += 1;
-                }
-                if i == digits_start {
-                    self.offset = i;
-                    return Err(self.err(ErrorKind::InvalidNumber));
-                }
+            Some(b'0') => {
+                i += 1;
                 self.offset = i;
                 if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
                     return Err(self.err(ErrorKind::ExpectedNumber));
                 }
-                // Sign-aware bounds. i64::MIN's magnitude is exactly
-                // i64::MAX as u64 + 1 = 9223372036854775808; any larger
-                // negative or positive doesn't fit.
-                if negative {
-                    if acc <= I64_MIN_MAGNITUDE {
-                        // `0i64.wrapping_sub_unsigned(acc)` produces i64::MIN
-                        // when `acc == I64_MIN_MAGNITUDE`, and the correct
-                        // negative i64 for any smaller magnitude.
-                        return Ok(0i64.wrapping_sub_unsigned(acc));
-                    }
-                    return Err(self.err(ErrorKind::NumberOutOfRange));
-                }
-                // `try_from` here is the same conditional as comparing
-                // against `i64::MAX as u64`, but in a form clippy
-                // recognizes — and avoids the cast_possible_wrap
-                // exception we previously took to silence it.
-                if let Ok(n) = i64::try_from(acc) {
-                    return Ok(n);
-                }
-                return Err(self.err(ErrorKind::NumberOutOfRange));
+                Ok(0)
             }
+            Some(b'1'..=b'9') => self.parse_i64_digits(i, negative),
             Some(b) => {
                 self.offset = i;
-                return Err(self.err(ErrorKind::UnexpectedByte(b)));
+                Err(self.err(ErrorKind::UnexpectedByte(b)))
             }
             None => {
                 self.offset = i;
-                return Err(self.err(ErrorKind::UnexpectedEof));
+                Err(self.err(ErrorKind::UnexpectedEof))
             }
+        }
+    }
+
+    /// Inner accumulation loop for `parse_i64_value` once a leading
+    /// `1..=9` digit has been confirmed at `start`. Walks digits as
+    /// `u64` (so positive `i64::MIN.unsigned_abs()` fits during the
+    /// lex pass) and then maps the magnitude to a signed result.
+    /// Splitting this out keeps `parse_i64_value` inside the project's
+    /// cyclomatic-complexity budget.
+    fn parse_i64_digits(&mut self, start: usize, negative: bool) -> Result<i64, Error> {
+        let bytes = self.input;
+        let end = bytes.len();
+        let mut i = start;
+        let mut acc: u64 = 0;
+        let mut count: u32 = 0;
+        while i < end {
+            let d = bytes[i].wrapping_sub(b'0');
+            if d >= 10 {
+                break;
+            }
+            if count < 19 {
+                // Up to 19 digits fit in u64 without overflow; the
+                // 20-digit boundary is u64::MAX.
+                acc = acc * 10 + u64::from(d);
+            } else {
+                acc = acc
+                    .checked_mul(10)
+                    .and_then(|v| v.checked_add(u64::from(d)))
+                    .ok_or_else(|| {
+                        self.offset = i;
+                        self.err(ErrorKind::NumberOutOfRange)
+                    })?;
+            }
+            i += 1;
+            count += 1;
         }
         self.offset = i;
         if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
             return Err(self.err(ErrorKind::ExpectedNumber));
         }
-        Ok(0)
+        i64_from_unsigned_magnitude(acc, negative)
+            .map_err(|()| self.err(ErrorKind::NumberOutOfRange))
     }
 
     /// Parse a JSON integer directly into `i128`, fusing lex and conversion.
@@ -725,7 +734,9 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         }
         let start = self.offset;
         loop {
-            let b = self.peek().ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
+            let b = self
+                .peek()
+                .ok_or_else(|| self.err(ErrorKind::UnexpectedEof))?;
             match b {
                 b'"' => {
                     let end = self.offset;
@@ -756,7 +767,11 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         match self.peek() {
             Some(b) if b == end_byte => {
                 self.bump();
-                let frame = if end_byte == b']' { Frame::Array } else { Frame::Object };
+                let frame = if end_byte == b']' {
+                    Frame::Array
+                } else {
+                    Frame::Object
+                };
                 self.pop_frame(frame)?;
                 Ok(true)
             }

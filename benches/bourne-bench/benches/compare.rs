@@ -97,14 +97,20 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
         let mut maybe_key = lex.object_first_key()?;
         while let Some(key) = maybe_key {
             match key {
-                "id" => id = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
-                })?),
+                "id" => {
+                    id = Some(
+                        u64::try_from(lex.parse_i64_value()?)
+                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
+                    );
+                }
                 "name" => name = Some(lex.parse_str_value()?),
                 "verified" => verified = Some(bool::from_lex(lex)?),
-                "followers" => followers = Some(u32::try_from(lex.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
-                })?),
+                "followers" => {
+                    followers = Some(
+                        u32::try_from(lex.parse_i64_value()?)
+                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
+                    );
+                }
                 "bio" => bio = Option::<&str>::from_lex(lex)?,
                 "links" => links = Some(Vec::<&str>::from_lex(lex)?),
                 _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
@@ -198,21 +204,24 @@ impl<'input> FromJson<'input> for MetricEventBourne<'input> {
         while let Some(key) = maybe_key {
             match key {
                 "ts" => {
-                    ts = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
-                        Error::new(ErrorKind::NumberOutOfRange, lex.position())
-                    })?);
+                    ts =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
                 }
                 "host" => host = Some(lex.parse_str_value()?),
                 "metric" => metric = Some(lex.parse_str_value()?),
                 "count" => {
-                    count = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
-                        Error::new(ErrorKind::NumberOutOfRange, lex.position())
-                    })?);
+                    count =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
                 }
                 "bytes" => {
-                    bytes = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
-                        Error::new(ErrorKind::NumberOutOfRange, lex.position())
-                    })?);
+                    bytes =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
                 }
                 "latency_ms" => latency_ms = Some(f64::from_lex(lex)?),
                 "cpu" => cpu = Some(f64::from_lex(lex)?),
@@ -225,12 +234,9 @@ impl<'input> FromJson<'input> for MetricEventBourne<'input> {
         Ok(Self {
             ts: ts.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             host: host.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-            metric: metric
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-            count: count
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-            bytes: bytes
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            metric: metric.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            count: count.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            bytes: bytes.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             latency_ms: latency_ms
                 .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             cpu: cpu.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
@@ -252,7 +258,7 @@ fn bourne_drain(input: &[u8]) {
 }
 
 mod stream_vs_dom {
-    use super::*;
+    use super::{SMALL_OBJECT, bourne_drain, int_array, string_array};
 
     #[divan::bench]
     fn small_object_bourne_stream(bencher: divan::Bencher) {
@@ -320,7 +326,7 @@ mod stream_vs_dom {
 }
 
 mod typed_struct {
-    use super::*;
+    use super::{SMALL_OBJECT, UserBourne, parse, UserDerived, UserSerde, metric_event_array, MetricEventBourne, MetricEventDerived, MetricEventSerde, metric_event_array_reversed_keys};
 
     // Original small fixture — kept for the per-call-overhead floor.
 
@@ -374,7 +380,8 @@ mod typed_struct {
         bencher
             .counter(divan::counter::BytesCount::new(metrics.len()))
             .bench(|| {
-                let v: Vec<MetricEventBourne<'_>> = parse(divan::black_box(metrics.as_bytes())).unwrap();
+                let v: Vec<MetricEventBourne<'_>> =
+                    parse(divan::black_box(metrics.as_bytes())).unwrap();
                 divan::black_box(v);
             });
     }
@@ -385,7 +392,8 @@ mod typed_struct {
         bencher
             .counter(divan::counter::BytesCount::new(metrics.len()))
             .bench(|| {
-                let v: Vec<MetricEventDerived<'_>> = parse(divan::black_box(metrics.as_bytes())).unwrap();
+                let v: Vec<MetricEventDerived<'_>> =
+                    parse(divan::black_box(metrics.as_bytes())).unwrap();
                 divan::black_box(v);
             });
     }
@@ -447,7 +455,7 @@ mod typed_struct {
 }
 
 mod vec_i64 {
-    use super::*;
+    use super::{int_array, parse};
 
     #[divan::bench(args = [100, 10_000])]
     fn bourne(bencher: divan::Bencher, n: usize) {
@@ -475,7 +483,7 @@ mod vec_i64 {
 }
 
 mod vec_borrowed_str {
-    use super::*;
+    use super::{string_array, parse};
 
     #[divan::bench(args = [100, 10_000])]
     fn bourne(bencher: divan::Bencher, n: usize) {
@@ -505,7 +513,7 @@ mod vec_borrowed_str {
 }
 
 mod vec_string {
-    use super::*;
+    use super::{string_array, parse};
 
     #[divan::bench(args = [100, 10_000])]
     fn bourne(bencher: divan::Bencher, n: usize) {

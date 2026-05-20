@@ -14,11 +14,11 @@ threshold = 21
 missing = "pessimistic"
 
 # Bench / profile fixtures are not library code:
-#   - `crates/bourne-bench/benches/**`: divan benchmarks, never run as
+#   - `benches/bourne-bench/benches/**`: divan benchmarks, never run as
 #     tests under `cargo test`, so they get no llvm-cov instrumentation.
 #     With `--features alloc-profile` they also report per-bench heap
 #     usage via divan's AllocProfiler.
-#   - `crates/bourne-bench/src/bin/**`: profiling binaries (perf / pprof
+#   - `benches/bourne-bench/src/bin/**`: profiling binaries (perf / pprof
 #     entry points), driven manually.
 #   - `crates/bourne/tests/properties.rs`: proptest support fixtures
 #     (JsonValue::render, render_string) live alongside `proptest!`
@@ -27,13 +27,12 @@ missing = "pessimistic"
 # Library code in `crates/*/src/**` is NOT excluded.
 exclude = [
     # The bench crate is corpus + harness, not library code.
-    "crates/bourne-bench/**",
+    "benches/bourne-bench/**",
     # Integration test helpers (`tests/**`): the test files themselves
     # are test infrastructure, not library code. llvm-cov instruments
     # the lib code they exercise, not the test functions, so these
     # appear with 0% coverage even though the assertion code ran.
     "crates/bourne/tests/**",
-    "crates/bourne-alloctest/tests/**",
     # `teju_gen.rs` is a build-time table generator (`#[cfg(test)]`
     # module only — never compiled into release builds). It's run on
     # demand to regenerate `teju_tables.txt`, not as part of CI tests.

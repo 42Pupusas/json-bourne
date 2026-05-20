@@ -114,12 +114,13 @@ pub trait JsonWrite {
     /// (e.g. `b"{\"id\":"`) into a single write. The default routes
     /// through [`Self::write_str_raw`]; byte-oriented sinks like
     /// [`ByteSink`] override to avoid the `&str` conversion.
+    //
+    // The `expect` is unreachable: callers feed compile-time byte-string
+    // literals from `concat!` / `b"..."`, which are ASCII by construction.
     #[inline]
     fn write_raw_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error> {
-        // SAFETY: callers guarantee valid UTF-8 — in practice these are
-        // compile-time byte-string literals from `concat!` / `b"..."`.
-        #[allow(unsafe_code)]
-        self.write_str_raw(unsafe { core::str::from_utf8_unchecked(b) })
+        let s = core::str::from_utf8(b).expect("write_raw_bytes input must be valid UTF-8");
+        self.write_str_raw(s)
     }
 
     /// Write a signed 64-bit integer as a JSON number.
@@ -200,10 +201,7 @@ pub trait JsonWrite {
     #[cfg(feature = "alloc")]
     #[inline]
     #[allow(unsafe_code)]
-    unsafe fn write_float_f64_unchecked_finite(
-        &mut self,
-        f: f64,
-    ) -> Result<(), Self::Error> {
+    unsafe fn write_float_f64_unchecked_finite(&mut self, f: f64) -> Result<(), Self::Error> {
         // SAFETY: weaker contract subsumes ours.
         unsafe { self.write_float_f64_unchecked(f) }
     }
@@ -275,6 +273,10 @@ const HEX_LOWER: [u8; 16] = *b"0123456789abcdef";
 /// Returns true for bytes that need an escape sequence inside a JSON string
 /// body (quote, backslash, or any control byte `< 0x20`). Everything else —
 /// including high-bit UTF-8 continuation bytes — is safe to write verbatim.
+///
+/// Only used by the escape-writing sinks (`StringSink`, `ByteSink`,
+/// `PrettyStringSink`), all of which are alloc-gated.
+#[cfg(feature = "alloc")]
 #[inline]
 const fn needs_escape(b: u8) -> bool {
     b == b'"' || b == b'\\' || b < 0x20
@@ -384,7 +386,10 @@ pub struct ByteSink<'a> {
 impl<'a> ByteSink<'a> {
     #[must_use]
     pub const fn new(out: &'a mut alloc::vec::Vec<u8>) -> Self {
-        Self { out, nonfinite_taint: 0 }
+        Self {
+            out,
+            nonfinite_taint: 0,
+        }
     }
 }
 
@@ -538,10 +543,7 @@ impl JsonWrite for ByteSink<'_> {
     /// `cap - len ≥ 32` AND `f.is_finite()`.
     #[inline]
     #[allow(unsafe_code)]
-    unsafe fn write_float_f64_unchecked_finite(
-        &mut self,
-        f: f64,
-    ) -> Result<(), Self::Error> {
+    unsafe fn write_float_f64_unchecked_finite(&mut self, f: f64) -> Result<(), Self::Error> {
         // SAFETY: contract forwarded.
         unsafe { crate::float::format_finite_to_vec_unchecked_finite(f, self.out) };
         Ok(())
@@ -554,8 +556,7 @@ impl JsonWrite for ByteSink<'_> {
     #[allow(unsafe_code)]
     unsafe fn write_float_f64_taint(&mut self, f: f64) -> Result<(), Self::Error> {
         // SAFETY: caller-reserved ≥ 32 bytes.
-        self.nonfinite_taint |=
-            unsafe { crate::float::format_finite_to_vec_taint(f, self.out) };
+        self.nonfinite_taint |= unsafe { crate::float::format_finite_to_vec_taint(f, self.out) };
         Ok(())
     }
 
@@ -624,66 +625,66 @@ fn fast_digit_count(n: u64) -> usize {
         (19, 9_223_372_036_854_775_807), // lzcnt  1: always 19
         (19, 4_611_686_018_427_387_903), // lzcnt  2: always 19
         (19, 2_305_843_009_213_693_951), // lzcnt  3: always 19
-        (18,   999_999_999_999_999_999), // lzcnt  4: 18 or 19
-        (18,   576_460_752_303_423_487), // lzcnt  5: always 18
-        (18,   288_230_376_151_711_743), // lzcnt  6: always 18
-        (17,    99_999_999_999_999_999), // lzcnt  7: 17 or 18
-        (17,    72_057_594_037_927_935), // lzcnt  8: always 17
-        (17,    36_028_797_018_963_967), // lzcnt  9: always 17
-        (16,     9_999_999_999_999_999), // lzcnt 10: 16 or 17
-        (16,     9_007_199_254_740_991), // lzcnt 11: always 16
-        (16,     4_503_599_627_370_495), // lzcnt 12: always 16
-        (16,     2_251_799_813_685_247), // lzcnt 13: always 16
-        (15,       999_999_999_999_999), // lzcnt 14: 15 or 16
-        (15,       562_949_953_421_311), // lzcnt 15: always 15
-        (15,       281_474_976_710_655), // lzcnt 16: always 15
-        (14,        99_999_999_999_999), // lzcnt 17: 14 or 15
-        (14,        70_368_744_177_663), // lzcnt 18: always 14
-        (14,        35_184_372_088_831), // lzcnt 19: always 14
-        (13,         9_999_999_999_999), // lzcnt 20: 13 or 14
-        (13,         8_796_093_022_207), // lzcnt 21: always 13
-        (13,         4_398_046_511_103), // lzcnt 22: always 13
-        (13,         2_199_023_255_551), // lzcnt 23: always 13
-        (12,           999_999_999_999), // lzcnt 24: 12 or 13
-        (12,           549_755_813_887), // lzcnt 25: always 12
-        (12,           274_877_906_943), // lzcnt 26: always 12
-        (11,            99_999_999_999), // lzcnt 27: 11 or 12
-        (11,            68_719_476_735), // lzcnt 28: always 11
-        (11,            34_359_738_367), // lzcnt 29: always 11
-        (10,             9_999_999_999), // lzcnt 30: 10 or 11
-        (10,             8_589_934_591), // lzcnt 31: always 10
-        (10,             4_294_967_295), // lzcnt 32: always 10
-        (10,             2_147_483_647), // lzcnt 33: always 10
-        ( 9,               999_999_999), // lzcnt 34: 9 or 10
-        ( 9,               536_870_911), // lzcnt 35: always 9
-        ( 9,               268_435_455), // lzcnt 36: always 9
-        ( 8,                99_999_999), // lzcnt 37: 8 or 9
-        ( 8,                67_108_863), // lzcnt 38: always 8
-        ( 8,                33_554_431), // lzcnt 39: always 8
-        ( 7,                 9_999_999), // lzcnt 40: 7 or 8
-        ( 7,                 8_388_607), // lzcnt 41: always 7
-        ( 7,                 4_194_303), // lzcnt 42: always 7
-        ( 7,                 2_097_151), // lzcnt 43: always 7
-        ( 6,                   999_999), // lzcnt 44: 6 or 7
-        ( 6,                   524_287), // lzcnt 45: always 6
-        ( 6,                   262_143), // lzcnt 46: always 6
-        ( 5,                    99_999), // lzcnt 47: 5 or 6
-        ( 5,                    65_535), // lzcnt 48: always 5
-        ( 5,                    32_767), // lzcnt 49: always 5
-        ( 4,                     9_999), // lzcnt 50: 4 or 5
-        ( 4,                     8_191), // lzcnt 51: always 4
-        ( 4,                     4_095), // lzcnt 52: always 4
-        ( 4,                     2_047), // lzcnt 53: always 4
-        ( 3,                       999), // lzcnt 54: 3 or 4
-        ( 3,                       511), // lzcnt 55: always 3
-        ( 3,                       255), // lzcnt 56: always 3
-        ( 2,                        99), // lzcnt 57: 2 or 3
-        ( 2,                        63), // lzcnt 58: always 2
-        ( 2,                        31), // lzcnt 59: always 2
-        ( 1,                         9), // lzcnt 60: 1 or 2
-        ( 1,                         7), // lzcnt 61: always 1
-        ( 1,                         3), // lzcnt 62: always 1
-        ( 1,                         1), // lzcnt 63: always 1
+        (18, 999_999_999_999_999_999),   // lzcnt  4: 18 or 19
+        (18, 576_460_752_303_423_487),   // lzcnt  5: always 18
+        (18, 288_230_376_151_711_743),   // lzcnt  6: always 18
+        (17, 99_999_999_999_999_999),    // lzcnt  7: 17 or 18
+        (17, 72_057_594_037_927_935),    // lzcnt  8: always 17
+        (17, 36_028_797_018_963_967),    // lzcnt  9: always 17
+        (16, 9_999_999_999_999_999),     // lzcnt 10: 16 or 17
+        (16, 9_007_199_254_740_991),     // lzcnt 11: always 16
+        (16, 4_503_599_627_370_495),     // lzcnt 12: always 16
+        (16, 2_251_799_813_685_247),     // lzcnt 13: always 16
+        (15, 999_999_999_999_999),       // lzcnt 14: 15 or 16
+        (15, 562_949_953_421_311),       // lzcnt 15: always 15
+        (15, 281_474_976_710_655),       // lzcnt 16: always 15
+        (14, 99_999_999_999_999),        // lzcnt 17: 14 or 15
+        (14, 70_368_744_177_663),        // lzcnt 18: always 14
+        (14, 35_184_372_088_831),        // lzcnt 19: always 14
+        (13, 9_999_999_999_999),         // lzcnt 20: 13 or 14
+        (13, 8_796_093_022_207),         // lzcnt 21: always 13
+        (13, 4_398_046_511_103),         // lzcnt 22: always 13
+        (13, 2_199_023_255_551),         // lzcnt 23: always 13
+        (12, 999_999_999_999),           // lzcnt 24: 12 or 13
+        (12, 549_755_813_887),           // lzcnt 25: always 12
+        (12, 274_877_906_943),           // lzcnt 26: always 12
+        (11, 99_999_999_999),            // lzcnt 27: 11 or 12
+        (11, 68_719_476_735),            // lzcnt 28: always 11
+        (11, 34_359_738_367),            // lzcnt 29: always 11
+        (10, 9_999_999_999),             // lzcnt 30: 10 or 11
+        (10, 8_589_934_591),             // lzcnt 31: always 10
+        (10, 4_294_967_295),             // lzcnt 32: always 10
+        (10, 2_147_483_647),             // lzcnt 33: always 10
+        (9, 999_999_999),                // lzcnt 34: 9 or 10
+        (9, 536_870_911),                // lzcnt 35: always 9
+        (9, 268_435_455),                // lzcnt 36: always 9
+        (8, 99_999_999),                 // lzcnt 37: 8 or 9
+        (8, 67_108_863),                 // lzcnt 38: always 8
+        (8, 33_554_431),                 // lzcnt 39: always 8
+        (7, 9_999_999),                  // lzcnt 40: 7 or 8
+        (7, 8_388_607),                  // lzcnt 41: always 7
+        (7, 4_194_303),                  // lzcnt 42: always 7
+        (7, 2_097_151),                  // lzcnt 43: always 7
+        (6, 999_999),                    // lzcnt 44: 6 or 7
+        (6, 524_287),                    // lzcnt 45: always 6
+        (6, 262_143),                    // lzcnt 46: always 6
+        (5, 99_999),                     // lzcnt 47: 5 or 6
+        (5, 65_535),                     // lzcnt 48: always 5
+        (5, 32_767),                     // lzcnt 49: always 5
+        (4, 9_999),                      // lzcnt 50: 4 or 5
+        (4, 8_191),                      // lzcnt 51: always 4
+        (4, 4_095),                      // lzcnt 52: always 4
+        (4, 2_047),                      // lzcnt 53: always 4
+        (3, 999),                        // lzcnt 54: 3 or 4
+        (3, 511),                        // lzcnt 55: always 3
+        (3, 255),                        // lzcnt 56: always 3
+        (2, 99),                         // lzcnt 57: 2 or 3
+        (2, 63),                         // lzcnt 58: always 2
+        (2, 31),                         // lzcnt 59: always 2
+        (1, 9),                          // lzcnt 60: 1 or 2
+        (1, 7),                          // lzcnt 61: always 1
+        (1, 3),                          // lzcnt 62: always 1
+        (1, 1),                          // lzcnt 63: always 1
     ];
     let lz = (n | 1).leading_zeros() as usize;
     let (candidate, threshold) = TABLE[lz];
@@ -743,14 +744,15 @@ fn format_u64_direct(n: u64, out: &mut alloc::vec::Vec<u8>) {
 
 /// Format a `u64` into `buf` (big-endian text). Returns the slice of
 /// `buf` that holds the digits.
+//
+// The `expect`s below are unreachable: every byte written is from
+// `DIGIT_LUT` (ASCII '0'..='9') or the literal `b'-'`. They are
+// monomorphization-time guards against a formatter-internal bug.
 #[allow(clippy::cast_possible_truncation)]
 fn format_u64(n: u64, buf: &mut [u8; 20]) -> &str {
     let digits = fast_digit_count(n);
-    #[allow(unsafe_code)]
-    unsafe {
-        write_digits_backward(n, buf.as_mut_ptr(), digits);
-        core::str::from_utf8_unchecked(&buf[..digits])
-    }
+    write_digits_backward(n, buf.as_mut_ptr(), digits);
+    core::str::from_utf8(&buf[..digits]).expect("integer formatter emits ASCII")
 }
 
 fn format_i64(n: i64, buf: &mut [u8; 20]) -> &str {
@@ -764,10 +766,7 @@ fn format_i64(n: i64, buf: &mut [u8; 20]) -> &str {
     buf[0] = b'-';
     write_digits_backward(mag, buf[1..].as_mut_ptr(), digits);
     let total = 1 + digits;
-    #[allow(unsafe_code)]
-    unsafe {
-        core::str::from_utf8_unchecked(&buf[..total])
-    }
+    core::str::from_utf8(&buf[..total]).expect("integer formatter emits ASCII")
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -789,10 +788,7 @@ fn format_u128(mut n: u128, buf: &mut [u8; 40]) -> &str {
         pos -= 1;
         buf[pos] = b'0' + n as u8;
     }
-    #[allow(unsafe_code)]
-    unsafe {
-        core::str::from_utf8_unchecked(&buf[pos..])
-    }
+    core::str::from_utf8(&buf[pos..]).expect("integer formatter emits ASCII")
 }
 
 fn format_i128(n: i128, buf: &mut [u8; 40]) -> &str {
@@ -807,10 +803,7 @@ fn format_i128(n: i128, buf: &mut [u8; 40]) -> &str {
     buf[0] = b'-';
     buf[1..=len].copy_from_slice(s.as_bytes());
     let total = 1 + len;
-    #[allow(unsafe_code)]
-    unsafe {
-        core::str::from_utf8_unchecked(&buf[..total])
-    }
+    core::str::from_utf8(&buf[..total]).expect("integer formatter emits ASCII")
 }
 
 // ---------------------------------------------------------------------------
@@ -855,7 +848,6 @@ pub mod float {
         crate::float::format_finite(f, out);
         Ok(())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -953,19 +945,14 @@ pub trait ToJson {
 /// `JsonWrite` method only emits ASCII structural bytes, `&str` slices
 /// (valid by construction), ASCII escape sequences, and ASCII digit
 /// sequences from the integer/float formatters.
+// `expect` below is unreachable from user input: every `JsonWrite` path
+// emits valid UTF-8 by construction (see `ByteSink`'s impl). The check
+// guards against a serializer-internal bug, not a user-triggerable case.
 #[cfg(feature = "alloc")]
+#[allow(clippy::missing_panics_doc)]
 pub fn to_string<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> {
     let bytes = to_vec(value)?;
-    // SAFETY: every code path through `ByteSink`'s `JsonWrite` impl
-    // emits only valid UTF-8:
-    //   - `write_byte`: called with ASCII structural punctuation
-    //   - `write_str_raw`: takes `&str`, valid UTF-8 by definition
-    //   - `write_escaped_str`: copies `&str` bytes verbatim (valid
-    //     UTF-8) plus ASCII escape sequences
-    //   - `write_int_*`: ASCII digits from the LUT formatter
-    //   - `write_float_f64`: ASCII digits from Grisu3 / libstd
-    #[allow(unsafe_code)]
-    Ok(unsafe { String::from_utf8_unchecked(bytes) })
+    Ok(String::from_utf8(bytes).expect("bourne emits only valid UTF-8"))
 }
 
 /// Serialize `value` into a fresh `Vec<u8>`.
@@ -1119,9 +1106,9 @@ impl<W: std::io::Write + ?Sized> JsonWrite for IoWriteSink<'_, W> {
         };
         match crate::float::format_finite_fmt(f, &mut adapter) {
             Ok(()) => Ok(()),
-            Err(_) => Err(adapter.err.unwrap_or_else(|| {
-                std::io::Error::other("fmt error in float formatter")
-            })),
+            Err(_) => Err(adapter
+                .err
+                .unwrap_or_else(|| std::io::Error::other("fmt error in float formatter"))),
         }
     }
 }
@@ -1528,12 +1515,22 @@ impl<T: ToJson> ToJson for [T] {
         // hint covers brackets (`[`, `]`), commas (1 per element), and
         // the per-element max payload. After this, *every* byte the
         // primitive path writes fits in the reserved tail.
+        //
+        // The float-error surfacing below only matters under `alloc` — both
+        // `NEEDS_VALIDATION` and the taint flag are only ever set true by
+        // float impls, which live in the alloc-gated module. In `no_std`
+        // builds the branches are statically unreachable; gating them also
+        // keeps the `write_float_f64` reference (alloc-only method) out of
+        // the no_std build.
         if T::MAX_SERIALIZED_LEN != 0 {
-            // Optional pre-scan validation (kept for types that prefer
-            // a separate validation pass; floats now use per-element
-            // taint via `write_float_f64_taint` instead).
-            if T::NEEDS_VALIDATION && T::pre_validate_slice(self).is_err() {
-                return w.write_float_f64(f64::NAN);
+            #[cfg(feature = "alloc")]
+            {
+                // Optional pre-scan validation (kept for types that prefer
+                // a separate validation pass; floats now use per-element
+                // taint via `write_float_f64_taint` instead).
+                if T::NEEDS_VALIDATION && T::pre_validate_slice(self).is_err() {
+                    return w.write_float_f64(f64::NAN);
+                }
             }
             let hint = self
                 .len()
@@ -1545,12 +1542,15 @@ impl<T: ToJson> ToJson for [T] {
             // capacity check.
             #[allow(unsafe_code)]
             let res = unsafe { write_array_reserved(self, w) };
-            // Flush any per-element float taint. Non-zero means at least
-            // one input was non-finite during the loop; surface it as
-            // a typed error through the sink's natural channel.
-            let taint = w.take_nonfinite_taint();
-            if taint != 0 {
-                return w.write_float_f64(f64::NAN);
+            #[cfg(feature = "alloc")]
+            {
+                // Flush any per-element float taint. Non-zero means at least
+                // one input was non-finite during the loop; surface it as
+                // a typed error through the sink's natural channel.
+                let taint = w.take_nonfinite_taint();
+                if taint != 0 {
+                    return w.write_float_f64(f64::NAN);
+                }
             }
             return res;
         }

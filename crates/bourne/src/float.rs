@@ -136,14 +136,20 @@ fn remove_trailing_zeros(mut m: u64, mut e: i32) -> DecimalF64 {
     // diverge / overflow `e`. The result is discarded by the cmov in
     // that case.
     if m == 0 {
-        return DecimalF64 { exponent: e, mantissa: 0 };
+        return DecimalF64 {
+            exponent: e,
+            mantissa: 0,
+        };
     }
     let minv5: u64 = 0u64.wrapping_sub(u64::MAX / 5);
     let bound: u64 = u64::MAX / 10 + 1;
     loop {
         let q = m.wrapping_mul(minv5).rotate_right(1);
         if q >= bound {
-            return DecimalF64 { exponent: e, mantissa: m };
+            return DecimalF64 {
+                exponent: e,
+                mantissa: m,
+            };
         }
         e += 1;
         m = q;
@@ -264,6 +270,21 @@ fn to_decimal_centred(e: i32, m: u64) -> DecimalF64 {
     }
 }
 
+/// Bundle of values shared across the uncentred-decompose helpers.
+/// Extracted so the two arms (`a < b` and `a >= b`) take one struct
+/// rather than seven positional arguments.
+struct UncentredCtx {
+    m: u64,
+    f: i32,
+    r: u32,
+    upper: u64,
+    lower: u64,
+    a: u64,
+    b: u64,
+    m_a: u64,
+    m_b: u64,
+}
+
 fn to_decimal_uncentred(e: i32) -> DecimalF64 {
     let m = MANTISSA_UNCENTRED;
     let f = log10_pow2(e);
@@ -274,44 +295,106 @@ fn to_decimal_uncentred(e: i32) -> DecimalF64 {
     let m_b = (2 * m + 1) << r;
     let b = mshift(m_b, upper, lower);
     let a = mshift(m_a, upper, lower) / 2;
+    let ctx = UncentredCtx {
+        m,
+        f,
+        r,
+        upper,
+        lower,
+        a,
+        b,
+        m_a,
+        m_b,
+    };
+
+    if a < b {
+        uncentred_a_less_than_b(&ctx)
+    } else {
+        uncentred_a_ge_b(&ctx)
+    }
+}
+
+/// `a < b` arm — the common case. Handles the shortest-roundtrip
+/// selection and the `m_c` fallback.
+#[inline]
+fn uncentred_a_less_than_b(ctx: &UncentredCtx) -> DecimalF64 {
+    let UncentredCtx {
+        f,
+        r,
+        upper,
+        lower,
+        a,
+        b,
+        m_a,
+        ..
+    } = *ctx;
     let q = div10(b);
     let s = 10 * q;
 
-    if a < b {
-        if can_test_pow5(f) {
-            let shortest = if s == b {
-                !is_tie_uncentred(f, m_b) || m % 2 == 0
-            } else if s == a {
-                is_tie_uncentred(f, m_a) && m % 2 == 0
-            } else {
-                s > a
-            };
-            if shortest {
-                return remove_trailing_zeros(q, f + 1);
-            }
-        } else if s > a {
-            return remove_trailing_zeros(q, f + 1);
-        }
-
-        let log2_m_c = MANTISSA_WIDTH + r + 1;
-        let c_2 = mshift_pow2(log2_m_c, upper, lower);
-        let c = c_2 / 2;
-
-        if c == a && !is_tie_uncentred(f, m_a) {
-            return DecimalF64 { exponent: f, mantissa: c + 1 };
-        }
-
-        let pick_left = (is_tie_neg_f(f, c_2) && c % 2 == 0) || c_2 % 2 == 0;
-        return DecimalF64 {
-            exponent: f,
-            mantissa: c + u64::from(!pick_left),
-        };
+    if uncentred_is_shortest(ctx, s) {
+        return remove_trailing_zeros(q, f + 1);
     }
 
+    let log2_m_c = MANTISSA_WIDTH + r + 1;
+    let c_2 = mshift_pow2(log2_m_c, upper, lower);
+    let c = c_2 / 2;
+
+    if c == a && !is_tie_uncentred(f, m_a) {
+        return DecimalF64 {
+            exponent: f,
+            mantissa: c + 1,
+        };
+    }
+    let pick_left = (is_tie_neg_f(f, c_2) && c % 2 == 0) || c_2 % 2 == 0;
+    DecimalF64 {
+        exponent: f,
+        mantissa: c + u64::from(!pick_left),
+    }
+}
+
+/// Decide whether `q` is the shortest representation when `a < b`.
+/// Splitting this out of `uncentred_a_less_than_b` keeps each helper
+/// below the CRAP threshold.
+#[inline]
+fn uncentred_is_shortest(ctx: &UncentredCtx, s: u64) -> bool {
+    let UncentredCtx {
+        m,
+        f,
+        a,
+        b,
+        m_a,
+        m_b,
+        ..
+    } = *ctx;
+    if !can_test_pow5(f) {
+        return s > a;
+    }
+    if s == b {
+        return !is_tie_uncentred(f, m_b) || m % 2 == 0;
+    }
+    if s == a {
+        return is_tie_uncentred(f, m_a) && m % 2 == 0;
+    }
+    s > a
+}
+
+/// `a >= b` arm — rarely hit, separate fn so the high-CC tiebreak
+/// math doesn't combine with the `a < b` arm's CC.
+#[inline]
+fn uncentred_a_ge_b(ctx: &UncentredCtx) -> DecimalF64 {
+    let UncentredCtx {
+        m,
+        f,
+        r,
+        upper,
+        lower,
+        a,
+        m_a,
+        ..
+    } = *ctx;
     if is_tie_uncentred(f, m_a) && m % 2 == 0 {
         return remove_trailing_zeros(a, f);
     }
-
     let m_c = (40 * m) << r;
     let c_2 = mshift(m_c, upper, lower);
     let c = c_2 / 2;
@@ -381,10 +464,10 @@ static QUAD_LUT: [u8; 40_000] = {
     let mut n: u32 = 0;
     while n < 10_000 {
         let off = (n * 4) as usize;
-        buf[off]     = b'0' + (n / 1000)         as u8;
-        buf[off + 1] = b'0' + ((n / 100) % 10)   as u8;
-        buf[off + 2] = b'0' + ((n / 10) % 10)    as u8;
-        buf[off + 3] = b'0' + (n % 10)           as u8;
+        buf[off] = b'0' + (n / 1000) as u8;
+        buf[off + 1] = b'0' + ((n / 100) % 10) as u8;
+        buf[off + 2] = b'0' + ((n / 10) % 10) as u8;
+        buf[off + 3] = b'0' + (n % 10) as u8;
         n += 1;
     }
     buf
@@ -397,23 +480,41 @@ static QUAD_LUT: [u8; 40_000] = {
 #[inline]
 fn mantissa_digit_count(n: u64) -> usize {
     debug_assert!(n < 100_000_000_000_000_000); // < 10^17
-    if n >= 10_000_000_000_000_000 { 17 }
-    else if n >= 1_000_000_000_000_000 { 16 }
-    else if n >= 100_000_000_000_000 { 15 }
-    else if n >= 10_000_000_000_000 { 14 }
-    else if n >= 1_000_000_000_000 { 13 }
-    else if n >= 100_000_000_000 { 12 }
-    else if n >= 10_000_000_000 { 11 }
-    else if n >= 1_000_000_000 { 10 }
-    else if n >= 100_000_000 { 9 }
-    else if n >= 10_000_000 { 8 }
-    else if n >= 1_000_000 { 7 }
-    else if n >= 100_000 { 6 }
-    else if n >= 10_000 { 5 }
-    else if n >= 1_000 { 4 }
-    else if n >= 100 { 3 }
-    else if n >= 10 { 2 }
-    else { 1 }
+    if n >= 10_000_000_000_000_000 {
+        17
+    } else if n >= 1_000_000_000_000_000 {
+        16
+    } else if n >= 100_000_000_000_000 {
+        15
+    } else if n >= 10_000_000_000_000 {
+        14
+    } else if n >= 1_000_000_000_000 {
+        13
+    } else if n >= 100_000_000_000 {
+        12
+    } else if n >= 10_000_000_000 {
+        11
+    } else if n >= 1_000_000_000 {
+        10
+    } else if n >= 100_000_000 {
+        9
+    } else if n >= 10_000_000 {
+        8
+    } else if n >= 1_000_000 {
+        7
+    } else if n >= 100_000 {
+        6
+    } else if n >= 10_000 {
+        5
+    } else if n >= 1_000 {
+        4
+    } else if n >= 100 {
+        3
+    } else if n >= 10 {
+        2
+    } else {
+        1
+    }
 }
 
 /// Core formatter: write `value`'s shortest-roundtrip decimal into `buf`,
@@ -424,7 +525,9 @@ pub(crate) fn format_finite_to_buf(value: f64, buf: &mut [u8; FORMAT_BUF_LEN]) -
     #[allow(unsafe_code)]
     // SAFETY: buf is at least FORMAT_BUF_LEN = 32 bytes, the worst-case
     // length any finite f64 can produce.
-    unsafe { format_finite_to_ptr(value, buf.as_mut_ptr()) }
+    unsafe {
+        format_finite_to_ptr(value, buf.as_mut_ptr())
+    }
 }
 
 /// Core formatter: write `value`'s shortest-roundtrip decimal through `dst`,
@@ -657,21 +760,22 @@ unsafe fn write_exponent_ptr(dst: *mut u8, exp: i32) -> usize {
 // Public API — unchanged signatures from the Grisu3 era.
 // ===========================================================================
 
+// `expect`s below are unreachable: `format_finite_to_buf` only writes ASCII
+// (digits, '.', 'e', '-', '+'). They guard a formatter-internal bug, not
+// user input. ASCII validation of ≤32 bytes is one SIMD compare.
+
 pub(crate) fn format_finite(f: f64, out: &mut String) {
     let mut buf = [0u8; FORMAT_BUF_LEN];
     let len = format_finite_to_buf(f, &mut buf);
-    #[allow(unsafe_code)]
-    // SAFETY: format_finite_to_buf only writes ASCII (digits, '.', 'e',
-    // '-', '+'), so buf[..len] is valid UTF-8.
-    out.push_str(unsafe { core::str::from_utf8_unchecked(&buf[..len]) });
+    let s = core::str::from_utf8(&buf[..len]).expect("teju emits ASCII");
+    out.push_str(s);
 }
 
 pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> fmt::Result {
     let mut buf = [0u8; FORMAT_BUF_LEN];
     let len = format_finite_to_buf(f, &mut buf);
-    #[allow(unsafe_code)]
-    // SAFETY: see format_finite.
-    out.write_str(unsafe { core::str::from_utf8_unchecked(&buf[..len]) })
+    let s = core::str::from_utf8(&buf[..len]).expect("teju emits ASCII");
+    out.write_str(s)
 }
 
 /// `Vec<u8>` path used by `ByteSink::write_float_f64`. Renders to a 32-byte
@@ -723,10 +827,7 @@ pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) -> boo
 #[cfg(feature = "alloc")]
 #[allow(unsafe_code)]
 #[inline]
-pub(crate) unsafe fn format_finite_to_vec_unchecked(
-    f: f64,
-    out: &mut alloc::vec::Vec<u8>,
-) -> bool {
+pub(crate) unsafe fn format_finite_to_vec_unchecked(f: f64, out: &mut alloc::vec::Vec<u8>) -> bool {
     const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
     if f.to_bits() & EXP_MASK == EXP_MASK {
         return false;
@@ -766,10 +867,7 @@ pub(crate) unsafe fn format_finite_to_vec_unchecked(
 #[cfg(feature = "alloc")]
 #[allow(unsafe_code)]
 #[inline]
-pub(crate) unsafe fn format_finite_to_vec_taint(
-    f: f64,
-    out: &mut alloc::vec::Vec<u8>,
-) -> u64 {
+pub(crate) unsafe fn format_finite_to_vec_taint(f: f64, out: &mut alloc::vec::Vec<u8>) -> u64 {
     const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
     let bits = f.to_bits();
     let is_nonfinite = (bits & EXP_MASK) == EXP_MASK;
@@ -810,10 +908,7 @@ pub(crate) unsafe fn format_finite_to_vec_taint(
 #[cfg(feature = "alloc")]
 #[allow(unsafe_code)]
 #[inline]
-pub(crate) unsafe fn format_finite_to_vec_unchecked_finite(
-    f: f64,
-    out: &mut alloc::vec::Vec<u8>,
-) {
+pub(crate) unsafe fn format_finite_to_vec_unchecked_finite(f: f64, out: &mut alloc::vec::Vec<u8>) {
     debug_assert!(f.is_finite(), "caller violated finite-input precondition");
     // SAFETY: see `format_finite_to_vec_unchecked`. Additionally, the
     // caller's finiteness precondition makes `format_finite_to_ptr`'s
@@ -845,11 +940,9 @@ mod tests {
     use alloc::string::String;
 
     #[test]
-    #[allow(clippy::float_cmp)]
     fn teju_output_roundtrips() {
         let mut state: u64 = 0xCAFE_BABE_DEAD_BEEF;
-        let mut count = 0usize;
-        for _ in 0..10_000 {
+        for (count, _) in (0..10_000).enumerate() {
             state = state
                 .wrapping_mul(6_364_136_223_846_793_005)
                 .wrapping_add(1_442_695_040_888_963_407);
@@ -860,15 +953,17 @@ mod tests {
                 1 => signed * 1e6,
                 _ => signed * 100.0,
             };
-            count += 1;
             if !v.is_finite() || v == 0.0 {
                 continue;
             }
             let mut out = String::new();
             format_finite(v, &mut out);
             let parsed: f64 = out.parse().expect("our output parses");
+            // Bit-pattern equality: format→parse must round-trip to the
+            // identical IEEE 754 encoding.
             assert_eq!(
-                parsed, v,
+                parsed.to_bits(),
+                v.to_bits(),
                 "roundtrip failed: formatted={out:?} for v={v:e} (bits=0x{:016x})",
                 v.to_bits()
             );
@@ -876,11 +971,22 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::float_cmp, clippy::approx_constant)]
     fn teju_matches_libstd_display() {
         let cases = [
-            1.0_f64, 1.5, 0.1, 0.2, 0.3, 100.0, 12.5, 1.5e10, -2.7e-5,
-            3.14159, 1e100, 1e-100, 1.7976931348623157e308, 5e-324,
+            1.0_f64,
+            1.5,
+            0.1,
+            0.2,
+            0.3,
+            100.0,
+            12.5,
+            1.5e10,
+            -2.7e-5,
+            1234.5678,
+            1e100,
+            1e-100,
+            1.7976931348623157e308,
+            5e-324,
         ];
         for &v in &cases {
             if v == 0.0 || !v.is_finite() {
@@ -891,8 +997,12 @@ mod tests {
             let libstd = format!("{v}");
             let ours_parsed: f64 = ours.parse().expect("ours parses");
             let libstd_parsed: f64 = libstd.parse().expect("libstd parses");
+            // Bit-pattern equality — both strings must parse to the same f64
+            // encoding, even though their textual forms may differ in
+            // grouping (e.g. "1e10" vs "10000000000").
             assert_eq!(
-                ours_parsed, libstd_parsed,
+                ours_parsed.to_bits(),
+                libstd_parsed.to_bits(),
                 "ours={ours:?} libstd={libstd:?} for v={v:e}",
             );
         }
@@ -929,15 +1039,215 @@ mod tests {
 
     #[test]
     fn teju_small_integers() {
-        for i in 1u64..=1000 {
-            let v = i as f64;
-            let d = teju(v);
-            let reconstructed = d.mantissa as f64 * 10f64.powi(d.exponent);
+        // Verify via string round-trip rather than `mantissa as f64 * 10^exp`:
+        // `f64::powi` is libm-backed and miri's host libm may differ from the
+        // production host (we observed `10f64.powi(1)` returning a 1 ULP off
+        // value under miri), which is unrelated to whether teju's decomposition
+        // is correct. The string is the contract we actually ship.
+        for i in 1u32..=1000 {
+            let v = f64::from(i);
+            let mut s = String::new();
+            format_finite(v, &mut s);
+            let parsed: f64 = s.parse().expect("our output parses");
+            // Bit-pattern equality: small integers round-trip exactly.
             assert_eq!(
-                reconstructed, v,
-                "small integer {i}: mantissa={}, exp={}",
-                d.mantissa, d.exponent
+                parsed.to_bits(),
+                v.to_bits(),
+                "small integer {i}: round-tripped through {s:?}"
             );
+        }
+    }
+
+    /// Exhaustively format every uncentred f64 (powers of two from
+    /// 2^-1022 through 2^1023). These hit `to_decimal_uncentred`,
+    /// covering both its `a < b` (the common case) and `a >= b` arms.
+    /// Round-tripping via string parse guards against silent corruption.
+    #[test]
+    fn teju_every_uncentred_value_round_trips() {
+        let mantissa_uncentred = 1u64 << 52;
+        for biased_exp in 1u64..=0x7FE {
+            let bits = (biased_exp << 52) | (mantissa_uncentred & ((1 << 52) - 1));
+            let v = f64::from_bits(bits);
+            assert!(v.is_finite(), "biased_exp={biased_exp}");
+            let mut s = String::new();
+            format_finite(v, &mut s);
+            let parsed: f64 = s.parse().expect("our output parses");
+            // Bit-pattern equality: exact round-trip is the contract.
+            assert_eq!(
+                parsed.to_bits(),
+                v.to_bits(),
+                "uncentred f64 with biased_exp={biased_exp} round-trip failed: {s:?}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Unsafe-boundary tests — these specifically exercise the caller-side
+    // capacity contract of the `_unchecked` Vec-tail writers under miri,
+    // including the exact-fit case `cap == len + FORMAT_BUF_LEN`.
+    //
+    // The full ser path always pre-reserves plenty of headroom via
+    // `reserve_hint`, so these are the only places that hit the boundary
+    // precisely. A regression that miscomputed `cap - len` would slip past
+    // the round-trip tests but blow up here under miri's strict pointer
+    // tracking.
+    // ---------------------------------------------------------------------
+
+    /// `format_finite_to_vec_unchecked` at exact `cap == len + 32`. Covers
+    /// every output form (zero, fixed, scientific) so each branch's worst-
+    /// case write lands at the boundary.
+    #[test]
+    fn vec_unchecked_at_exact_capacity() {
+        // (input, output form name)
+        let cases: &[f64] = &[
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            1.5,
+            0.1,
+            123_456_789.0,
+            -1.5e10,
+            -2.7e-5,
+            1.7976931348623157e308,
+            5e-324,
+        ];
+        for &v in cases {
+            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
+            // SAFETY: capacity is exactly FORMAT_BUF_LEN, contract met.
+            #[allow(unsafe_code)]
+            let ok = unsafe { format_finite_to_vec_unchecked(v, &mut out) };
+            assert!(ok, "finite input rejected: {v}");
+            assert!(
+                out.len() <= FORMAT_BUF_LEN,
+                "len={} > 32 for {v}",
+                out.len()
+            );
+            assert!(!out.is_empty(), "empty output for {v}");
+            // Output must be valid ASCII.
+            for &b in &out {
+                assert!(b.is_ascii(), "non-ASCII byte {b:#x} in output for {v}");
+            }
+        }
+    }
+
+    /// `format_finite_to_vec_unchecked` returns `false` for non-finite,
+    /// writing zero bytes. Exercises the early-return arm where `out.len`
+    /// is left untouched.
+    #[test]
+    fn vec_unchecked_rejects_nonfinite_without_touching_buf() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
+            #[allow(unsafe_code)]
+            let ok = unsafe { format_finite_to_vec_unchecked(v, &mut out) };
+            assert!(!ok, "non-finite accepted: {v}");
+            assert!(out.is_empty(), "buffer touched for non-finite {v}: {out:?}");
+        }
+    }
+
+    /// `format_finite_to_vec_taint` at exact capacity. The taint path
+    /// always writes — even for non-finite, where it substitutes 1.0 and
+    /// flags via the returned bit. Verify the substitute path under miri.
+    #[test]
+    fn vec_taint_at_exact_capacity() {
+        // Finite case: returns 0, writes real ASCII.
+        let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
+        #[allow(unsafe_code)]
+        let taint = unsafe { format_finite_to_vec_taint(1.5_f64, &mut out) };
+        assert_eq!(taint, 0);
+        assert_eq!(&out[..], b"1.5");
+
+        // Non-finite: returns non-zero, writes the substitute's ASCII.
+        for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
+            #[allow(unsafe_code)]
+            let taint = unsafe { format_finite_to_vec_taint(v, &mut out) };
+            assert_ne!(taint, 0, "taint not set for {v}");
+            assert!(!out.is_empty(), "substitute did not write for {v}");
+            assert!(out.len() <= FORMAT_BUF_LEN);
+        }
+    }
+
+    /// `format_finite_to_vec_unchecked_finite` — caller-promised finite,
+    /// no per-call check. Hit every digit-count branch in
+    /// `mantissa_digit_count` so `write_digits_at_ptr` exercises both its
+    /// >32-bit and 32-bit-tail paths.
+    #[test]
+    fn vec_unchecked_finite_covers_digit_counts() {
+        // Values picked to hit different digit counts (1..=17) and both
+        // fixed-point and scientific output forms.
+        let cases: &[f64] = &[
+            1.0,
+            12.0,
+            123.0,
+            1234.0,
+            12345.0,
+            123_456.0,
+            1_234_567.0,
+            12_345_678.0, // 8-digit (boundary for >32-bit split)
+            123_456_789.0,
+            1_234_567_890.0,
+            12_345_678_901.0,
+            123_456_789_012.0,
+            1_234_567_890_123.0,
+            12_345_678_901_234.0,
+            123_456_789_012_345.0,
+            1_234_567_890_123_456.0,    // 16-digit
+            12_345_678_901_234_567.0,   // 17-digit boundary
+            1e-300,                    // far-negative exponent, scientific
+            1e300,                     // far-positive exponent, scientific
+        ];
+        for &v in cases {
+            assert!(v.is_finite(), "test bug: non-finite case {v}");
+            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
+            #[allow(unsafe_code)]
+            unsafe {
+                format_finite_to_vec_unchecked_finite(v, &mut out);
+            }
+            assert!(!out.is_empty(), "no output for {v}");
+            assert!(out.len() <= FORMAT_BUF_LEN);
+            for &b in &out {
+                assert!(b.is_ascii(), "non-ASCII for {v}: {out:?}");
+            }
+        }
+    }
+
+    /// All three Vec-tail writers, called repeatedly on the same Vec so
+    /// the ASCII bytes accumulate. Catches off-by-one in `len + written`.
+    #[test]
+    fn vec_unchecked_repeated_writes_accumulate() {
+        // u32 because we widen losslessly to f64 below; the loop bound also
+        // makes it fit u8, but u32 keeps the conversion site obvious.
+        let n: u32 = 50;
+        let cap = 2 + (n as usize) * (FORMAT_BUF_LEN + 1);
+        let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(cap);
+        for i in 0..n {
+            let v = f64::from(i) + 0.5;
+            #[allow(unsafe_code)]
+            unsafe {
+                format_finite_to_vec_unchecked_finite(v, &mut out);
+                if i + 1 < n {
+                    // Comma between elements — same unchecked-write pattern
+                    // the slice writer uses.
+                    let len = out.len();
+                    let dst = out.as_mut_ptr().add(len);
+                    core::ptr::write(dst, b',');
+                    out.set_len(len + 1);
+                }
+            }
+        }
+        // Parse it back as a CSV of floats.
+        let s = core::str::from_utf8(&out).expect("ASCII");
+        let parts: alloc::vec::Vec<f64> = s
+            .split(',')
+            .map(|x| x.parse::<f64>().expect("our output parses"))
+            .collect();
+        assert_eq!(parts.len(), n as usize);
+        for (i, &v) in parts.iter().enumerate() {
+            let expected = f64::from(u32::try_from(i).expect("n=50 fits u32")) + 0.5;
+            // Bit-pattern equality: format→parse round-trip is exact for these
+            // tiny half-integer values.
+            assert_eq!(v.to_bits(), expected.to_bits(), "round-trip {i}");
         }
     }
 }

@@ -24,7 +24,7 @@ fn drain(input: &[u8]) {
 }
 
 mod wide_int_array {
-    use super::*;
+    use super::{wide_int_array, drain, parse};
 
     // Wide ints — 13-19 digit values. Streaming + typed paths.
 

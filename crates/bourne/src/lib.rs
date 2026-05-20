@@ -102,7 +102,6 @@ pub use bourne_core::{
 pub use de::{FromJson, parse, parse_str};
 #[cfg(feature = "alloc")]
 pub use de::{MapKey, key_to_cow};
-pub use ser::{JsonWrite, ToJson};
 #[cfg(feature = "alloc")]
 pub use ser::{
     ByteSink, FmtWriteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string,
@@ -110,6 +109,7 @@ pub use ser::{
 };
 #[cfg(feature = "std")]
 pub use ser::{IoWriteSink, to_writer};
+pub use ser::{JsonWrite, ToJson};
 
 mod macros;
 
@@ -787,7 +787,13 @@ mod tests {
         // that decoded form.
         let j = r#"{"user-id":1,"x\ny":2}"#;
         let r: EscKey = parse_str(j).unwrap();
-        assert_eq!(r, EscKey { user_id: 1, x_newline_y: 2 });
+        assert_eq!(
+            r,
+            EscKey {
+                user_id: 1,
+                x_newline_y: 2
+            }
+        );
     }
 
     #[test]
@@ -878,7 +884,13 @@ mod tests {
     fn macro_field_rename_uses_renamed_key() {
         let j = r#"{"user-id":1,"displayName":2}"#;
         let r: Renamed = parse_str(j).unwrap();
-        assert_eq!(r, Renamed { user_id: 1, display_name: 2 });
+        assert_eq!(
+            r,
+            Renamed {
+                user_id: 1,
+                display_name: 2
+            }
+        );
     }
 
     #[test]
@@ -1354,13 +1366,22 @@ mod to_json_macro_tests {
 
     #[test]
     fn plain_struct_emits_object() {
-        let v = Plain { id: 7, name: String::from("alice") };
+        let v = Plain {
+            id: 7,
+            name: String::from("alice"),
+        };
         let s = to_string(&v).unwrap();
         // Field order matches declaration order.
         assert_eq!(s, r#"{"id":7,"name":"alice"}"#);
         // Parse back through the equivalent FromJson type.
         let back: PlainParse = parse_str(&s).unwrap();
-        assert_eq!(back, PlainParse { id: 7, name: String::from("alice") });
+        assert_eq!(
+            back,
+            PlainParse {
+                id: 7,
+                name: String::from("alice")
+            }
+        );
     }
 
     crate::to_json! {
@@ -1373,7 +1394,10 @@ mod to_json_macro_tests {
 
     #[test]
     fn struct_with_lifetime() {
-        let v = Borrowed { tag: "hi", count: 3 };
+        let v = Borrowed {
+            tag: "hi",
+            count: 3,
+        };
         let s = to_string(&v).unwrap();
         assert_eq!(s, r#"{"tag":"hi","count":3}"#);
     }
@@ -1394,7 +1418,12 @@ mod to_json_macro_tests {
 
     #[test]
     fn rename_emits_new_key() {
-        let v = Decorated { user_id: 1, cached: 99, note: None, value: 42 };
+        let v = Decorated {
+            user_id: 1,
+            cached: 99,
+            note: None,
+            value: 42,
+        };
         let s = to_string(&v).unwrap();
         // user-id renamed; cached omitted; note omitted (None); value present.
         assert_eq!(s, r#"{"user-id":1,"value":42}"#);
@@ -1435,7 +1464,9 @@ mod to_json_macro_tests {
 
     #[test]
     fn macro_passes_strings_to_escape_path() {
-        let v = WithEscape { text: String::from("a\nb\"c") };
+        let v = WithEscape {
+            text: String::from("a\nb\"c"),
+        };
         let s = to_string(&v).unwrap();
         assert_eq!(s, r#"{"text":"a\nb\"c"}"#);
     }
@@ -1539,7 +1570,10 @@ mod to_json_macro_tests {
 
     #[test]
     fn internal_tag_unit_emits_object_with_tag() {
-        assert_eq!(to_string(&Event::Heartbeat).unwrap(), r#"{"type":"Heartbeat"}"#);
+        assert_eq!(
+            to_string(&Event::Heartbeat).unwrap(),
+            r#"{"type":"Heartbeat"}"#
+        );
     }
 
     #[test]
@@ -1579,7 +1613,9 @@ mod to_json_macro_tests {
 
     #[test]
     fn adjacent_struct_emits_content_object() {
-        let v = Msg::Body { text: String::from("ok") };
+        let v = Msg::Body {
+            text: String::from("ok"),
+        };
         assert_eq!(to_string(&v).unwrap(), r#"{"t":"Body","c":{"text":"ok"}}"#);
     }
 
@@ -1612,7 +1648,9 @@ mod to_json_macro_tests {
 
     #[test]
     fn untagged_struct_emits_object() {
-        let v = Mixed::Body { name: String::from("x") };
+        let v = Mixed::Body {
+            name: String::from("x"),
+        };
         assert_eq!(to_string(&v).unwrap(), r#"{"name":"x"}"#);
     }
 }
@@ -1703,8 +1741,7 @@ mod sink_adapter_tests {
     #[test]
     fn pretty_object_keys_have_one_space_after_colon() {
         use super::to_string_pretty;
-        let m: std::collections::BTreeMap<&str, i32> =
-            [("a", 1), ("b", 2)].into_iter().collect();
+        let m: std::collections::BTreeMap<&str, i32> = [("a", 1), ("b", 2)].into_iter().collect();
         assert_eq!(
             to_string_pretty(&m).unwrap(),
             "{\n  \"a\": 1,\n  \"b\": 2\n}",
@@ -1831,7 +1868,10 @@ mod json_macro_tests {
 
     #[test]
     fn plain_struct_round_trips() {
-        let v = Plain { id: 7, name: String::from("alice") };
+        let v = Plain {
+            id: 7,
+            name: String::from("alice"),
+        };
         let s = to_string(&v).unwrap();
         assert_eq!(s, r#"{"id":7,"name":"alice"}"#);
         let back: Plain = parse_str(&s).unwrap();
@@ -1850,7 +1890,13 @@ mod json_macro_tests {
     fn struct_with_lifetime_round_trips() {
         let json = r#"{"tag":"hi","count":3}"#;
         let v: Borrowed<'_> = parse_str(json).unwrap();
-        assert_eq!(v, Borrowed { tag: "hi", count: 3 });
+        assert_eq!(
+            v,
+            Borrowed {
+                tag: "hi",
+                count: 3
+            }
+        );
         assert_eq!(to_string(&v).unwrap(), json);
     }
 
@@ -1869,7 +1915,12 @@ mod json_macro_tests {
 
     #[test]
     fn rename_skip_skip_if_none() {
-        let v = Decorated { user_id: 1, cached: 99, note: None, value: 42 };
+        let v = Decorated {
+            user_id: 1,
+            cached: 99,
+            note: None,
+            value: 42,
+        };
         let s = to_string(&v).unwrap();
         assert_eq!(s, r#"{"user-id":1,"value":42}"#);
         let back: Decorated = parse_str(&s).unwrap();
@@ -1976,7 +2027,12 @@ mod json_macro_tests {
             (Msg::Ping, r#"{"t":"Ping"}"#),
             (Msg::Echo(String::from("hi")), r#"{"t":"Echo","c":"hi"}"#),
             (Msg::Pair(1, 2), r#"{"t":"Pair","c":[1,2]}"#),
-            (Msg::Body { text: String::from("ok") }, r#"{"t":"Body","c":{"text":"ok"}}"#),
+            (
+                Msg::Body {
+                    text: String::from("ok"),
+                },
+                r#"{"t":"Body","c":{"text":"ok"}}"#,
+            ),
         ];
         for (val, expected) in cases {
             let s = to_string(&val).unwrap();
@@ -1998,7 +2054,7 @@ mod json_macro_tests {
     }
 
     crate::json! {
-        #[derive(Debug, PartialEq)]
+        #[derive(Debug, PartialEq, Eq)]
         pub struct PubFields {
             pub id: u32,
             pub(crate) name: String,
@@ -2008,7 +2064,11 @@ mod json_macro_tests {
 
     #[test]
     fn pub_fields_round_trip() {
-        let v = PubFields { id: 1, name: String::from("hi"), value: 2 };
+        let v = PubFields {
+            id: 1,
+            name: String::from("hi"),
+            value: 2,
+        };
         let s = to_string(&v).unwrap();
         assert_eq!(s, r#"{"id":1,"name":"hi","value":2}"#);
         let back: PubFields = parse_str(&s).unwrap();
@@ -2021,8 +2081,680 @@ mod json_macro_tests {
         assert_eq!(to_string(&Mixed::One(42)).unwrap(), "42");
         assert_eq!(to_string(&Mixed::Two(1, 2)).unwrap(), "[1,2]");
         assert_eq!(
-            to_string(&Mixed::Body { name: String::from("x") }).unwrap(),
+            to_string(&Mixed::Body {
+                name: String::from("x")
+            })
+            .unwrap(),
             r#"{"name":"x"}"#,
         );
+    }
+}
+
+/// Unsafe-boundary tests for the public surface — pinned at the safety
+/// contracts of the `_unchecked` Vec-tail writers in `ByteSink` and the
+/// `from_utf8_unchecked` site in `decode_escapes`. These are designed to
+/// run under miri (CI: `MIRIFLAGS=-Zmiri-disable-isolation
+/// RUSTFLAGS=--cfg bourne_no_simd cargo +nightly miri test -p bourne --lib`).
+/// Each one targets a specific invariant; if a future refactor breaks the
+/// caller-side capacity reservation or the UTF-8 boundary, miri here trips
+/// on the precise unsafe before any user code does.
+#[cfg(all(test, feature = "alloc"))]
+mod unsafe_boundary_tests {
+    use super::*;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    /// Slice-of-floats ser at the exact-capacity boundary. The slice
+    /// writer's `reserve_hint` computes
+    ///   `2 + n * (MAX_SERIALIZED_LEN + 1) = 2 + n * 33`.
+    /// We pre-reserve exactly that, so the per-element
+    /// `write_float_f64_taint` (which assumes ≥ 32 bytes headroom)
+    /// runs against the tightest legal Vec capacity.
+    #[test]
+    fn bytesink_slice_floats_exact_capacity() {
+        for n in [0usize, 1, 2, 3, 7, 16, 17, 32, 33] {
+            #[allow(clippy::cast_precision_loss)]
+            let data: Vec<f64> = (0..n).map(|i| i as f64 + 0.5).collect();
+            let mut out: Vec<u8> = Vec::with_capacity(2 + n * 33);
+            let mut sink = ByteSink::new(&mut out);
+            (data.as_slice()).write_json(&mut sink).expect("ser");
+            let s = core::str::from_utf8(&out).expect("ASCII");
+            // Sanity: parse back as Vec<f64>.
+            let back: Vec<f64> = parse_str(s).expect("parse back");
+            assert_eq!(back.len(), n, "n={n}");
+            #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+            for (i, &v) in back.iter().enumerate() {
+                assert_eq!(v, i as f64 + 0.5, "n={n} i={i}");
+            }
+        }
+    }
+
+    /// Same as above but for `Vec<f32>`. f32 widens to f64 in the writer
+    /// but uses the same taint path, so the capacity boundary is identical.
+    #[test]
+    fn bytesink_slice_f32_exact_capacity() {
+        for n in [0usize, 1, 2, 16, 17] {
+            #[allow(clippy::cast_precision_loss)]
+            let data: Vec<f32> = (0..n).map(|i| i as f32 + 0.25).collect();
+            let mut out: Vec<u8> = Vec::with_capacity(2 + n * 33);
+            let mut sink = ByteSink::new(&mut out);
+            (data.as_slice()).write_json(&mut sink).expect("ser");
+            let s = core::str::from_utf8(&out).expect("ASCII");
+            let back: Vec<f32> = parse_str(s).expect("parse back");
+            assert_eq!(back.len(), n);
+            #[allow(clippy::cast_precision_loss, clippy::float_cmp)]
+            for (i, &v) in back.iter().enumerate() {
+                assert_eq!(v, i as f32 + 0.25, "n={n} i={i}");
+            }
+        }
+    }
+
+    /// Slice of f64 containing non-finite values — exercises the taint
+    /// accumulator path and verifies the slice writer surfaces a
+    /// `NonFiniteFloat` error rather than emitting garbage bytes.
+    #[test]
+    fn bytesink_slice_nonfinite_taint_path() {
+        // The non-finite path writes substitute bytes into the Vec before
+        // reporting the error. Miri ensures those substitute writes stay
+        // within the reserved capacity.
+        for (name, bad_idx, bad_val) in [
+            ("inf at 0", 0usize, f64::INFINITY),
+            ("nan at end", 4usize, f64::NAN),
+            ("neg_inf middle", 2usize, f64::NEG_INFINITY),
+        ] {
+            let mut data: Vec<f64> = (0..5).map(f64::from).collect();
+            data[bad_idx] = bad_val;
+            let r = to_string(data.as_slice());
+            assert!(r.is_err(), "{name}: expected non-finite error");
+        }
+    }
+
+    /// Slice of i64 — exercises `write_byte_unchecked` for both `[`/`,`/`]`
+    /// at exact capacity. Integers don't use the float taint path but they
+    /// do use `write_array_reserved`'s `write_byte_unchecked` for delimiters.
+    #[test]
+    fn bytesink_slice_ints_exact_capacity() {
+        // MAX_SERIALIZED_LEN for i64 = 20 ("-9223372036854775808"), so
+        // hint = 2 + n * 21.
+        for n in [0usize, 1, 5, 16, 17] {
+            #[allow(clippy::cast_possible_wrap)]
+            let n_i64 = n as i64;
+            #[allow(clippy::cast_possible_wrap)]
+            let data: Vec<i64> = (0..n).map(|i| (i as i64) - n_i64 / 2).collect();
+            let mut out: Vec<u8> = Vec::with_capacity(2 + n * 21);
+            let mut sink = ByteSink::new(&mut out);
+            (data.as_slice()).write_json(&mut sink).expect("ser");
+            let s = core::str::from_utf8(&out).expect("ASCII");
+            let back: Vec<i64> = parse_str(s).expect("parse back");
+            assert_eq!(back, data, "n={n}");
+        }
+    }
+
+    /// `decode_escapes`' literal-byte run uses `from_utf8_unchecked` on
+    /// the stretch between escapes. The lexer's UTF-8 invariant must hold
+    /// across multi-byte sequences. Test escapes interleaved with 2/3/4-byte
+    /// UTF-8 chars so the literal chunk passed to the unsafe spans
+    /// multibyte data.
+    #[test]
+    fn decode_escapes_multibyte_in_literal_chunk() {
+        // 2-byte (é = c3 a9), 3-byte (€ = e2 82 ac), 4-byte (𝄞 = f0 9d 84 9e)
+        // chars surrounding `\n` escapes. The literal chunks bracket the
+        // escape and must contain valid UTF-8.
+        let cases: &[(&str, &str)] = &[
+            (r#""café\nfin""#, "café\nfin"),
+            (r#""price: 5€\tea""#, "price: 5€\tea"),
+            (r#""note 𝄞\nplayed""#, "note 𝄞\nplayed"),
+            // Many escapes between multibyte stretches.
+            (r#""éé\nçç\tüü""#, "éé\nçç\tüü"),
+            // Escape at start / end with multibyte in middle.
+            (r#""\n𝄞café\t""#, "\n𝄞café\t"),
+            // Long literal run before single escape (exercises the SIMD
+            // scan tail).
+            (
+                r#""aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéé\n""#,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaéé\n",
+            ),
+        ];
+        for (json, expected) in cases {
+            let s: String = parse_str(json).expect("parse");
+            assert_eq!(s, *expected, "case {json}");
+        }
+    }
+
+    /// Empty slice / array — `write_array_reserved`'s `split_first` is None,
+    /// no `write_byte_unchecked` for elements. Just `[` and `]`.
+    #[test]
+    fn bytesink_empty_slice_writes_brackets_only() {
+        let empty: Vec<i64> = Vec::new();
+        let s = to_string(empty.as_slice()).expect("ser");
+        assert_eq!(s, "[]");
+
+        let empty: Vec<f64> = Vec::new();
+        let s = to_string(empty.as_slice()).expect("ser");
+        assert_eq!(s, "[]");
+    }
+
+    /// Single-element slice — `write_array_reserved`'s `split_first` returns
+    /// `(first, [])` so we skip the inner loop. Verify the byte boundary.
+    #[test]
+    fn bytesink_single_element_slice() {
+        let one = [42_i64];
+        assert_eq!(to_string(one.as_slice()).unwrap(), "[42]");
+        let one = [1.5_f64];
+        assert_eq!(to_string(one.as_slice()).unwrap(), "[1.5]");
+        let one = [1.5_f32];
+        assert_eq!(to_string(one.as_slice()).unwrap(), "[1.5]");
+    }
+
+    /// Empty string — `decode_escapes` is called with `raw=&[]`. The
+    /// `from_utf8_unchecked(&raw[start..i])` slice is empty, which is
+    /// a degenerate edge case that must not OOB.
+    #[test]
+    fn decode_escapes_empty_string() {
+        let s: String = parse_str(r#""""#).expect("parse");
+        assert_eq!(s, "");
+    }
+
+    /// Pure-ASCII without any escape — the literal-byte run covers the
+    /// whole input and `find_backslash` returns None. The unsafe slice
+    /// is `&raw[0..raw.len()]`.
+    #[test]
+    fn decode_escapes_no_escapes_pure_ascii() {
+        // Use `Vec<String>` to force the owned-decode path even though
+        // the input has no escapes (the `&str` impl would borrow).
+        let v: Vec<String> = parse_str(r#"["hello world","no escapes here"]"#).expect("parse");
+        assert_eq!(
+            v,
+            [String::from("hello world"), String::from("no escapes here")]
+        );
+    }
+
+    /// Decode an escape immediately at the start — the first literal-byte
+    /// run is empty, so `from_utf8_unchecked(&raw[0..0])` is called.
+    #[test]
+    fn decode_escapes_escape_at_start() {
+        let v: Vec<String> = parse_str(r#"["\nhello","\tworld"]"#).expect("parse");
+        assert_eq!(v, [String::from("\nhello"), String::from("\tworld")]);
+    }
+
+    /// Decode an escape immediately at the end — after the escape there is
+    /// no literal-byte run.
+    #[test]
+    fn decode_escapes_escape_at_end() {
+        let v: Vec<String> = parse_str(r#"["hello\n","world\t"]"#).expect("parse");
+        assert_eq!(v, [String::from("hello\n"), String::from("world\t")]);
+    }
+
+    /// Back-to-back escapes — multiple zero-length literal chunks.
+    #[test]
+    fn decode_escapes_consecutive_escapes() {
+        let v: Vec<String> = parse_str(r#"["\n\t\r\\","\"\"\""]"#).expect("parse");
+        assert_eq!(v, [String::from("\n\t\r\\"), String::from(r#"""""#)]);
+    }
+
+    // -----------------------------------------------------------------
+    // Vec<T>::vec_from_lex fast-path coverage. The default
+    // `FromJson::vec_from_lex` impl drives `from_lex` per element; the
+    // primitive types (`&str`, integers via macros, `Duration`) override
+    // it to skip the per-element Event detour. These overrides have
+    // independent code paths from the default and need their own tests.
+    // -----------------------------------------------------------------
+
+    /// `Vec<&str>::vec_from_lex` — borrowed strings, fused fast path.
+    #[test]
+    fn vec_borrowed_str_fast_path() {
+        // Empty array — early-return branch.
+        let v: Vec<&str> = parse_str("[]").expect("empty");
+        assert_eq!(v, Vec::<&str>::new());
+
+        // Single element — first push only, no while loop.
+        let v: Vec<&str> = parse_str(r#"["only"]"#).expect("single");
+        assert_eq!(v, ["only"]);
+
+        // Many elements — exercises the while-loop body.
+        let v: Vec<&str> = parse_str(r#"["a","b","c","d","e"]"#).expect("many");
+        assert_eq!(v, ["a", "b", "c", "d", "e"]);
+
+        // Reject escape-bearing string (the borrowed path requires no escapes).
+        let r: Result<Vec<&str>, _> = parse_str(r#"["plain","esc\nbad"]"#);
+        assert!(r.is_err(), "borrowed path must reject escape");
+    }
+
+    /// `Vec<Duration>::vec_from_lex` — fused, with non-finite / negative rejection.
+    #[cfg(feature = "std")]
+    #[test]
+    fn vec_duration_fast_path() {
+        use std::time::Duration;
+
+        // Empty — early return.
+        let v: Vec<Duration> = parse_str("[]").expect("empty");
+        assert!(v.is_empty());
+
+        // Single — first push.
+        let v: Vec<Duration> = parse_str("[1.5]").expect("single");
+        assert_eq!(v, [Duration::from_secs_f64(1.5)]);
+
+        // Many — loop body.
+        let v: Vec<Duration> = parse_str("[0.0,1.0,1.5,2.25,100.125]").expect("many");
+        assert_eq!(v.len(), 5);
+        assert_eq!(v[0], Duration::ZERO);
+        assert_eq!(v[4], Duration::from_secs_f64(100.125));
+
+        // Negative — rejected.
+        let r: Result<Vec<Duration>, _> = parse_str("[1.0,-2.0]");
+        assert!(r.is_err());
+    }
+
+    /// `Vec<i64>::vec_from_lex` — exercises the macro-generated override
+    /// in `de.rs::impl_int!`, including the bounds check on the empty branch.
+    #[test]
+    fn vec_i64_fast_path() {
+        let v: Vec<i64> = parse_str("[]").expect("empty");
+        assert!(v.is_empty());
+
+        let v: Vec<i64> = parse_str("[42]").expect("single");
+        assert_eq!(v, [42]);
+
+        let v: Vec<i64> =
+            parse_str("[1,-1,9223372036854775807,-9223372036854775808]").expect("many");
+        assert_eq!(v, [1, -1, i64::MAX, i64::MIN]);
+
+        // Out-of-range for u32 should error.
+        let r: Result<Vec<u32>, _> = parse_str("[1,99999999999]");
+        assert!(r.is_err(), "u32 should overflow");
+    }
+
+    /// `Vec<u128>::vec_from_lex` — wide-int macro path.
+    #[test]
+    fn vec_u128_fast_path() {
+        let v: Vec<u128> = parse_str("[]").expect("empty");
+        assert!(v.is_empty());
+
+        let v: Vec<u128> = parse_str("[0,170141183460469231731687303715884105727]").expect("many");
+        assert_eq!(v, [0u128, i128::MAX as u128]);
+    }
+
+    // -----------------------------------------------------------------
+    // `decode_escapes` — full branch coverage. The match arms for `\b`,
+    // `\f`, `\/`, and the various surrogate-pair error paths weren't
+    // exercised by the existing tests.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn decode_all_simple_escapes() {
+        // Each backslash escape variant — covers every match arm in
+        // `decode_escapes`.
+        let cases: &[(&str, &str)] = &[
+            (r#""\b""#, "\u{0008}"), // backspace
+            (r#""\f""#, "\u{000C}"), // form feed
+            (r#""\/""#, "/"),        // solidus
+            (r#""\\""#, "\\"),       // backslash
+            (r#""\"""#, "\""),       // quote
+            (r#""\n""#, "\n"),
+            (r#""\r""#, "\r"),
+            (r#""\t""#, "\t"),
+        ];
+        for &(json, expected) in cases {
+            let s: String = parse_str(json).expect(json);
+            assert_eq!(s, expected, "case {json}");
+        }
+    }
+
+    #[test]
+    fn decode_unknown_escape_errors() {
+        // `\x` is not a recognized escape — last match arm.
+        let r: Result<String, _> = parse_str(r#""\x""#);
+        assert!(r.is_err(), "unknown escape should error");
+
+        // Backslash at end-of-input — `i >= raw.len()` branch.
+        let r: Result<String, _> = parse_str("\"\\\"");
+        assert!(r.is_err(), "lone trailing backslash should error");
+    }
+
+    #[test]
+    fn decode_unicode_escape_short_input_errors() {
+        // `\u` followed by < 4 hex digits — `i + 5 > raw.len()` branch.
+        let r: Result<String, _> = parse_str(r#""\u00""#);
+        assert!(r.is_err(), "short \\u should error");
+        let r: Result<String, _> = parse_str(r#""\u""#);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn decode_unicode_lone_low_surrogate_errors() {
+        // `\uDC00` standalone is a lone low surrogate — second
+        // `0xDC00..=0xDFFF` branch.
+        let r: Result<String, _> = parse_str(r#""\uDC00""#);
+        assert!(r.is_err(), "lone low surrogate should error");
+    }
+
+    #[test]
+    fn decode_unicode_high_surrogate_then_invalid_low_errors() {
+        // High surrogate \uD800 followed by another `\u` escape whose
+        // codepoint is OUTSIDE the low-surrogate range — exercises the
+        // explicit range-check arm (raw[i+1]==`\\` AND raw[i+2]==`u` but
+        // the parsed low_value isn't a low surrogate).
+        let json = "\"\\uD800\\u0041\""; // high then 'A' as A
+        let r: Result<String, _> = parse_str(json);
+        assert!(
+            r.is_err(),
+            "high surrogate then non-low-surrogate \\u must error"
+        );
+    }
+
+    /// High surrogate followed by `\uXXXX` where XXXX is a valid low
+    /// surrogate, but the four hex digits are at end-of-input. Covers
+    /// the `i + 7 > raw.len()` short-buffer guard.
+    #[test]
+    fn decode_unicode_high_surrogate_then_short_second_escape_errors() {
+        let json = r#""\uD800\u""#;
+        let r: Result<String, _> = parse_str(json);
+        assert!(r.is_err(), "high surrogate then truncated \\u must error");
+    }
+
+    /// Invalid hex inside the second \u of a surrogate pair.
+    #[test]
+    fn decode_unicode_high_surrogate_then_invalid_hex_errors() {
+        let json = "\"\\uD800\\uZZZZ\"";
+        let r: Result<String, _> = parse_str(json);
+        assert!(r.is_err(), "high surrogate then bad hex must error");
+    }
+
+    #[test]
+    fn decode_unicode_high_surrogate_then_non_u_escape_errors() {
+        // `\uD800` followed by `\n` (not a `\u` escape).
+        let r: Result<String, _> = parse_str(r#""\uD800\n""#);
+        assert!(
+            r.is_err(),
+            "high surrogate not followed by \\u should error"
+        );
+
+        // `\uD800` followed by non-backslash byte (EOF or literal).
+        let r: Result<String, _> = parse_str(r#""\uD800A""#);
+        assert!(
+            r.is_err(),
+            "high surrogate not followed by escape should error"
+        );
+    }
+
+    #[test]
+    fn decode_unicode_surrogate_pair_round_trips() {
+        // Valid surrogate pair for U+1F600 (GRINNING FACE): high=D83D
+        // low=DE00. Encoded as `\u` escapes (not the literal emoji) so
+        // decode_escapes' surrogate arm runs — literal multi-byte UTF-8
+        // goes through the lexer's `consume_utf8_multibyte` instead.
+        let json = "\"\\uD83D\\uDE00\"";
+        let s: String = parse_str(json).expect("parse");
+        assert_eq!(s, "\u{1F600}");
+
+        // Surrogate pair adjacent to literal ASCII / other escapes.
+        let json = "\"a\\uD83D\\uDE00b\\uD83D\\uDE01c\"";
+        let s: String = parse_str(json).expect("parse");
+        assert_eq!(s, "a\u{1F600}b\u{1F601}c");
+    }
+
+    #[test]
+    fn decode_unicode_bmp_escape_round_trips() {
+        // Standard BMP unicode escape — non-surrogate path. U+00E9 ('é')
+        // encoded as `é` so decode_escapes' \u arm runs (a literal
+        // "é" goes through consume_utf8_multibyte instead).
+        let json = "\"\\u00E9\"";
+        let s: String = parse_str(json).expect("parse");
+        assert_eq!(s, "é");
+
+        // BMP escapes at various code points.
+        let json = "\"A\\u00A3\\u20AC\""; // A, £, €
+        let s: String = parse_str(json).expect("parse");
+        assert_eq!(s, "A£€");
+    }
+
+    #[test]
+    fn decode_invalid_hex_in_u_escape_errors() {
+        // `\u00ZX` — invalid hex.
+        let r: Result<String, _> = parse_str(r#""\u00ZX""#);
+        assert!(r.is_err(), "invalid hex should error");
+    }
+
+    // -----------------------------------------------------------------
+    // `to_decimal_uncentred` — the float path for powers of 2 (mantissa
+    // == 1 << 52). Hit when the IEEE 754 mantissa lands exactly on the
+    // uncentred boundary. These values are rare in random samples, so
+    // need explicit tests.
+    // -----------------------------------------------------------------
+
+    /// Powers of 2 hit the uncentred decompose path. Each gets a
+    /// shortest-roundtrip rendering through `to_decimal_uncentred`.
+    #[test]
+    fn to_decimal_uncentred_powers_of_two_round_trip() {
+        // f64 values where mantissa == 1 << 52 and exponent != EXPONENT_MIN:
+        // these are 2.0, 4.0, 8.0, 16.0, ..., up to 2^1023.
+        let cases = [
+            2.0_f64,
+            4.0,
+            8.0,
+            16.0,
+            32.0,
+            64.0,
+            128.0,
+            256.0,
+            512.0,
+            1024.0,
+            2.0_f64.powi(20),
+            2.0_f64.powi(50),
+            2.0_f64.powi(100),
+            2.0_f64.powi(500),
+            2.0_f64.powi(1023), // largest finite power of 2
+            // Negative powers of 2 — half exponent.
+            2.0_f64.powi(-1), // 0.5
+            2.0_f64.powi(-2), // 0.25
+            2.0_f64.powi(-10),
+            2.0_f64.powi(-50),
+            2.0_f64.powi(-100),
+            2.0_f64.powi(-1000),
+        ];
+        for &v in &cases {
+            let s = to_string(&v).expect("ser");
+            let back: f64 = parse_str(&s).expect("parse back");
+            #[allow(clippy::float_cmp)]
+            {
+                assert_eq!(back, v, "round-trip for {v:e}: emitted {s:?}");
+            }
+        }
+    }
+
+    /// Negative powers of 2 — sign path through `to_decimal_uncentred`.
+    #[test]
+    fn to_decimal_uncentred_negative_powers_round_trip() {
+        for k in [-30, -10, -1, 1, 10, 30, 100, 500] {
+            let v = -(2.0_f64.powi(k));
+            let s = to_string(&v).expect("ser");
+            let back: f64 = parse_str(&s).expect("parse back");
+            #[allow(clippy::float_cmp)]
+            {
+                assert_eq!(back, v, "round-trip for {v:e}: emitted {s:?}");
+            }
+        }
+    }
+
+    /// Subnormal f64 — minimum positive denormal, uses uncentred path
+    /// at a different boundary.
+    #[test]
+    fn to_decimal_uncentred_subnormals_round_trip() {
+        let cases = [
+            5e-324_f64,        // smallest subnormal
+            f64::MIN_POSITIVE, // smallest normal
+            -f64::MIN_POSITIVE,
+            f64::MAX,
+            -f64::MAX,
+        ];
+        for &v in &cases {
+            let s = to_string(&v).expect("ser");
+            let back: f64 = parse_str(&s).expect("parse back");
+            #[allow(clippy::float_cmp)]
+            {
+                assert_eq!(back, v, "round-trip for {v:e}: emitted {s:?}");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Direct-sink coverage. Every public sink type (StringSink,
+    // PrettyStringSink, ByteSink unchecked methods) needs at least one
+    // call so the CRAP gate's zero-coverage trigger doesn't fire.
+    // -----------------------------------------------------------------
+
+    /// `StringSink` — the `&mut String` sink. Exercises `write_byte`,
+    /// `write_str_raw`, and `write_float_f64` directly.
+    #[test]
+    fn string_sink_writes_directly() {
+        let mut out = String::new();
+        let mut sink = StringSink::new(&mut out);
+        // write_byte and write_str_raw via the trait
+        sink.write_byte(b'[').unwrap();
+        sink.write_str_raw("1").unwrap();
+        sink.write_byte(b',').unwrap();
+        // write_float_f64 (StringSink override)
+        sink.write_float_f64(2.5).unwrap();
+        sink.write_byte(b']').unwrap();
+        assert_eq!(out, "[1,2.5]");
+
+        // Non-finite rejection through the StringSink path.
+        let mut out = String::new();
+        let mut sink = StringSink::new(&mut out);
+        assert!(sink.write_float_f64(f64::NAN).is_err());
+    }
+
+    /// `PrettyStringSink::with_indent` — custom indent variant.
+    /// Existing pretty tests only cover the default-indent constructor.
+    #[test]
+    fn pretty_sink_with_indent_uses_custom_indent() {
+        let mut out = String::new();
+        let mut sink = PrettyStringSink::with_indent(&mut out, "\t");
+        let data = (1_i32, 2_i32, 3_i32);
+        data.write_json(&mut sink).unwrap();
+        // Tab indent → contains a `\n\t` sequence.
+        assert!(out.contains("\n\t"), "got: {out:?}");
+    }
+
+    /// `PrettyStringSink::write_float_f64` — covers the pretty-sink
+    /// float arm (existing tests use the simple-byte and string paths).
+    #[test]
+    fn pretty_sink_handles_floats() {
+        let v: alloc::vec::Vec<f64> = alloc::vec![1.5, 2.5, 3.0];
+        let s = to_string_pretty(v.as_slice()).unwrap();
+        assert!(s.contains("1.5"));
+        assert!(s.contains("3.0"));
+    }
+
+    /// `ByteSink::write_float_f64_unchecked` — non-finite triggers the
+    /// outlined `cold_nonfinite_byte_sink` error. Exercises the cold path.
+    #[test]
+    fn bytesink_unchecked_float_nonfinite_returns_error() {
+        let mut out: Vec<u8> = Vec::with_capacity(64);
+        let mut sink = ByteSink::new(&mut out);
+        // SAFETY: ample reserved capacity (≥32 bytes).
+        #[allow(unsafe_code)]
+        let r = unsafe { sink.write_float_f64_unchecked(f64::INFINITY) };
+        assert!(r.is_err(), "non-finite must error through cold arm");
+    }
+
+    /// `ByteSink::write_float_f64_unchecked_finite` — direct call with
+    /// a finite value. The slice fast path calls this internally.
+    #[test]
+    fn bytesink_unchecked_finite_writes_value() {
+        let mut out: Vec<u8> = Vec::with_capacity(64);
+        let mut sink = ByteSink::new(&mut out);
+        // Pick a finite value that round-trips exactly through the formatter
+        // and `f64::parse`. 2.5 is exact in binary; avoiding 3.14 also dodges
+        // clippy's approx_constant warning about PI.
+        let value = 2.5_f64;
+        // SAFETY: reserved 64 bytes, value is finite.
+        #[allow(unsafe_code)]
+        unsafe {
+            sink.write_float_f64_unchecked_finite(value).unwrap();
+        }
+        let s = core::str::from_utf8(&out).unwrap();
+        let parsed: f64 = s.parse().unwrap();
+        // Bit-pattern compare: write→parse must round-trip exactly.
+        assert_eq!(parsed.to_bits(), value.to_bits());
+    }
+
+    /// `ToJson for Path` (std-only) — covers `Path::write_json`.
+    #[cfg(feature = "std")]
+    #[test]
+    fn path_serializes_via_to_string() {
+        use std::path::Path;
+        let p = Path::new("/tmp/file.txt");
+        let s = to_string(p).unwrap();
+        assert_eq!(s, "\"/tmp/file.txt\"");
+    }
+
+    /// `MapKeyOut for Cow<'_, str>` — used when a HashMap/BTreeMap
+    /// key type is `Cow<'_, str>`. Exercises `Cow::as_str`.
+    #[test]
+    fn map_with_cow_str_keys_serializes() {
+        use alloc::borrow::Cow;
+        use alloc::collections::BTreeMap;
+        let mut m: BTreeMap<Cow<'_, str>, i32> = BTreeMap::new();
+        m.insert(Cow::Borrowed("a"), 1);
+        m.insert(Cow::Owned(String::from("b")), 2);
+        let s = to_string(&m).unwrap();
+        assert!(s.contains(r#""a":1"#));
+        assert!(s.contains(r#""b":2"#));
+    }
+
+    /// `f64::pre_validate_slice` — the post-taint stub returns Ok(()).
+    /// Direct call to ensure the function is exercised.
+    #[test]
+    fn f64_pre_validate_slice_is_noop() {
+        let slice: &[f64] = &[1.0, 2.0, f64::INFINITY];
+        // The fn body just returns Ok; calling it through the trait
+        // exercises both the dispatch and the body.
+        let r = <f64 as ToJson>::pre_validate_slice(slice);
+        assert!(r.is_ok());
+    }
+
+    /// `crate::ser::float::format_f64_write` and `reject_non_finite`
+    /// are exercised by `StringSink::write_float_f64` (via the `float::`
+    /// module). Existing tests cover that, but cover them explicitly
+    /// for the non-finite branch through the public `to_fmt` entry
+    /// point which uses `FmtWriteSink` (a different code path).
+    #[test]
+    fn to_fmt_writes_finite_and_rejects_nonfinite() {
+        let mut s = String::new();
+        to_fmt(&1.5_f64, &mut s).unwrap();
+        assert_eq!(s, "1.5");
+
+        let mut s = String::new();
+        assert!(to_fmt(&f64::INFINITY, &mut s).is_err());
+    }
+
+    /// `fmt_write_error` is invoked when the underlying `core::fmt::Write`
+    /// impl returns an error. Construct a writer that always fails and
+    /// verify `to_fmt` propagates a typed `Error` (rather than the
+    /// detail-less `fmt::Error`).
+    #[test]
+    fn to_fmt_propagates_underlying_write_failure() {
+        use core::fmt;
+
+        /// Writer that errors on every call — drives `fmt_write_error`.
+        struct AlwaysFail;
+        impl fmt::Write for AlwaysFail {
+            fn write_str(&mut self, _s: &str) -> fmt::Result {
+                Err(fmt::Error)
+            }
+        }
+
+        // Any non-empty serializable value flushes at least one byte
+        // through `write_str` / `write_char`, which the writer rejects.
+        let mut sink = AlwaysFail;
+        let r = to_fmt(&42_i64, &mut sink);
+        assert!(r.is_err(), "expected propagated error from failing writer");
+
+        // Also exercise the float path through FmtWriteSink, which uses
+        // a separate `fmt_write_error()` call site.
+        let mut sink = AlwaysFail;
+        let r = to_fmt(&1.5_f64, &mut sink);
+        assert!(r.is_err());
     }
 }

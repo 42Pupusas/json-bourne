@@ -29,7 +29,7 @@ fn main() {
 // mirrors a real "ingest a wide ledger column" workload.
 
 mod i128_array_1024 {
-    use super::*;
+    use super::{i128_array, parse};
 
     const N: usize = 1024;
 
@@ -67,7 +67,7 @@ mod i128_array_1024 {
 // per-entry alloc dominates and any parser-level wins show up directly.
 
 mod hashmap_string_keys_256 {
-    use super::*;
+    use super::{small_keyed_object, HashMap, parse};
 
     const N: usize = 256;
 
@@ -108,7 +108,7 @@ mod hashmap_string_keys_256 {
 // the gross float-decode-+-construct number on a Vec.
 
 mod duration_array_1024 {
-    use super::*;
+    use super::{duration_seconds_array, Duration, parse};
 
     const N: usize = 1024;
 
@@ -186,7 +186,7 @@ mod duration_array_1024 {
 //     `key_to_cow`'s decode arm. Quantifies the per-key decode tax.
 
 mod keys_no_escape {
-    use super::*;
+    use super::{small_keyed_object, HashMap, parse};
 
     const N: usize = 256;
 
@@ -217,7 +217,7 @@ mod keys_no_escape {
 }
 
 mod keys_escaped {
-    use super::*;
+    use super::{small_object_escaped_keys, HashMap, parse};
 
     const N: usize = 256;
 

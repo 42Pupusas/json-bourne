@@ -43,8 +43,7 @@ The result is faster typed parsing and zero allocations on the borrow path.
 | `bourne-core`  | Streaming `Lexer` and `Parser`. `no_std`, zero alloc.      |
 | `bourne`       | `FromJson` / `ToJson` traits, primitive impls, macros.     |
 
-The `bourne-bench` and `bourne-alloctest` crates are workspace-internal and
-are not published.
+The `bourne-bench` crate is workspace-internal and is not published.
 
 ## Features (`bourne` crate)
 

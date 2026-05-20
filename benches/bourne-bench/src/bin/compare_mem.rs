@@ -11,9 +11,20 @@
 //!
 //! Run:
 //!   cargo run --release --features compare-mem --bin `compare_mem`
+//!
+//! Mutually exclusive with the `alloc-profile` feature, which installs
+//! divan's `AllocProfiler` as the lib's global allocator and would collide
+//! with this binary's counter.
+
+// GlobalAlloc requires unsafe. Confined to this binary file; the rest of
+// the bench crate stays under the workspace `unsafe_code = "deny"` lint.
+#![allow(unsafe_code)]
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic::{AtomicUsize, Ordering};
+use std::alloc::System;
 
 use bourne::{FromJson, parse};
-use bourne_alloctest::measure;
 use bourne_bench::realistic::{
     giant_geojson_doc, metric_event_array, mixed_length_string_array_with_escapes,
     nested_config_doc, wide_key_object,
@@ -21,6 +32,79 @@ use bourne_bench::realistic::{
 use bourne_bench::{SMALL_OBJECT, float_array, int_array, string_array};
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
+
+struct CountingAllocator {
+    allocs: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
+// SAFETY: forwards every allocation request to the system allocator unchanged;
+// only side effect is incrementing the counters, which is `Relaxed` and cannot
+// affect memory safety.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.allocs.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: layout is a valid Layout; System upholds GlobalAlloc invariants.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: ptr/layout came from a paired alloc; forwarded unchanged.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        self.allocs.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: forwarded with the original layout.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        self.allocs.fetch_add(1, Ordering::Relaxed);
+        // Charge only the growth; the existing region is already counted.
+        self.bytes
+            .fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
+        // SAFETY: ptr/layout came from a paired alloc; new_size respects realloc rules.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator {
+    allocs: AtomicUsize::new(0),
+    bytes: AtomicUsize::new(0),
+};
+
+#[derive(Copy, Clone, Debug)]
+struct Snapshot {
+    allocs: usize,
+    bytes: usize,
+}
+
+impl Snapshot {
+    fn now() -> Self {
+        Self {
+            allocs: ALLOCATOR.allocs.load(Ordering::Relaxed),
+            bytes: ALLOCATOR.bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    const fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            allocs: self.allocs - earlier.allocs,
+            bytes: self.bytes - earlier.bytes,
+        }
+    }
+}
+
+fn measure<R>(f: impl FnOnce() -> R) -> (R, Snapshot) {
+    let before = Snapshot::now();
+    let result = f();
+    let after = Snapshot::now();
+    (result, after.delta_since(before))
+}
 
 // ---------------------------------------------------------------------------
 // Struct shapes — same fields on both sides so the comparison is fair.
@@ -146,12 +230,9 @@ impl<'input> FromJson<'input> for MetricEventBourne<'input> {
         Ok(Self {
             ts: ts.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             host: host.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-            metric: metric
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-            count: count
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-            bytes: bytes
-                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            metric: metric.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            count: count.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            bytes: bytes.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             latency_ms: latency_ms
                 .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
             cpu: cpu.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
@@ -180,7 +261,10 @@ fn run_bourne_drain(input: &[u8]) -> Report {
         }
         count
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_serde_value(input: &[u8]) -> Report {
@@ -188,7 +272,10 @@ fn run_serde_value(input: &[u8]) -> Report {
         let v: serde_json::Value = serde_json::from_slice(input).expect("valid input");
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_bourne_struct(input: &[u8]) -> Report {
@@ -196,7 +283,10 @@ fn run_bourne_struct(input: &[u8]) -> Report {
         let u: UserBourne<'_> = parse(input).unwrap();
         u
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_serde_struct(input: &[u8]) -> Report {
@@ -204,7 +294,10 @@ fn run_serde_struct(input: &[u8]) -> Report {
         let u: UserSerde<'_> = serde_json::from_slice(input).unwrap();
         u
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_bourne_vec_i64(input: &[u8]) -> Report {
@@ -212,7 +305,10 @@ fn run_bourne_vec_i64(input: &[u8]) -> Report {
         let v: Vec<i64> = parse(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_serde_vec_i64(input: &[u8]) -> Report {
@@ -220,7 +316,10 @@ fn run_serde_vec_i64(input: &[u8]) -> Report {
         let v: Vec<i64> = serde_json::from_slice(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_bourne_vec_f64(input: &[u8]) -> Report {
@@ -228,7 +327,10 @@ fn run_bourne_vec_f64(input: &[u8]) -> Report {
         let v: Vec<f64> = parse(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_serde_vec_f64(input: &[u8]) -> Report {
@@ -236,7 +338,10 @@ fn run_serde_vec_f64(input: &[u8]) -> Report {
         let v: Vec<f64> = serde_json::from_slice(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_bourne_vec_str<'input>(input: &'input [u8]) -> Report {
@@ -244,7 +349,10 @@ fn run_bourne_vec_str<'input>(input: &'input [u8]) -> Report {
         let v: Vec<&'input str> = parse(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_serde_vec_str<'input>(input: &'input [u8]) -> Report {
@@ -252,7 +360,10 @@ fn run_serde_vec_str<'input>(input: &'input [u8]) -> Report {
         let v: Vec<&'input str> = serde_json::from_slice(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_bourne_vec_string(input: &[u8]) -> Report {
@@ -260,7 +371,10 @@ fn run_bourne_vec_string(input: &[u8]) -> Report {
         let v: Vec<String> = parse(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_serde_vec_string(input: &[u8]) -> Report {
@@ -268,7 +382,10 @@ fn run_serde_vec_string(input: &[u8]) -> Report {
         let v: Vec<String> = serde_json::from_slice(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_bourne_vec_metric(input: &[u8]) -> Report {
@@ -276,7 +393,10 @@ fn run_bourne_vec_metric(input: &[u8]) -> Report {
         let v: Vec<MetricEventBourne<'_>> = parse(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn run_serde_vec_metric(input: &[u8]) -> Report {
@@ -284,7 +404,10 @@ fn run_serde_vec_metric(input: &[u8]) -> Report {
         let v: Vec<MetricEventSerde<'_>> = serde_json::from_slice(input).unwrap();
         v
     });
-    Report { allocs: snap.allocs, bytes: snap.bytes }
+    Report {
+        allocs: snap.allocs,
+        bytes: snap.bytes,
+    }
 }
 
 fn print_row(workload: &str, b: Report, s: Report) {

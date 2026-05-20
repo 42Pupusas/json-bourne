@@ -370,7 +370,13 @@ fn enum_tuple_variant_parses_array() {
 #[test]
 fn enum_struct_variant_parses_nested_object() {
     let s: Shape<'_> = parse_str(r#"{"Rect":{"width":10,"height":20}}"#).unwrap();
-    assert_eq!(s, Shape::Rect { width: 10, height: 20 });
+    assert_eq!(
+        s,
+        Shape::Rect {
+            width: 10,
+            height: 20
+        }
+    );
 }
 
 #[test]

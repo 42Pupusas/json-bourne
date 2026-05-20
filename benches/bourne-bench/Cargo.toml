@@ -9,9 +9,8 @@ description = "Benchmarks and profiling harness for bourne. Not published."
 publish = false
 
 [dependencies]
-bourne-core = { path = "../bourne-core" }
-bourne = { path = "../bourne" }
-bourne-alloctest = { path = "../bourne-alloctest", optional = true }
+bourne-core = { path = "../../crates/bourne-core" }
+bourne = { path = "../../crates/bourne" }
 divan = { version = "0.1", optional = true }
 pprof = { version = "0.14", features = ["flamegraph"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
@@ -36,7 +35,8 @@ alloc-profile = ["dep:divan"]
 # Enables the memory-comparison binary that puts bourne and serde_json
 # through a counting allocator and prints a side-by-side report. Build/run:
 #   cargo run --release --features compare-mem --bin compare_mem
-compare-mem = ["dep:bourne-alloctest", "dep:serde", "dep:serde_json"]
+# Mutually exclusive with `alloc-profile` — both install a global allocator.
+compare-mem = ["dep:serde", "dep:serde_json"]
 # Enables the perf-friendly profiling binary. Builds a long-running
 # tight loop suitable for `perf record` / flamegraph capture. See
 # PROFILING.md for the runbook. The serde_json + serde deps let the

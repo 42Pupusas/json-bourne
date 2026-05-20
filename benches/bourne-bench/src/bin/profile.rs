@@ -15,8 +15,8 @@
 use bourne::{FromJson, parse, to_json, to_string};
 use bourne_bench::realistic::{mixed_length_string_array_with_escapes, unicode_string_array};
 use bourne_bench::{
-    SMALL_OBJECT, duration_seconds_array, float_array, i128_array, int_array,
-    small_keyed_object, small_object_escaped_keys, string_array,
+    SMALL_OBJECT, duration_seconds_array, float_array, i128_array, int_array, small_keyed_object,
+    small_object_escaped_keys, string_array,
 };
 use bourne_core::{Error, ErrorKind, Lexer, Parser};
 use std::collections::HashMap;
@@ -50,14 +50,20 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
         let mut maybe_key = lex.object_first_key()?;
         while let Some(key) = maybe_key {
             match key {
-                "id" => id = Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
-                })?),
+                "id" => {
+                    id = Some(
+                        u64::try_from(lex.parse_i64_value()?)
+                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
+                    );
+                }
                 "name" => name = Some(lex.parse_str_value()?),
                 "verified" => verified = Some(bool::from_lex(lex)?),
-                "followers" => followers = Some(u32::try_from(lex.parse_i64_value()?).map_err(|_| {
-                    Error::new(ErrorKind::NumberOutOfRange, lex.position())
-                })?),
+                "followers" => {
+                    followers = Some(
+                        u32::try_from(lex.parse_i64_value()?)
+                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
+                    );
+                }
                 "bio" => bio = Option::<&str>::from_lex(lex)?,
                 "links" => links = Some(Vec::<&str>::from_lex(lex)?),
                 _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
@@ -186,6 +192,23 @@ const HOSTS: &[&str] = &[
     "node-0", "node-1", "node-2", "node-3", "node-4", "node-5", "node-6", "node-7",
 ];
 
+// Bench-fixture conversions. `0..SER_N` with `SER_N = 1_000` is well within
+// u16 / u32 / i32 / f64-mantissa range; these keep call sites lint-clean
+// without bare `as` casts.
+fn as_u16(i: usize) -> u16 {
+    u16::try_from(i).expect("loop index < SER_N fits u16")
+}
+fn as_u32(i: usize) -> u32 {
+    u32::try_from(i).expect("loop index SER_N=1_000 fits u32")
+}
+fn as_i32(i: usize) -> i32 {
+    i32::try_from(i).expect("loop index SER_N=1_000 fits i32")
+}
+fn as_f64(i: usize) -> f64 {
+    // u32 widens losslessly to f64; the i->u32 step is the bounded one.
+    f64::from(as_u32(i))
+}
+
 fn metric_ser_vec() -> Vec<MetricEventSer<'static>> {
     (0..SER_N)
         .map(|i| MetricEventSer {
@@ -194,9 +217,9 @@ fn metric_ser_vec() -> Vec<MetricEventSer<'static>> {
             metric: "req.latency",
             count: i as u64 % 10_000,
             bytes: 1024 * (i as u64 % 1_000_000),
-            latency_ms: (i % 500) as f64 + 0.125,
-            cpu: (i % 100) as f64 / 100.0,
-            throughput_rps: (i as f64) * 12.345,
+            latency_ms: as_f64(i % 500) + 0.125,
+            cpu: as_f64(i % 100) / 100.0,
+            throughput_rps: as_f64(i) * 12.345,
         })
         .collect()
 }
@@ -224,9 +247,9 @@ fn int_struct_vec() -> Vec<IntStruct> {
         .map(|i| IntStruct {
             id: 1_700_000_000_000 + i as u64,
             count: i as u64 * 37,
-            flags: (i as u32) | 0xFF00,
-            status: if i % 3 == 0 { -(i as i32) } else { i as i32 },
-            version: (i % 256) as u16,
+            flags: as_u32(i) | 0xFF00,
+            status: if i % 3 == 0 { -as_i32(i) } else { as_i32(i) },
+            version: as_u16(i % 256),
         })
         .collect()
 }
@@ -433,7 +456,10 @@ fn main() {
 
         run(&workload);
 
-        let report = guard.report().build().expect("failed to build pprof report");
+        let report = guard
+            .report()
+            .build()
+            .expect("failed to build pprof report");
         let out_path = format!("{workload}.svg");
         let file = std::fs::File::create(&out_path).expect("failed to create SVG file");
         report.flamegraph(file).expect("failed to write flamegraph");

@@ -34,6 +34,23 @@ fn main() {
 
 const N: usize = 1_000;
 
+// Bench-fixture conversions. Every fixture builder iterates `0..N` with
+// `N = 1_000`, well within u32 / i32 / i64 / f64-mantissa range; these
+// keep call sites lint-clean without bare `as` casts.
+fn as_u32(i: usize) -> u32 {
+    u32::try_from(i).expect("loop index N=1_000 fits u32")
+}
+fn as_i32(i: usize) -> i32 {
+    i32::try_from(i).expect("loop index N=1_000 fits i32")
+}
+fn as_i64(i: usize) -> i64 {
+    i64::try_from(i).expect("loop index N=1_000 fits i64")
+}
+fn as_f64(i: usize) -> f64 {
+    // u32 widens losslessly to f64; the i->u32 step is the bounded one.
+    f64::from(as_u32(i))
+}
+
 // ===========================================================================
 // 1. Small struct — same shape as `SMALL_OBJECT`.
 // ===========================================================================
@@ -60,7 +77,7 @@ struct UserHand<'input> {
     links: Vec<&'input str>,
 }
 
-impl<'a> ToJson for UserHand<'a> {
+impl ToJson for UserHand<'_> {
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_byte(b'{')?;
         w.write_str_raw("\"id\":")?;
@@ -120,7 +137,7 @@ fn user_fixture<'a>() -> (UserMacro<'a>, UserHand<'a>, UserSerde<'a>) {
 }
 
 mod to_json_struct_small {
-    use super::*;
+    use super::{user_fixture, SMALL_OBJECT, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -188,7 +205,7 @@ struct MetricEventHand<'input> {
     throughput_rps: f64,
 }
 
-impl<'a> ToJson for MetricEventHand<'a> {
+impl ToJson for MetricEventHand<'_> {
     fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
         w.write_byte(b'{')?;
         w.write_str_raw("\"ts\":")?;
@@ -238,9 +255,9 @@ fn metric_macro_vec() -> Vec<MetricEventMacro<'static>> {
             metric: "req.latency",
             count: i as u64 % 10_000,
             bytes: 1024 * (i as u64 % 1_000_000),
-            latency_ms: (i % 500) as f64 + 0.125,
-            cpu: (i % 100) as f64 / 100.0,
-            throughput_rps: (i as f64) * 12.345,
+            latency_ms: as_f64(i % 500) + 0.125,
+            cpu: as_f64(i % 100) / 100.0,
+            throughput_rps: as_f64(i) * 12.345,
         })
         .collect()
 }
@@ -253,9 +270,9 @@ fn metric_hand_vec() -> Vec<MetricEventHand<'static>> {
             metric: "req.latency",
             count: i as u64 % 10_000,
             bytes: 1024 * (i as u64 % 1_000_000),
-            latency_ms: (i % 500) as f64 + 0.125,
-            cpu: (i % 100) as f64 / 100.0,
-            throughput_rps: (i as f64) * 12.345,
+            latency_ms: as_f64(i % 500) + 0.125,
+            cpu: as_f64(i % 100) / 100.0,
+            throughput_rps: as_f64(i) * 12.345,
         })
         .collect()
 }
@@ -268,15 +285,15 @@ fn metric_serde_vec() -> Vec<MetricEventSerde<'static>> {
             metric: "req.latency",
             count: i as u64 % 10_000,
             bytes: 1024 * (i as u64 % 1_000_000),
-            latency_ms: (i % 500) as f64 + 0.125,
-            cpu: (i % 100) as f64 / 100.0,
-            throughput_rps: (i as f64) * 12.345,
+            latency_ms: as_f64(i % 500) + 0.125,
+            cpu: as_f64(i % 100) / 100.0,
+            throughput_rps: as_f64(i) * 12.345,
         })
         .collect()
 }
 
 mod to_json_struct_metric_1000 {
-    use super::*;
+    use super::{metric_macro_vec, to_string, metric_hand_vec, metric_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -368,7 +385,7 @@ fn log_serde_vec() -> Vec<LogLineSerde<'static>> {
 }
 
 mod to_json_struct_borrowed_escape_1000 {
-    use super::*;
+    use super::{log_macro_vec, to_string, log_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -430,14 +447,14 @@ struct DecoratedSerde {
 fn decorated_macro_vec() -> Vec<DecoratedMacro> {
     (0..N)
         .map(|i| DecoratedMacro {
-            user_id: i as u32,
+            user_id: as_u32(i),
             cached: 99,
             note: if i % 2 == 0 {
                 Some(String::from("note text"))
             } else {
                 None
             },
-            value: (i as u32) * 7,
+            value: as_u32(i) * 7,
         })
         .collect()
 }
@@ -445,20 +462,20 @@ fn decorated_macro_vec() -> Vec<DecoratedMacro> {
 fn decorated_serde_vec() -> Vec<DecoratedSerde> {
     (0..N)
         .map(|i| DecoratedSerde {
-            user_id: i as u32,
+            user_id: as_u32(i),
             cached: 99,
             note: if i % 2 == 0 {
                 Some(String::from("note text"))
             } else {
                 None
             },
-            value: (i as u32) * 7,
+            value: as_u32(i) * 7,
         })
         .collect()
 }
 
 mod to_json_struct_decorated_1000 {
-    use super::*;
+    use super::{decorated_macro_vec, to_string, decorated_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -514,17 +531,17 @@ fn newtype_serde_vec() -> Vec<UserIdSerde> {
 }
 fn triple_vec() -> Vec<Triple> {
     (0..N)
-        .map(|i| Triple(i as i64, format!("item-{i}"), i % 2 == 0))
+        .map(|i| Triple(as_i64(i), format!("item-{i}"), i % 2 == 0))
         .collect()
 }
 fn triple_serde_vec() -> Vec<TripleSerde> {
     (0..N)
-        .map(|i| TripleSerde(i as i64, format!("item-{i}"), i % 2 == 0))
+        .map(|i| TripleSerde(as_i64(i), format!("item-{i}"), i % 2 == 0))
         .collect()
 }
 
 mod to_json_tuple_newtype_1000 {
-    use super::*;
+    use super::{newtype_vec, to_string, newtype_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -546,7 +563,7 @@ mod to_json_tuple_newtype_1000 {
 }
 
 mod to_json_tuple_multi_1000 {
-    use super::*;
+    use super::{triple_vec, to_string, triple_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -596,11 +613,11 @@ fn shape_macro_vec() -> Vec<ShapeMacro> {
     (0..N)
         .map(|i| match i % 4 {
             0 => ShapeMacro::Circle,
-            1 => ShapeMacro::Wrapper(i as u32),
-            2 => ShapeMacro::Pair(i as u32, format!("p{i}")),
+            1 => ShapeMacro::Wrapper(as_u32(i)),
+            2 => ShapeMacro::Pair(as_u32(i), format!("p{i}")),
             _ => ShapeMacro::Box {
-                w: i as u32,
-                h: (i * 2) as u32,
+                w: as_u32(i),
+                h: as_u32(i * 2),
             },
         })
         .collect()
@@ -609,18 +626,18 @@ fn shape_serde_vec() -> Vec<ShapeSerde> {
     (0..N)
         .map(|i| match i % 4 {
             0 => ShapeSerde::Circle,
-            1 => ShapeSerde::Wrapper(i as u32),
-            2 => ShapeSerde::Pair(i as u32, format!("p{i}")),
+            1 => ShapeSerde::Wrapper(as_u32(i)),
+            2 => ShapeSerde::Pair(as_u32(i), format!("p{i}")),
             _ => ShapeSerde::Box {
-                w: i as u32,
-                h: (i * 2) as u32,
+                w: as_u32(i),
+                h: as_u32(i * 2),
             },
         })
         .collect()
 }
 
 mod to_json_enum_external_1000 {
-    use super::*;
+    use super::{shape_macro_vec, to_string, shape_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -668,14 +685,14 @@ fn event_macro_vec() -> Vec<EventMacro> {
         .map(|i| match i % 3 {
             0 => EventMacro::Heartbeat,
             1 => EventMacro::Click {
-                x: i as u32,
-                y: i as u32 * 2,
+                x: as_u32(i),
+                y: as_u32(i) * 2,
             },
             _ => EventMacro::Move {
-                x: i as u32,
-                y: i as u32,
-                dx: -(i as i32),
-                dy: i as i32 / 2,
+                x: as_u32(i),
+                y: as_u32(i),
+                dx: -as_i32(i),
+                dy: as_i32(i) / 2,
             },
         })
         .collect()
@@ -685,21 +702,21 @@ fn event_serde_vec() -> Vec<EventSerde> {
         .map(|i| match i % 3 {
             0 => EventSerde::Heartbeat,
             1 => EventSerde::Click {
-                x: i as u32,
-                y: i as u32 * 2,
+                x: as_u32(i),
+                y: as_u32(i) * 2,
             },
             _ => EventSerde::Move {
-                x: i as u32,
-                y: i as u32,
-                dx: -(i as i32),
-                dy: i as i32 / 2,
+                x: as_u32(i),
+                y: as_u32(i),
+                dx: -as_i32(i),
+                dy: as_i32(i) / 2,
             },
         })
         .collect()
 }
 
 mod to_json_enum_internal_1000 {
-    use super::*;
+    use super::{event_macro_vec, to_string, event_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -749,7 +766,7 @@ fn msg_macro_vec() -> Vec<MsgMacro> {
         .map(|i| match i % 4 {
             0 => MsgMacro::Ping,
             1 => MsgMacro::Echo(format!("hi-{i}")),
-            2 => MsgMacro::Pair(i as u32, (i * 3) as u32),
+            2 => MsgMacro::Pair(as_u32(i), as_u32(i * 3)),
             _ => MsgMacro::Body {
                 text: format!("body-{i}"),
             },
@@ -761,7 +778,7 @@ fn msg_serde_vec() -> Vec<MsgSerde> {
         .map(|i| match i % 4 {
             0 => MsgSerde::Ping,
             1 => MsgSerde::Echo(format!("hi-{i}")),
-            2 => MsgSerde::Pair(i as u32, (i * 3) as u32),
+            2 => MsgSerde::Pair(as_u32(i), as_u32(i * 3)),
             _ => MsgSerde::Body {
                 text: format!("body-{i}"),
             },
@@ -770,7 +787,7 @@ fn msg_serde_vec() -> Vec<MsgSerde> {
 }
 
 mod to_json_enum_adjacent_1000 {
-    use super::*;
+    use super::{msg_macro_vec, to_string, msg_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -819,8 +836,8 @@ fn mixed_macro_vec() -> Vec<MixedMacro> {
     (0..N)
         .map(|i| match i % 4 {
             0 => MixedMacro::Nothing,
-            1 => MixedMacro::One(i as u32),
-            2 => MixedMacro::Two(i as u32, (i * 7) as u32),
+            1 => MixedMacro::One(as_u32(i)),
+            2 => MixedMacro::Two(as_u32(i), as_u32(i * 7)),
             _ => MixedMacro::Body {
                 name: format!("n-{i}"),
             },
@@ -831,8 +848,8 @@ fn mixed_serde_vec() -> Vec<MixedSerde> {
     (0..N)
         .map(|i| match i % 4 {
             0 => MixedSerde::Nothing,
-            1 => MixedSerde::One(i as u32),
-            2 => MixedSerde::Two(i as u32, (i * 7) as u32),
+            1 => MixedSerde::One(as_u32(i)),
+            2 => MixedSerde::Two(as_u32(i), as_u32(i * 7)),
             _ => MixedSerde::Body {
                 name: format!("n-{i}"),
             },
@@ -841,7 +858,7 @@ fn mixed_serde_vec() -> Vec<MixedSerde> {
 }
 
 mod to_json_enum_untagged_1000 {
-    use super::*;
+    use super::{mixed_macro_vec, to_string, mixed_serde_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {

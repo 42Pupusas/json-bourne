@@ -99,7 +99,8 @@ fn jwt_ids_1000_serde_json_value(bencher: divan::Bencher) {
     bencher
         .counter(divan::counter::BytesCount::new(jwts.len()))
         .bench(|| {
-            let v: serde_json::Value = serde_json::from_slice(divan::black_box(jwts.as_bytes())).unwrap();
+            let v: serde_json::Value =
+                serde_json::from_slice(divan::black_box(jwts.as_bytes())).unwrap();
             divan::black_box(v);
         });
 }

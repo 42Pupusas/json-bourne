@@ -25,7 +25,9 @@ pub struct Bad {
 
 impl core::fmt::Debug for Bad {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Bad").field("name", &self.name).finish_non_exhaustive()
+        f.debug_struct("Bad")
+            .field("name", &self.name)
+            .finish_non_exhaustive()
     }
 }
 

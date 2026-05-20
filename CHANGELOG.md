@@ -30,8 +30,9 @@ Initial public release.
 - `cargo-fuzz` targets for streaming and typed parsing.
 - JSONTestSuite conformance test (~318 cases).
 - proptest property tests including full-range f64 round-trip.
-- `bourne-alloctest`: counting-allocator regression tests for the
-  zero-allocation guarantees.
+- Counting-allocator regression test
+  (`crates/bourne/tests/zero_alloc.rs`) pinning the zero-allocation
+  guarantees.
 
 [Unreleased]: https://github.com/illuminodes/bourne/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/illuminodes/bourne/releases/tag/v0.1.0

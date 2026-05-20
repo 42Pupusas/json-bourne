@@ -15,8 +15,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn corpus_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/corpus/JSONTestSuite")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus/JSONTestSuite")
 }
 
 fn parses(input: &[u8]) -> bool {
@@ -72,13 +71,17 @@ fn jsontestsuite_conformance() {
             b'y' => {
                 report.y_count += 1;
                 if !accepted {
-                    report.failures.push(format!("{name}: expected accept, got reject"));
+                    report
+                        .failures
+                        .push(format!("{name}: expected accept, got reject"));
                 }
             }
             b'n' => {
                 report.n_count += 1;
                 if accepted {
-                    report.failures.push(format!("{name}: expected reject, got accept"));
+                    report
+                        .failures
+                        .push(format!("{name}: expected reject, got accept"));
                 }
             }
             b'i' => {

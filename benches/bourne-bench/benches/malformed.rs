@@ -79,7 +79,7 @@ fn corpus_all(bencher: divan::Bencher) {
 // ---------------------------------------------------------------------------
 
 mod compare {
-    use super::*;
+    use super::{Bad, CORPUS, check};
 
     fn find_bad(name: &str) -> &'static Bad {
         CORPUS
@@ -235,7 +235,7 @@ mod compare {
 // ---------------------------------------------------------------------------
 
 mod large {
-    use super::*;
+    use super::Parser;
 
     // 10 MB JSON string with a bare backslash at the end and no closing
     // quote. The lexer must walk the entire body before failing on the

@@ -87,33 +87,76 @@ pub enum ErrorKind {
     NonFiniteFloat,
 }
 
+impl ErrorKind {
+    /// Static human-readable message for every variant except
+    /// `UnexpectedByte`, which carries a byte payload and is formatted
+    /// dynamically by the `Display` impl.
+    ///
+    /// Variants are split across `lexical_msg` (parse-grammar errors)
+    /// and `typed_msg` (typed-decoding errors). The split keeps each
+    /// helper's cyclomatic complexity below the project's CRAP limit
+    /// (the combined 23-arm match was 24 CC; splitting yields ~14 + 9).
+    #[must_use]
+    const fn static_msg(self) -> &'static str {
+        if let Some(s) = self.lexical_msg() {
+            return s;
+        }
+        self.typed_msg()
+    }
+
+    /// Lexer / parser–level errors. Returns `Some` only for variants
+    /// produced by the byte walker; `None` falls through to
+    /// `typed_msg` for variants emitted by the typed layer.
+    #[must_use]
+    const fn lexical_msg(self) -> Option<&'static str> {
+        let msg = match self {
+            Self::UnexpectedEof => "unexpected end of input",
+            Self::InvalidEscape => "invalid string escape",
+            Self::InvalidUnicodeEscape => "invalid \\u escape",
+            Self::UnpairedSurrogate => "unpaired UTF-16 surrogate in \\u escape",
+            Self::InvalidUtf8 => "invalid UTF-8",
+            Self::InvalidNumber => "invalid number literal",
+            Self::NumberOutOfRange => "number does not fit target type",
+            Self::ControlCharInString => "control character in string literal",
+            Self::TrailingData => "trailing data after JSON value",
+            Self::DepthLimitExceeded => "nesting depth limit exceeded",
+            _ => return None,
+        };
+        Some(msg)
+    }
+
+    /// Typed-layer errors (`FromJson` / `ToJson`). Catch-all for
+    /// variants that didn't match `lexical_msg`. `UnexpectedByte` is
+    /// formatted dynamically by `Display` and never reaches here.
+    #[must_use]
+    const fn typed_msg(self) -> &'static str {
+        match self {
+            Self::ExpectedValue => "expected JSON value",
+            Self::ExpectedString => "expected string",
+            Self::ExpectedNumber => "expected number",
+            Self::ExpectedBool => "expected boolean",
+            Self::ExpectedNull => "expected null",
+            Self::ExpectedArray => "expected array",
+            Self::ExpectedObject => "expected object",
+            Self::TypeMismatch => "type mismatch",
+            Self::DuplicateKey => "duplicate object key",
+            Self::MissingField => "missing required field",
+            Self::UnknownField => "unknown field",
+            Self::NonFiniteFloat => "non-finite float not representable in JSON",
+            // Lexical variants are handled by `lexical_msg`; this fall-
+            // through is unreachable in `static_msg`'s use of the API,
+            // but the match must be exhaustive.
+            _ => "error",
+        }
+    }
+}
+
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::UnexpectedByte(b) => write!(f, "unexpected byte 0x{b:02x}"),
-            Self::UnexpectedEof => f.write_str("unexpected end of input"),
-            Self::InvalidEscape => f.write_str("invalid string escape"),
-            Self::InvalidUnicodeEscape => f.write_str("invalid \\u escape"),
-            Self::UnpairedSurrogate => f.write_str("unpaired UTF-16 surrogate in \\u escape"),
-            Self::InvalidUtf8 => f.write_str("invalid UTF-8"),
-            Self::InvalidNumber => f.write_str("invalid number literal"),
-            Self::NumberOutOfRange => f.write_str("number does not fit target type"),
-            Self::ControlCharInString => f.write_str("control character in string literal"),
-            Self::TrailingData => f.write_str("trailing data after JSON value"),
-            Self::DepthLimitExceeded => f.write_str("nesting depth limit exceeded"),
-            Self::ExpectedValue => f.write_str("expected JSON value"),
-            Self::ExpectedString => f.write_str("expected string"),
-            Self::ExpectedNumber => f.write_str("expected number"),
-            Self::ExpectedBool => f.write_str("expected boolean"),
-            Self::ExpectedNull => f.write_str("expected null"),
-            Self::ExpectedArray => f.write_str("expected array"),
-            Self::ExpectedObject => f.write_str("expected object"),
-            Self::TypeMismatch => f.write_str("type mismatch"),
-            Self::DuplicateKey => f.write_str("duplicate object key"),
-            Self::MissingField => f.write_str("missing required field"),
-            Self::UnknownField => f.write_str("unknown field"),
-            Self::NonFiniteFloat => f.write_str("non-finite float not representable in JSON"),
+        if let Self::UnexpectedByte(b) = self {
+            return write!(f, "unexpected byte 0x{b:02x}");
         }
+        f.write_str(self.static_msg())
     }
 }
 

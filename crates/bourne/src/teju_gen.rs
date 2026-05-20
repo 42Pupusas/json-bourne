@@ -9,6 +9,19 @@
 
 #![allow(dead_code)]
 
+/// Low 64 bits of a u128 — the canonical limb-extraction operation in this
+/// bigint code. Masking before `try_into` makes the truncation explicit and
+/// keeps the call sites lint-clean (no bare `as u64` on a u128).
+fn low_u64(x: u128) -> u64 {
+    (x & u128::from(u64::MAX)).try_into().expect("masked to u64 range")
+}
+
+/// Low 64 bits of an i128 in the range `[0, 2^64)`. Used by the bigint
+/// subtractor where post-borrow values are mathematically in `[0, 2^64)`.
+fn low_u64_from_i128(x: i128) -> u64 {
+    u64::try_from(x).expect("value must fit u64")
+}
+
 /// Minimal big-integer: fixed-size array of u64 limbs, little-endian.
 /// Enough to hold 5^324 (~754 bits → 12 limbs).
 const MAX_LIMBS: usize = 24;
@@ -46,13 +59,13 @@ impl BigUint {
         let mut result = Self::zero();
         let mut carry = 0u128;
         for i in 0..self.len {
-            carry += self.limbs[i] as u128 * rhs as u128;
-            result.limbs[i] = carry as u64;
+            carry += u128::from(self.limbs[i]) * u128::from(rhs);
+            result.limbs[i] = low_u64(carry);
             carry >>= 64;
         }
         result.len = self.len;
         if carry > 0 {
-            result.limbs[result.len] = carry as u64;
+            result.limbs[result.len] = low_u64(carry);
             result.len += 1;
         }
         result
@@ -99,7 +112,6 @@ impl BigUint {
             for i in word_shift..self.len {
                 result.limbs[i - word_shift] = self.limbs[i];
             }
-            result.len = self.len - word_shift;
         } else {
             for i in word_shift..self.len {
                 result.limbs[i - word_shift] = self.limbs[i] >> bit_shift;
@@ -107,8 +119,8 @@ impl BigUint {
                     result.limbs[i - word_shift] |= self.limbs[i + 1] << (64 - bit_shift);
                 }
             }
-            result.len = self.len - word_shift;
         }
+        result.len = self.len - word_shift;
         while result.len > 1 && result.limbs[result.len - 1] == 0 {
             result.len -= 1;
         }
@@ -123,7 +135,9 @@ impl BigUint {
         if top == 0 {
             return 0;
         }
-        (self.len as u32) * 64 - top.leading_zeros()
+        // self.len is bounded by MAX_LIMBS (24), so the u32 conversion is safe.
+        let len_u32 = u32::try_from(self.len).expect("len bounded by MAX_LIMBS");
+        len_u32 * 64 - top.leading_zeros()
     }
 
     fn is_zero(&self) -> bool {
@@ -133,18 +147,18 @@ impl BigUint {
     fn upper_128(&self) -> u128 {
         let bl = self.bit_length();
         if bl <= 128 {
-            let lo = self.limbs[0] as u128;
+            let lo = u128::from(self.limbs[0]);
             let hi = if self.len > 1 {
-                (self.limbs[1] as u128) << 64
+                u128::from(self.limbs[1]) << 64
             } else {
                 0
             };
             return lo | hi;
         }
         let shifted = self.shr(bl - 128);
-        let lo = shifted.limbs[0] as u128;
+        let lo = u128::from(shifted.limbs[0]);
         let hi = if shifted.len > 1 {
-            (shifted.limbs[1] as u128) << 64
+            u128::from(shifted.limbs[1]) << 64
         } else {
             0
         };
@@ -153,17 +167,17 @@ impl BigUint {
 
     fn add_u64(&self, rhs: u64) -> Self {
         let mut result = *self;
-        let mut carry = rhs as u128;
+        let mut carry = u128::from(rhs);
         for i in 0..result.len {
-            carry += result.limbs[i] as u128;
-            result.limbs[i] = carry as u64;
+            carry += u128::from(result.limbs[i]);
+            result.limbs[i] = low_u64(carry);
             carry >>= 64;
             if carry == 0 {
                 break;
             }
         }
         if carry > 0 {
-            result.limbs[result.len] = carry as u64;
+            result.limbs[result.len] = low_u64(carry);
             result.len += 1;
         }
         result
@@ -188,12 +202,12 @@ fn pow5(n: u32) -> BigUint {
     result
 }
 
-/// floor(f * log2(10)) — same formula as log10_pow2 but inverted.
+/// floor(f * log2(10)) — same formula as `log10_pow2` but inverted.
 /// We need: given decimal exponent f, what binary exponent k satisfies
 /// 10^f ≈ 2^k? Answer: k = floor(f * log2(10)).
 ///
 /// log2(10) ≈ 3.321928... We use the approximation:
-/// floor(f * log2(10)) = floor(f * 55_245_642 / 2^24) for the range we need.
+/// floor(f * log2(10)) = floor(f * `55_245_642` / 2^24) for the range we need.
 fn floor_log2_pow10(f: i32) -> i32 {
     // 10^f = 2^(f * log2(10)) = 5^f * 2^f
     // So log2(10^f) = f * log2(5) + f = f * (log2(5) + 1) = f * log2(10)
@@ -213,7 +227,9 @@ fn floor_log2_pow10(f: i32) -> i32 {
     // Simpler magic-constant approach matching the reference:
     // floor(e * log2(10)) where we use 1741647 / 2^19 ≈ 3.321928...
     // Actually the exact constant from dragonbox/schubfach papers:
-    ((f as i64 * 217706) >> 16) as i32
+    let product = (i64::from(f) * 217_706) >> 16;
+    // For |f| < 1700 the product is bounded by ~5.6e6, well within i32.
+    i32::try_from(product).expect("|f| < 1700 keeps product within i32 range")
 }
 
 /// Compute the teju-jagua multiplier for decimal exponent `f`.
@@ -227,7 +243,7 @@ fn floor_log2_pow10(f: i32) -> i32 {
 ///   M = ceil(2^alpha * 5^(-f)) when f < 0
 /// where alpha depends on the mantissa width and exponent.
 ///
-/// For IEEE 754 double (mantissa_width=53):
+/// For IEEE 754 double (`mantissa_width=53)`:
 ///   alpha = 127 + floor(f * log2(5))
 /// or equivalently, since 10^f = 5^f * 2^f:
 ///   We want M * m >> 128 ≈ m * 10^(-f) / 2^k for appropriate k.
@@ -235,11 +251,11 @@ fn floor_log2_pow10(f: i32) -> i32 {
 /// The exact formula from the C reference generator (gen.py):
 ///   For f in the table range:
 ///     p = 5^|f|
-///     if f >= 0: M = ceil(2^(Q-1+s) / p) where s = Q - bit_length(p)
+///     if f >= 0: M = ceil(2^(Q-1+s) / p) where s = Q - `bit_length(p)`
 ///     if f <  0: M = ceil(p * 2^(Q-1-bit_length(p)+1))
 ///   where Q = 2 * width = 128
 ///
-/// Returns (lower_u64, upper_u64).
+/// Returns (`lower_u64`, `upper_u64`).
 pub fn compute_multiplier(f: i32) -> (u64, u64) {
     // For all f, M = ceil(5^|f| normalized to 128 bits).
     //
@@ -264,28 +280,28 @@ pub fn compute_multiplier(f: i32) -> (u64, u64) {
         let shift = 127 + bl5;
         let numerator = BigUint::one().shl(shift);
         let m_128 = bigdiv_ceil_128(&numerator, &p5);
-        (m_128 as u64, (m_128 >> 64) as u64)
+        (low_u64(m_128), low_u64(m_128 >> 64))
     } else if bl5 <= 128 {
         let shifted = p5.shl(128 - bl5);
         let lo = shifted.limbs[0];
         let hi = if shifted.len > 1 { shifted.limbs[1] } else { 0 };
-        let m = ((hi as u128) << 64 | lo as u128) + 1;
-        (m as u64, (m >> 64) as u64)
+        let m = (u128::from(hi) << 64 | u128::from(lo)) + 1;
+        (low_u64(m), low_u64(m >> 64))
     } else {
         let discard = bl5 - 128;
         let shifted = p5.shr(discard);
         let lo = shifted.limbs[0];
         let hi = if shifted.len > 1 { shifted.limbs[1] } else { 0 };
-        let m = (hi as u128) << 64 | lo as u128;
+        let m = u128::from(hi) << 64 | u128::from(lo);
         let check = shifted.shl(discard);
         let needs_ceil = bigcmp(&check, &p5) < 0;
         let m = if needs_ceil { m + 1 } else { m };
-        (m as u64, (m >> 64) as u64)
+        (low_u64(m), low_u64(m >> 64))
     }
 }
 
 /// Ceiling division: ceil(numerator / divisor), returning result as u128.
-/// Both inputs are BigUint. Result must fit in 128 bits.
+/// Both inputs are `BigUint`. Result must fit in 128 bits.
 fn bigdiv_ceil_128(numerator: &BigUint, divisor: &BigUint) -> u128 {
     // Simple bit-by-bit long division, extracting 128 bits of quotient.
     // This is not fast, but it only runs in tests/generation.
@@ -345,14 +361,15 @@ fn bigsub(a: &BigUint, b: &BigUint) -> BigUint {
     let mut result = *a;
     let mut borrow = 0i128;
     for i in 0..a.len {
-        let ai = a.limbs[i] as i128;
-        let bi = if i < b.len { b.limbs[i] as i128 } else { 0 };
+        let ai = i128::from(a.limbs[i]);
+        let bi = if i < b.len { i128::from(b.limbs[i]) } else { 0 };
         let diff = ai - bi - borrow;
         if diff < 0 {
-            result.limbs[i] = (diff + (1i128 << 64)) as u64;
+            // diff is in [-(2^64), 0); adding 2^64 brings it into [0, 2^64).
+            result.limbs[i] = low_u64_from_i128(diff + (1i128 << 64));
             borrow = 1;
         } else {
-            result.limbs[i] = diff as u64;
+            result.limbs[i] = low_u64_from_i128(diff);
             borrow = 0;
         }
     }
@@ -363,7 +380,7 @@ fn bigsub(a: &BigUint, b: &BigUint) -> BigUint {
 }
 
 /// Compute the modular-inverse entry for pow5 divisibility testing.
-/// For index n: multiplier = modular_inverse(5^n, 2^64), bound = floor(2^64 / 5^n).
+/// For index n: multiplier = `modular_inverse(5^n`, 2^64), bound = floor(2^64 / 5^n).
 /// `is_multiple_of_pow5(m, n)` iff `m * multiplier <= bound` (wrapping multiply).
 pub fn compute_minverse(n: u32) -> (u64, u64) {
     if n == 0 {
@@ -425,7 +442,7 @@ mod tests {
         assert_eq!(pow5(27).bit_length(), 63);
         // 5^324 should be ~753 bits
         let bl = pow5(324).bit_length();
-        assert!(bl >= 752 && bl <= 754, "5^324 bit_length = {bl}");
+        assert!((752..=754).contains(&bl), "5^324 bit_length = {bl}");
     }
 
     #[test]
@@ -460,14 +477,17 @@ mod tests {
         // 2^125 / 5 = 8507059173023461586584365185794205286.4
         // ceil = 8507059173023461586584365185794205287
         // In hex: check that upper bits make sense
-        let m = (hi as u128) << 64 | lo as u128;
+        let m = u128::from(hi) << 64 | u128::from(lo);
         // Verify: m * 5 should be >= 2^125 and m * 5 - 5 < 2^125
         // m * 5 in 128 bits might overflow, but let's check the relationship
         assert!(m > 0);
         // The value should be close to 2^125 / 5 ≈ 2^(125 - 2.32) ≈ 2^122.68
         // So top bit should be around bit 122-123
         let top_bit = 128 - m.leading_zeros();
-        assert_eq!(top_bit, 128, "should be normalized to 128 bits, got {top_bit}");
+        assert_eq!(
+            top_bit, 128,
+            "should be normalized to 128 bits, got {top_bit}"
+        );
     }
 
     #[test]
@@ -501,11 +521,7 @@ mod tests {
             };
             // Verify inverse
             if n > 0 {
-                assert_eq!(
-                    inv.wrapping_mul(p5),
-                    1,
-                    "inverse failed for n={n}"
-                );
+                assert_eq!(inv.wrapping_mul(p5), 1, "inverse failed for n={n}");
             }
             // Verify: p5 itself should be detected as multiple
             if n > 0 {
@@ -528,9 +544,9 @@ mod tests {
     fn generate_full_multiplier_table() {
         // Generate all 617 entries and verify basic properties
         for i in 0..TABLE_LEN {
-            let f = i as i32 + STORAGE_INDEX_OFFSET;
+            let f = i32::try_from(i).expect("TABLE_LEN fits i32") + STORAGE_INDEX_OFFSET;
             let (lo, hi) = compute_multiplier(f);
-            let m = (hi as u128) << 64 | lo as u128;
+            let m = u128::from(hi) << 64 | u128::from(lo);
             // M should always have bit 127 set (normalized)
             assert!(
                 m >= (1u128 << 127),
@@ -552,7 +568,7 @@ mod tests {
 
         // f = -324 (first entry in the C table)
         let (lo, hi) = compute_multiplier(-324);
-        let m = (hi as u128) << 64 | lo as u128;
+        let m = u128::from(hi) << 64 | u128::from(lo);
         assert!(m >= (1u128 << 127), "f=-324 not normalized");
 
         // f = -1: M = (5 << 125) + 1 = (1, 0xa000000000000000)
@@ -572,7 +588,7 @@ mod tests {
         // Let's just verify it's normalized and the relationship holds:
         // M * 5 >= 2^130 (because ceiling)
         let (lo, hi) = compute_multiplier(1);
-        let m = (hi as u128) << 64 | lo as u128;
+        let m = u128::from(hi) << 64 | u128::from(lo);
         assert!(m >= (1u128 << 127), "f=1 not normalized");
         // M * 5 should be >= 2^130
         // Can't check directly since M * 5 might overflow u128
@@ -582,7 +598,7 @@ mod tests {
 
         // f = 292 (last entry)
         let (lo, hi) = compute_multiplier(292);
-        let m = (hi as u128) << 64 | lo as u128;
+        let m = u128::from(hi) << 64 | u128::from(lo);
         assert!(m >= (1u128 << 127), "f=292 not normalized");
     }
 
@@ -592,13 +608,10 @@ mod tests {
         // This output is embedded in float.rs as MULTIPLIERS.
         // The test itself just verifies all entries are normalized.
         for i in 0..TABLE_LEN {
-            let f = i as i32 + STORAGE_INDEX_OFFSET;
+            let f = i32::try_from(i).expect("TABLE_LEN fits i32") + STORAGE_INDEX_OFFSET;
             let (lo, hi) = compute_multiplier(f);
-            let m = (hi as u128) << 64 | lo as u128;
-            assert!(
-                m >= (1u128 << 127),
-                "f={f} not normalized: {m:#034x}"
-            );
+            let m = u128::from(hi) << 64 | u128::from(lo);
+            assert!(m >= (1u128 << 127), "f={f} not normalized: {m:#034x}");
         }
     }
 
@@ -619,13 +632,13 @@ mod tests {
         // Values extracted from ieee64_with_uint128.c
         // Format: (f, expected_lo, expected_hi)
         let cases: &[(i32, u64, u64)] = &[
-            (-18, 0x0000000000000001, 0xde0b6b3a76400000),
-            (-17, 0x0000000000000001, 0xb1a2bc2ec5000000),
-            (-16, 0x0000000000000001, 0x8e1bc9bf04000000),
-            (-15, 0x0000000000000001, 0xe35fa931a0000000),
-            (-14, 0x0000000000000001, 0xb5e620f480000000),
-            (-1,  1, 0xa000000000000000),
-            (0,   1, 0x8000000000000000),
+            (-18, 0x0000_0000_0000_0001, 0xde0b_6b3a_7640_0000),
+            (-17, 0x0000_0000_0000_0001, 0xb1a2_bc2e_c500_0000),
+            (-16, 0x0000_0000_0000_0001, 0x8e1b_c9bf_0400_0000),
+            (-15, 0x0000_0000_0000_0001, 0xe35f_a931_a000_0000),
+            (-14, 0x0000_0000_0000_0001, 0xb5e6_20f4_8000_0000),
+            (-1, 1, 0xa000_0000_0000_0000),
+            (0, 1, 0x8000_0000_0000_0000),
         ];
         for &(f, exp_lo, exp_hi) in cases {
             let (lo, hi) = compute_multiplier(f);
@@ -670,22 +683,19 @@ mod tests {
 
     #[test]
     fn emit_rust_tables() {
+        use core::fmt::Write as _;
         let mut out = String::new();
         out.push_str("const MULTIPLIERS: [(u64, u64); 617] = [\n");
         for i in 0..TABLE_LEN {
-            let f = i as i32 + STORAGE_INDEX_OFFSET;
+            let f = i32::try_from(i).expect("TABLE_LEN fits i32") + STORAGE_INDEX_OFFSET;
             let (lo, hi) = compute_multiplier(f);
-            out.push_str(&alloc::format!(
-                "    (0x{lo:016x}, 0x{hi:016x}),\n"
-            ));
+            writeln!(&mut out, "    (0x{lo:016x}, 0x{hi:016x}),").expect("write to String");
         }
         out.push_str("];\n\n");
         out.push_str("const MINVERSE: [(u64, u64); 27] = [\n");
         for n in 0..=26u32 {
             let (inv, bound) = compute_minverse(n);
-            out.push_str(&alloc::format!(
-                "    (0x{inv:016x}, 0x{bound:016x}),\n"
-            ));
+            writeln!(&mut out, "    (0x{inv:016x}, 0x{bound:016x}),").expect("write to String");
         }
         out.push_str("];\n");
         assert!(out.len() > 10_000, "table source too short");

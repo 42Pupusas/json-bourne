@@ -1736,9 +1736,10 @@ macro_rules! __from_json_internally_tagged_unit_body {
             if __key_cow.as_ref() == $tag {
                 $lex.skip_value()?;
             } else {
-                return ::core::result::Result::Err(
-                    $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
-                );
+                return ::core::result::Result::Err($crate::Error::new(
+                    $crate::ErrorKind::UnknownField,
+                    $lex.position(),
+                ));
             }
             __maybe_key = $lex.object_next_key_lex()?;
         }
@@ -2900,9 +2901,10 @@ macro_rules! __from_json_walk {
 #[macro_export]
 macro_rules! __from_json_unknown_arm {
     (strict, $lex:ident, $key:ident) => {
-        return ::core::result::Result::Err(
-            $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
-        );
+        return ::core::result::Result::Err($crate::Error::new(
+            $crate::ErrorKind::UnknownField,
+            $lex.position(),
+        ));
     };
     (lenient, $lex:ident, $key:ident) => {
         $lex.skip_value()?;
@@ -2924,9 +2926,10 @@ macro_rules! __from_json_unknown_arm {
         if $key.as_ref() == $skip_key {
             $lex.skip_value()?;
         } else {
-            return ::core::result::Result::Err(
-                $crate::Error::new($crate::ErrorKind::UnknownField, $lex.position()),
-            );
+            return ::core::result::Result::Err($crate::Error::new(
+                $crate::ErrorKind::UnknownField,
+                $lex.position(),
+            ));
         }
     };
 }
@@ -2938,8 +2941,12 @@ macro_rules! __from_json_unknown_arm {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __from_json_field_key {
-    ($fname:ident, ($renamed:literal)) => { $renamed };
-    ($fname:ident, ()) => { ::core::stringify!($fname) };
+    ($fname:ident, ($renamed:literal)) => {
+        $renamed
+    };
+    ($fname:ident, ()) => {
+        ::core::stringify!($fname)
+    };
 }
 
 // ============================================================================
@@ -3077,9 +3084,8 @@ macro_rules! __from_json_finalize_option {
 #[macro_export]
 macro_rules! __from_json_finalize_required {
     ($lex:ident, $fname:ident) => {
-        $fname.ok_or_else(|| {
-            $crate::Error::new($crate::ErrorKind::MissingField, $lex.position())
-        })?
+        $fname
+            .ok_or_else(|| $crate::Error::new($crate::ErrorKind::MissingField, $lex.position()))?
     };
 }
 
@@ -5440,8 +5446,12 @@ macro_rules! __to_json_named_walk {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __to_json_field_key {
-    ($fname:ident, ($renamed:literal)) => { $renamed };
-    ($fname:ident, ()) => { ::core::stringify!($fname) };
+    ($fname:ident, ($renamed:literal)) => {
+        $renamed
+    };
+    ($fname:ident, ()) => {
+        ::core::stringify!($fname)
+    };
 }
 
 // ============================================================================

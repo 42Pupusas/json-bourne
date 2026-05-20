@@ -28,7 +28,11 @@ pub struct JsonStr {
 
 impl JsonStr {
     pub(crate) const fn new(start: u32, end: u32, has_escapes: bool) -> Self {
-        let start_packed = if has_escapes { start | ESCAPED_BIT } else { start };
+        let start_packed = if has_escapes {
+            start | ESCAPED_BIT
+        } else {
+            start
+        };
         Self { start_packed, end }
     }
 

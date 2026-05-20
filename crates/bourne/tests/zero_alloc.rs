@@ -1,16 +1,99 @@
 //! Zero-allocation guarantees.
 //!
-//! All assertions live inside one `#[test]` function so they execute
-//! sequentially within a single test thread. The counting allocator is
-//! global; if cargo ran two of these tests in parallel, each would observe
-//! the other's allocations and report false positives.
+//! Locks in `bourne`'s zero-copy story as a regression gate, not just an
+//! aspirational doc claim. The counting allocator is installed as the
+//! `#[global_allocator]` for this test binary only — each `tests/*.rs` is
+//! its own binary in Cargo, so other integration tests are unaffected.
 //!
-//! If any of these assertions fail in CI, we have shipped a regression
-//! against the zero-copy story.
+//! All assertions live inside a single `#[test]` function so they execute
+//! sequentially within a single test thread. The counter is global; if
+//! cargo ran two of these in parallel, each would observe the other's
+//! allocations and report false positives.
+
+// The counting allocator implements GlobalAlloc, which is fundamentally
+// unsafe. This is the only place in the workspace that bypasses the
+// `unsafe_code = "deny"` lint, and it's confined to a single test file.
+#![allow(unsafe_code)]
+
+use core::alloc::{GlobalAlloc, Layout};
+use core::sync::atomic::{AtomicUsize, Ordering};
+use std::alloc::System;
 
 use bourne::parse;
-use bourne_alloctest::measure;
 use bourne_core::Parser;
+
+struct CountingAllocator {
+    allocs: AtomicUsize,
+    bytes: AtomicUsize,
+}
+
+// SAFETY: forwards every allocation request to the system allocator unchanged;
+// only side effect is incrementing the counters, which is `Relaxed` and cannot
+// affect memory safety.
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.allocs.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: layout is a valid Layout; System upholds GlobalAlloc invariants.
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: ptr/layout came from a paired alloc; forwarded unchanged.
+        unsafe { System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        self.allocs.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: forwarded with the original layout.
+        unsafe { System.alloc_zeroed(layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        self.allocs.fetch_add(1, Ordering::Relaxed);
+        // Charge only the growth, since the existing region is already counted.
+        self.bytes
+            .fetch_add(new_size.saturating_sub(layout.size()), Ordering::Relaxed);
+        // SAFETY: ptr/layout came from a paired alloc; new_size respects realloc rules.
+        unsafe { System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator {
+    allocs: AtomicUsize::new(0),
+    bytes: AtomicUsize::new(0),
+};
+
+#[derive(Copy, Clone, Debug)]
+struct Snapshot {
+    allocs: usize,
+    bytes: usize,
+}
+
+impl Snapshot {
+    fn now() -> Self {
+        Self {
+            allocs: ALLOCATOR.allocs.load(Ordering::Relaxed),
+            bytes: ALLOCATOR.bytes.load(Ordering::Relaxed),
+        }
+    }
+
+    const fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            allocs: self.allocs - earlier.allocs,
+            bytes: self.bytes - earlier.bytes,
+        }
+    }
+}
+
+fn measure<R>(f: impl FnOnce() -> R) -> (R, Snapshot) {
+    let before = Snapshot::now();
+    let result = f();
+    let after = Snapshot::now();
+    (result, after.delta_since(before))
+}
 
 #[test]
 fn zero_alloc_guarantees() {
@@ -65,18 +148,23 @@ fn zero_alloc_guarantees() {
     {
         let (v, delta) = measure(|| parse::<Option<&str>>(br#""x""#).unwrap());
         assert_eq!(v, Some("x"));
-        assert_eq!(delta.allocs, 0, "Option<&str> Some parse allocated {delta:?}");
+        assert_eq!(
+            delta.allocs, 0,
+            "Option<&str> Some parse allocated {delta:?}"
+        );
     }
     {
         let (v, delta) = measure(|| parse::<Option<&str>>(b"null").unwrap());
         assert_eq!(v, None);
-        assert_eq!(delta.allocs, 0, "Option<&str> None parse allocated {delta:?}");
+        assert_eq!(
+            delta.allocs, 0,
+            "Option<&str> None parse allocated {delta:?}"
+        );
     }
 
     // Vec<f64> — locks in that the fused `parse_f64_value` fast path
     // does not allocate per element. The only allocations should be
-    // the Vec's growth steps (push-driven amortized doubling), which
-    // for 1024 elements is ~10 reallocations starting from 0. Pin the
+    // the Vec's growth steps (push-driven amortized doubling). Pin the
     // exact count against `Vec<i64>` over the same shape — they share
     // the same `vec_from_lex` scaffold and must allocate identically.
     {
@@ -99,10 +187,6 @@ fn zero_alloc_guarantees() {
     // plus the initial alloc, so 10 total). If `parse_f64_value`
     // accidentally allocates per element, this jumps to 1024+.
     {
-        // Inline mini-fixture so this test crate doesn't pick up the
-        // whole bench dep tree just for a corpus-builder helper. Mix
-        // covers integer, fractional, and exponent forms so every
-        // branch of `parse_f64_value` is touched.
         let big = build_float_array(1024);
         let (v, delta) = measure(|| parse::<Vec<f64>>(big.as_bytes()).unwrap());
         assert_eq!(v.len(), 1024);
@@ -114,9 +198,8 @@ fn zero_alloc_guarantees() {
     }
 }
 
-/// Build a JSON array of `n` floats covering the integer / fractional /
-/// exponent / signed-exponent shapes. Mirrors `bourne_bench::float_array`
-/// but lives here so this crate avoids the bench-side dep tree.
+/// Build a JSON array of `n` floats covering integer / fractional /
+/// exponent / signed-exponent shapes.
 fn build_float_array(n: usize) -> String {
     use std::fmt::Write as _;
     const SAMPLES: [&str; 5] = ["1.5e10", "-2.7e-5", "3.14159", "0.0", "1e100"];

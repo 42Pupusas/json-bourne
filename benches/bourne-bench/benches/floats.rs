@@ -54,7 +54,7 @@ fn make_floats(n: usize) -> Vec<f64> {
 }
 
 mod bourne_write {
-    use super::*;
+    use super::{make_floats, to_string};
 
     // -------- bourne (production write!-based path) --------
     #[divan::bench(args = [100, 1_000, 10_000])]
@@ -70,7 +70,7 @@ mod bourne_write {
 }
 
 mod ryu_direct {
-    use super::*;
+    use super::make_floats;
 
     // -------- ryu crate direct (target for inline port) --------
     // Build the same JSON shape (`[f0,f1,...]`) by hand so the
@@ -99,7 +99,7 @@ mod ryu_direct {
 }
 
 mod serde_json {
-    use super::*;
+    use super::make_floats;
 
     // -------- serde_json (absolute anchor) --------
     #[divan::bench(args = [100, 1_000, 10_000])]
@@ -126,7 +126,7 @@ mod serde_json {
 // ---------------------------------------------------------------------------
 
 mod bourne_write_same {
-    use super::*;
+    use super::to_string;
 
     #[divan::bench(args = [100, 1_000, 10_000])]
     fn bench(bencher: divan::Bencher, n: usize) {
@@ -157,9 +157,14 @@ mod serde_json_same {
 // multi-magnitude. Tests whether the cliff comes from *unbounded variance*
 // vs any variance at all.
 mod bourne_write_four {
-    use super::*;
+    use super::to_string;
     fn make(n: usize) -> Vec<f64> {
-        let vals = [1.234567890123456_f64, 9876.54321e-3, 0.000123456789, 1.5e15];
+        let vals = [
+            1.234_567_890_123_456_f64,
+            9876.54321e-3,
+            0.000_123_456_789,
+            1.5e15,
+        ];
         (0..n).map(|i| vals[i % 4]).collect()
     }
     #[divan::bench(args = [100, 1_000, 10_000])]
@@ -170,6 +175,63 @@ mod bourne_write_four {
             .bench(|| {
                 let s = to_string(divan::black_box(&floats)).unwrap();
                 divan::black_box(s);
+            });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic: write into a pre-allocated `Vec<u8>` reused across iterations.
+//
+// `to_string` allocates a fresh `Vec` per call. For n=10000 floats the
+// output is ~240 KB and the `Vec::reserve` hint requests ~320 KB, so each
+// fresh iteration could in principle pay first-touch page-fault cost.
+//
+// Empirically (Zen 3 / Ryzen 7 7730U) reusing the buffer is a wash:
+// `bourne_write_reuse_buf` 10k ≈ `bourne_write` 10k and
+// `serde_json_reuse_buf` 10k ≈ `serde_json` 10k. Conclusion: at n=10k the
+// 220 µs/iter wall is in the inner write path, not in allocator overhead.
+// Both libraries converge to ~213–221 µs/iter, dominated by memory
+// throughput on the ~240 KB output. Keeping the bench so future cache /
+// allocator work has a clean reference point.
+// ---------------------------------------------------------------------------
+mod bourne_write_reuse_buf {
+    use super::make_floats;
+    use bourne::{ByteSink, ToJson};
+
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
+        let floats = make_floats(n);
+        // Pre-size to the upper bound used by `[f64]::write_json`'s
+        // `reserve_hint`: brackets + (max_per_elem + comma) * n.
+        let mut buf: Vec<u8> = Vec::with_capacity(2 + n * 33);
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench_local(|| {
+                buf.clear();
+                let mut sink = ByteSink::new(&mut buf);
+                let _ = (divan::black_box(&floats) as &[f64]).write_json(&mut sink);
+                divan::black_box(&buf);
+            });
+    }
+}
+
+mod serde_json_reuse_buf {
+    use super::make_floats;
+    use serde::Serialize as _;
+
+    #[divan::bench(args = [100, 1_000, 10_000])]
+    fn bench(bencher: divan::Bencher, n: usize) {
+        let floats = make_floats(n);
+        let mut buf: Vec<u8> = Vec::with_capacity(2 + n * 33);
+        bencher
+            .counter(divan::counter::ItemsCount::new(n))
+            .bench_local(|| {
+                buf.clear();
+                let mut ser = ::serde_json::Serializer::new(&mut buf);
+                (divan::black_box(&floats) as &[f64])
+                    .serialize(&mut ser)
+                    .unwrap();
+                divan::black_box(&buf);
             });
     }
 }
