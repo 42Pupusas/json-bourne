@@ -23,7 +23,7 @@
 //! Each element costs exactly one `T::from_lex` plus one `array_continue`
 //! — no per-element `next_event`, no `match self.state`.
 
-use bourne_core::{Error, ErrorKind, Event, JsonNum, Lexer, Parser, ValueKind};
+use crate::{Error, ErrorKind, Event, JsonNum, Lexer, Parser, ValueKind};
 
 /// Parse a value of type `T` from a slice of JSON bytes.
 pub fn parse<'input, T: FromJson<'input>>(input: &'input [u8]) -> Result<T, Error> {
@@ -351,7 +351,7 @@ mod alloc_impls {
     use alloc::borrow::Cow;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use bourne_core::{Error, ErrorKind, JsonStr, Lexer, ValueKind};
+    use crate::{Error, ErrorKind, JsonStr, Lexer, ValueKind};
 
     impl<'input> FromJson<'input> for String {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
@@ -880,14 +880,14 @@ mod alloc_impls {
     /// invariant: every byte in `raw` reached this function via the lexer,
     /// which validates UTF-8 inline against the RFC 3629 byte ranges as it
     /// scans (see `Parser::consume_utf8_multibyte` and `scan_ascii_string_run`
-    /// in `bourne-core`). The bytes between escapes are therefore valid
+    /// in the lexer). The bytes between escapes are therefore valid
     /// UTF-8 by construction — re-validating them in safe code is the
     /// `from_utf8` re-walk that perf showed at ~12% of total time (the
     /// audit on 2026-05-19 measured the safe variant at 1.68× slower,
     /// pushing bourne below `serde_json` on the escape-heavy workload).
     /// `bourne`'s `unsafe_code = "deny"` lint is overridden for this one
     /// function with `#[allow]`, mirroring the same localized exception
-    /// `bourne-core` makes at the equivalent site.
+    /// the lexer makes at the equivalent site.
     ///
     /// The outer loop dispatches between literal-byte runs and escape
     /// sequences. Escape decoding is delegated to `decode_simple_escape`
@@ -997,9 +997,9 @@ mod alloc_impls {
         Ok(i + 6) // skip `\uXXXX`
     }
 
-    /// Same digit-walk as `bourne-core`'s `parse_hex4`. Duplicated here
-    /// because it is a four-line helper and re-exposing it from `bourne-core`
-    /// would widen the public API of a crate that's deliberately small.
+    /// Same digit-walk as the lexer's `parse_hex4`. Duplicated here
+    /// rather than re-exporting because it is a four-line helper and
+    /// keeping it private avoids widening the public API.
     fn parse_hex4(bytes: &[u8]) -> Result<u32, ErrorKind> {
         let mut v: u32 = 0;
         for &b in bytes {

@@ -9,7 +9,6 @@ description = "Benchmarks and profiling harness for bourne. Not published."
 publish = false
 
 [dependencies]
-bourne-core = { path = "../../crates/bourne-core" }
 bourne = { path = "../../crates/bourne" }
 divan = { version = "0.1", optional = true }
 pprof = { version = "0.14", features = ["flamegraph"], optional = true }

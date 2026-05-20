@@ -15,7 +15,7 @@
 //! the ryu shortest-round-trip algorithm. Non-float primitives, composites,
 //! and the std/alloc adapters are all in scope.
 
-use bourne_core::{Error, ErrorKind, Position};
+use crate::{Error, ErrorKind, Position};
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
@@ -37,7 +37,7 @@ use alloc::string::String;
 pub trait JsonWrite {
     /// Sink-specific error type. `StringSink` uses [`core::convert::Infallible`]
     /// for the byte/string writes; the typed-level [`to_string`] entry point
-    /// widens to [`bourne_core::Error`] so non-finite floats can surface.
+    /// widens to [`crate::Error`] so non-finite floats can surface.
     type Error;
 
     /// Hint that at least `additional` more bytes will be written. Sinks
@@ -917,7 +917,7 @@ pub trait ToJson {
     /// writer ONCE before the per-element loop when `NEEDS_VALIDATION`
     /// is `true`.
     ///
-    /// Default impl is a no-op. The `Result` carries `bourne_core::Error`
+    /// Default impl is a no-op. The `Result` carries `crate::Error`
     /// directly because all current validators reject with that type;
     /// callers that want a different sink error must map.
     ///

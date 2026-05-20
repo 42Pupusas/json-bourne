@@ -11,7 +11,7 @@ use bourne_bench::realistic::{
     mixed_length_string_array_with_escapes, nested_config_doc, unicode_string_array,
     wide_key_object,
 };
-use bourne_core::Parser;
+use bourne::Parser;
 
 fn main() {
     divan::main();

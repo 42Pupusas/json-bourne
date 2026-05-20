@@ -933,7 +933,7 @@ include!("teju_tables.txt");
 // Tests.
 // ===========================================================================
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use alloc::format;

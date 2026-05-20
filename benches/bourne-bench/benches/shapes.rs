@@ -6,7 +6,7 @@
 
 use bourne::parse;
 use bourne_bench::{deep_nesting, escaped_string_array, float_array, int_array};
-use bourne_core::Parser;
+use bourne::Parser;
 
 fn main() {
     divan::main();

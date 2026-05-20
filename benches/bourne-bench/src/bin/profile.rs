@@ -18,7 +18,7 @@ use bourne_bench::{
     SMALL_OBJECT, duration_seconds_array, float_array, i128_array, int_array, small_keyed_object,
     small_object_escaped_keys, string_array,
 };
-use bourne_core::{Error, ErrorKind, Lexer, Parser};
+use bourne::{Error, ErrorKind, Lexer, Parser};
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::time::Duration;

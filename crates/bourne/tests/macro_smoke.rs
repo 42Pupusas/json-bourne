@@ -3,6 +3,8 @@
 //! `Option<&str>` field. If this case doesn't expand cleanly the
 //! macro design is wrong and the wider port is wasted effort.
 
+#![cfg(feature = "std")]
+
 use bourne::{ErrorKind, from_json, parse_str};
 
 from_json! {

@@ -20,7 +20,7 @@
 use bourne::{FromJson, from_json, parse};
 use bourne_bench::realistic::{metric_event_array, metric_event_array_reversed_keys};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
-use bourne_core::{Error, ErrorKind, Lexer, Parser};
+use bourne::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
 
 fn main() {

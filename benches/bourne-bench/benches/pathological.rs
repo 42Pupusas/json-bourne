@@ -10,7 +10,7 @@ use bourne_bench::pathological::{
     empty_object_array, huge_int_literal, longest_legal_i64_array, max_depth_legal,
     mixed_width_int_array, null_array, wide_int_array,
 };
-use bourne_core::Parser;
+use bourne::Parser;
 
 fn main() {
     divan::main();

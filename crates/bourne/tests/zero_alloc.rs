@@ -14,13 +14,14 @@
 // unsafe. This is the only place in the workspace that bypasses the
 // `unsafe_code = "deny"` lint, and it's confined to a single test file.
 #![allow(unsafe_code)]
+#![cfg(feature = "std")]
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::System;
 
 use bourne::parse;
-use bourne_core::Parser;
+use bourne::Parser;
 
 struct CountingAllocator {
     allocs: AtomicUsize,

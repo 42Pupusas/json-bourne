@@ -13,9 +13,10 @@
 //!
 //! - **No proc-macros.** [`from_json!`], [`to_json!`], and [`json!`]
 //!   are declarative `macro_rules!`. Empty dependency graph.
-//! - **`no_std` everywhere.** `bourne-core` is `no_std` always; this
-//!   crate is `no_std + alloc` with optional `std` for `HashMap` /
-//!   `std::net` / `std::path` / `std::io` adapters.
+//! - **`no_std` everywhere.** The streaming [`Lexer`] / [`Parser`]
+//!   layer is `no_std` always; with the default `std` feature off
+//!   the crate is `no_std + alloc`, and with `alloc` off too it is
+//!   pure `no_std`.
 //! - **Borrowed strings by default.** `&'input str` and `Cow<'input,
 //!   str>` parse zero-copy when the input contains no escapes.
 //! - **Bounded by construction.** Container nesting is depth-limited
@@ -84,21 +85,41 @@
 //! | `indexmap`  | no      | `IndexMap` / `IndexSet` (insertion order)   |
 //!
 //! `default-features = false` plus `["alloc"]` gives a `no_std + alloc`
-//! build. For pure `no_std` use the `bourne-core` crate directly.
+//! build. `default-features = false` alone gives pure `no_std`: only the
+//! streaming [`Lexer`] / [`Parser`] and typed APIs that don't need a
+//! heap (e.g. parsing into stack-allocated primitives) are available.
+// Targeted uses of `unsafe` inside the streaming layer (lexer.rs / event.rs):
+//   1. `from_utf8_unchecked` after the lexer has validated every byte against
+//      the RFC 3629 byte ranges inline. The safe alternative re-walks the
+//      entire string per call and was 48% of `vec_borrowed_str` runtime.
+//   2. `core::arch::x86_64` SSE2 intrinsics in `scan_ascii_string_run_simd`.
+//      SSE2 is part of the x86_64 ABI baseline, so the `#[target_feature]`
+//      precondition is statically guaranteed on x86_64 — the unsafe is
+//      mechanical (intrinsics are unsafe by signature), not a memory-safety
+//      escape hatch. Non-x86_64 targets compile to the scalar path.
+//
+// Workspace lint is `deny` (not `forbid`) for exactly this kind of
+// localized, justified exception.
+#![allow(unsafe_code)]
 
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
 mod de;
+mod error;
+mod event;
 #[cfg(feature = "alloc")]
 mod float;
+mod lexer;
+mod parser;
 mod ser;
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod teju_gen;
 
-pub use bourne_core::{
-    Checkpoint, Error, ErrorKind, Event, JsonNum, JsonStr, Lexer, Parser, Position, ValueKind,
-};
+pub use error::{Error, ErrorKind, LineColumn, Position};
+pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
+pub use lexer::{Checkpoint, DEFAULT_MAX_DEPTH, Lexer, ValueKind};
+pub use parser::Parser;
 pub use de::{FromJson, parse, parse_str};
 #[cfg(feature = "alloc")]
 pub use de::{MapKey, key_to_cow};
@@ -113,7 +134,7 @@ pub use ser::{JsonWrite, ToJson};
 
 mod macros;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
 
@@ -1013,7 +1034,7 @@ mod tests {
 /// back, assert equality. This is the contract that the two sides agree
 /// on the wire format — if a primitive's encoding ever drifts, one of
 /// these tests breaks before any user code does.
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "std"))]
 mod ser_roundtrip {
     use super::{parse_str, to_string};
 
@@ -1343,7 +1364,7 @@ mod ser_roundtrip {
 /// Each test pairs a `to_json!`-defined type against a manually-defined
 /// `from_json!` mirror so the round-trip exercises both macros on
 /// equivalent shapes.
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "std"))]
 mod to_json_macro_tests {
     use super::{parse_str, to_string};
 
@@ -1657,7 +1678,7 @@ mod to_json_macro_tests {
 
 /// Sink-adapter tests: `to_writer` (`io::Write`) and `to_fmt` (`fmt::Write`)
 /// must produce identical bytes to the canonical `to_string` path.
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "std"))]
 mod sink_adapter_tests {
     use super::{to_fmt, to_string};
 
@@ -1854,7 +1875,7 @@ mod sink_adapter_tests {
 
 /// `json!` combined macro tests. Each type gets both `FromJson` and
 /// `ToJson` from a single invocation — the struct/enum is emitted once.
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "std"))]
 mod json_macro_tests {
     use super::{parse_str, to_string};
 
@@ -2098,7 +2119,7 @@ mod json_macro_tests {
 /// Each one targets a specific invariant; if a future refactor breaks the
 /// caller-side capacity reservation or the UTF-8 boundary, miri here trips
 /// on the precise unsafe before any user code does.
-#[cfg(all(test, feature = "alloc"))]
+#[cfg(all(test, feature = "std"))]
 mod unsafe_boundary_tests {
     use super::*;
     use alloc::string::String;

@@ -30,7 +30,7 @@ use bourne_bench::realistic::{
     nested_config_doc, wide_key_object,
 };
 use bourne_bench::{SMALL_OBJECT, float_array, int_array, string_array};
-use bourne_core::{Error, ErrorKind, Lexer, Parser};
+use bourne::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
 
 struct CountingAllocator {

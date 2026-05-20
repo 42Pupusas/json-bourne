@@ -33,20 +33,20 @@ struct BigUint {
 }
 
 impl BigUint {
-    fn zero() -> Self {
+    const fn zero() -> Self {
         Self {
             limbs: [0; MAX_LIMBS],
             len: 1,
         }
     }
 
-    fn one() -> Self {
+    const fn one() -> Self {
         let mut b = Self::zero();
         b.limbs[0] = 1;
         b
     }
 
-    fn from_u64(v: u64) -> Self {
+    const fn from_u64(v: u64) -> Self {
         let mut b = Self::zero();
         b.limbs[0] = v;
         if v > 0 {
@@ -140,7 +140,7 @@ impl BigUint {
         len_u32 * 64 - top.leading_zeros()
     }
 
-    fn is_zero(&self) -> bool {
+    const fn is_zero(&self) -> bool {
         self.len == 0 || (self.len == 1 && self.limbs[0] == 0)
     }
 
@@ -183,7 +183,7 @@ impl BigUint {
         result
     }
 
-    fn bit(&self, idx: u32) -> bool {
+    const fn bit(&self, idx: u32) -> bool {
         let word = (idx / 64) as usize;
         let bit = idx % 64;
         if word >= self.len {
@@ -349,7 +349,7 @@ fn bigcmp(a: &BigUint, b: &BigUint) -> i32 {
     0
 }
 
-fn effective_len(a: &BigUint) -> usize {
+const fn effective_len(a: &BigUint) -> usize {
     let mut l = a.len;
     while l > 0 && a.limbs[l - 1] == 0 {
         l -= 1;

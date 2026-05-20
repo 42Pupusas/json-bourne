@@ -3,8 +3,10 @@
 //! Fuzzing finds crashes; properties find *behavioural* bugs — the parser
 //! disagreeing with the spec in a way that doesn't panic.
 
+#![cfg(feature = "std")]
+
 use bourne::{parse_str, to_string};
-use bourne_core::Parser;
+use bourne::Parser;
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------

@@ -6,8 +6,10 @@
 //! error (typically `DepthLimitExceeded`). The point is that nothing
 //! aborts the process, panics, or runs arbitrarily long.
 
+#![cfg(feature = "std")]
+
 use bourne::{ErrorKind, parse_str};
-use bourne_core::DEFAULT_MAX_DEPTH;
+use bourne::DEFAULT_MAX_DEPTH;
 
 fn opens(n: usize, ch: char) -> String {
     let mut s = String::with_capacity(n);
@@ -24,7 +26,7 @@ fn deeply_nested_arrays_within_limit_succeed() {
     // Parses as Vec<Vec<...>>; we just verify it lexes & balances.
     // Use Vec<u8> at the leaf to give the type a concrete bottom.
     let bytes = input.into_bytes();
-    let mut p: bourne_core::Parser<'_> = bourne_core::Parser::new(&bytes);
+    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
     while let Some(_ev) = p.next_event().expect("parses within depth limit") {}
 }
 
@@ -33,7 +35,7 @@ fn deeply_nested_arrays_above_limit_errors() {
     let depth = DEFAULT_MAX_DEPTH + 64;
     let input = format!("{}{}", opens(depth, '['), opens(depth, ']'));
     let bytes = input.into_bytes();
-    let mut p: bourne_core::Parser<'_> = bourne_core::Parser::new(&bytes);
+    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
     let mut hit_limit = false;
     loop {
         match p.next_event() {
@@ -67,7 +69,7 @@ fn deeply_nested_objects_above_limit_errors() {
         input.push('}');
     }
     let bytes = input.into_bytes();
-    let mut p: bourne_core::Parser<'_> = bourne_core::Parser::new(&bytes);
+    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
     let mut hit_limit = false;
     loop {
         match p.next_event() {
@@ -98,7 +100,7 @@ fn alternating_array_object_above_limit_errors() {
         input.push(if i % 2 == 0 { ']' } else { '}' });
     }
     let bytes = input.into_bytes();
-    let mut p: bourne_core::Parser<'_> = bourne_core::Parser::new(&bytes);
+    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
     let mut hit_limit = false;
     loop {
         match p.next_event() {

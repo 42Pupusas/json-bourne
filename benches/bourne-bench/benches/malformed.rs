@@ -12,7 +12,7 @@
 //!      paths — drift in error reporting trips the assertion.
 
 use bourne_bench::malformed::{Bad, CORPUS};
-use bourne_core::Parser;
+use bourne::Parser;
 
 fn main() {
     divan::main();
@@ -21,7 +21,7 @@ fn main() {
 /// Drain the parser, returning the first `Err`. We use the streaming API
 /// because it surfaces the lexer's error directly without the typed
 /// dispatch wrapping it.
-fn drive_until_err(input: &[u8]) -> bourne_core::Error {
+fn drive_until_err(input: &[u8]) -> bourne::Error {
     let mut p: Parser<'_> = Parser::new(input);
     loop {
         match p.next_event() {
@@ -32,7 +32,7 @@ fn drive_until_err(input: &[u8]) -> bourne_core::Error {
     }
 }
 
-fn check(b: &Bad) -> bourne_core::Error {
+fn check(b: &Bad) -> bourne::Error {
     let err = drive_until_err(b.bytes);
     if let Some(expected) = b.kind {
         assert_eq!(

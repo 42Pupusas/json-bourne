@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Initial public release.
 
 ### Added
-- Streaming `Lexer` and `Parser` (`bourne-core`) — `no_std`, zero alloc.
+- Streaming `Lexer` and `Parser` — `no_std`, zero alloc.
 - Typed `FromJson` / `ToJson` traits with primitive, composite, alloc, and
   std impls (Vec, BTreeMap/HashMap, Option, tuples, fixed arrays, Box/Rc/Arc,
   Cow, char, Duration, SystemTime, IpAddr family, PathBuf).

@@ -28,33 +28,27 @@ The result is faster typed parsing and zero allocations on the borrow path.
 
 - **No proc-macros.** `from_json!` and `to_json!` are declarative
   `macro_rules!`, so the dependency graph is empty.
-- **`no_std` everywhere.** `bourne-core` is `no_std` always; `bourne` is
-  `no_std + alloc` with optional `std` for the `HashMap` / `std::net` /
-  `std::path` / `std::io` adapters.
+- **`no_std` everywhere.** The streaming `Lexer` / `Parser` layer is `no_std`
+  always; with the default `std` feature off the crate is `no_std + alloc`,
+  and turning `alloc` off too gives a pure `no_std` build (`HashMap` /
+  `std::net` / `std::path` / `std::io` adapters live behind `std`).
 - **Borrowed strings by default.** `&'input str` and `Cow<'input, str>` parse
   zero-copy when the input contains no escapes.
 - **Bounded by construction.** Container nesting is depth-limited (default 128,
   const-generic). The streaming parser is a state machine with no recursion.
 
-## Crates
-
-| Crate          | Purpose                                                    |
-|----------------|------------------------------------------------------------|
-| `bourne-core`  | Streaming `Lexer` and `Parser`. `no_std`, zero alloc.      |
-| `bourne`       | `FromJson` / `ToJson` traits, primitive impls, macros.     |
-
 The `bourne-bench` crate is workspace-internal and is not published.
 
-## Features (`bourne` crate)
+## Features
 
 | Feature     | Default | Pulls in                                            |
 |-------------|---------|-----------------------------------------------------|
-| `std`       | yes     | `alloc`, `bourne-core/std`, `HashMap`, `std::net`, `std::path`, `io::Write` adapter |
+| `std`       | yes     | `alloc`, `HashMap`, `std::net`, `std::path`, `io::Write` adapter |
 | `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, `BTreeMap`/`Set`, escape decoding, `to_string` |
 | `indexmap`  | no      | `FromJson`/`ToJson` for `indexmap::IndexMap` (insertion order) |
 
 `bourne` builds in `no_std + alloc` with `default-features = false, features = ["alloc"]`.
-For pure `no_std` (`bourne-core` only) build with `default-features = false`.
+For pure `no_std` (streaming `Lexer` / `Parser` only) build with `default-features = false`.
 
 ## Status
 

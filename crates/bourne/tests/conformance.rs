@@ -10,7 +10,9 @@
 //! choice is irrelevant; the question this corpus answers is whether the lexer
 //! and parser accept exactly the strings RFC 8259 allows.
 
-use bourne_core::Parser;
+#![cfg(feature = "std")]
+
+use bourne::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
 

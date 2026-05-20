@@ -4,7 +4,7 @@
 //! between this bench and the equivalent `typed` bench.
 
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
-use bourne_core::Parser;
+use bourne::Parser;
 
 fn main() {
     divan::main();
