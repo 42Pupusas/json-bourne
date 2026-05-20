@@ -21,6 +21,14 @@
 
 extern crate alloc;
 
+// Opt-in allocation profiler. When enabled via `--features alloc-profile`,
+// divan's AllocProfiler wraps the system allocator and every #[divan::bench]
+// reports alloc count / bytes alongside wall-clock time. Off by default
+// because the tracking perturbs timing measurements.
+#[cfg(feature = "alloc-profile")]
+#[global_allocator]
+static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
+
 pub mod malformed;
 pub mod pathological;
 pub mod realistic;

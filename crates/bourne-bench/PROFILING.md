@@ -1,12 +1,7 @@
 # Profiling bourne
 
-Two complementary harnesses:
-
-- **`profile` binary** — long-running, single-workload, for `perf` /
-  flamegraph. Wall-clock samples on real hardware.
-- **`iai` benchmark** — deterministic instruction count via
-  `valgrind --tool=callgrind`. Same number every run, so even a 1%
-  regression is a real signal.
+The `profile` binary is a long-running, single-workload harness for
+`perf` / flamegraph — wall-clock samples on real hardware.
 
 ## perf + flamegraph
 
@@ -82,39 +77,3 @@ If `perf record` exits with "permission denied" even after the sysctl,
 check that `/proc/sys/kernel/perf_event_paranoid` actually returned `1`
 or lower (some distros restore it on reboot — make it persistent in
 `/etc/sysctl.conf`).
-
-## iai-callgrind
-
-### One-time setup
-
-Requires `valgrind`:
-
-```sh
-# Debian/Ubuntu
-sudo apt install valgrind
-# Fedora
-sudo dnf install valgrind
-# Arch
-sudo pacman -S valgrind
-```
-
-### Run
-
-```sh
-cargo bench -p bourne-bench --bench iai
-```
-
-The first run prints absolute instruction counts. Subsequent runs print
-deltas against the saved baseline, so you see exactly how many
-instructions a change cost or saved per workload.
-
-To establish a new baseline (e.g. after a known improvement):
-
-```sh
-cargo bench -p bourne-bench --bench iai -- --save-baseline
-```
-
-iai-callgrind is roughly 50–100× slower than the actual benchmark
-(valgrind interprets every instruction) so don't expect interactive
-turnaround — it's a "before-and-after a real change" tool, not an
-exploratory one.

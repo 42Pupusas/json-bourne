@@ -12,14 +12,13 @@ publish = false
 bourne-core = { path = "../bourne-core" }
 bourne = { path = "../bourne" }
 bourne-alloctest = { path = "../bourne-alloctest", optional = true }
-dhat = { version = "0.3", optional = true }
+divan = { version = "0.1", optional = true }
 pprof = { version = "0.14", features = ["flamegraph"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 
 [dev-dependencies]
 divan = "0.1"
-iai-callgrind = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 ryu = "1"
@@ -29,9 +28,11 @@ default = []
 # Enables pprof-based CPU profiling. Build/run with:
 #   cargo run --release --features pprof --bin profile -- to_json_metric
 pprof = ["dep:pprof"]
-# Enables the heap-profiling example. Build/run with:
-#   cargo run --release --features dhat-heap --example profile_heap
-dhat-heap = ["dep:dhat"]
+# Wraps the system allocator with divan's AllocProfiler so every bench
+# prints per-iteration alloc count / bytes alongside wall-clock time.
+# Off by default — enabling it perturbs timing measurements. Run with:
+#   cargo bench -p bourne-bench --features alloc-profile
+alloc-profile = ["dep:divan"]
 # Enables the memory-comparison binary that puts bourne and serde_json
 # through a counting allocator and prints a side-by-side report. Build/run:
 #   cargo run --release --features compare-mem --bin compare_mem
@@ -44,10 +45,6 @@ compare-mem = ["dep:bourne-alloctest", "dep:serde", "dep:serde_json"]
 # libraries' profiles under identical conditions.
 profile = ["dep:serde", "dep:serde_json"]
 
-[[example]]
-name = "profile_heap"
-required-features = ["dhat-heap"]
-
 [[bin]]
 name = "compare_mem"
 required-features = ["compare-mem"]
@@ -55,10 +52,6 @@ required-features = ["compare-mem"]
 [[bin]]
 name = "profile"
 required-features = ["profile"]
-
-[[bench]]
-name = "iai"
-harness = false
 
 [[bench]]
 name = "stream"

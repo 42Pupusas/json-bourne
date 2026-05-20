@@ -1,0 +1,53 @@
+# cargo-crap configuration.
+#
+# threshold = 21 is tighter than the 30 default (Alberto Savoia's
+# original paper). With 100% coverage this caps CC at 21; with 0%
+# coverage at CC = 2 (since CRAP = CC²×(1-cov)³ + CC). The intent is
+# to flag both undercovered and intrinsically complex paths.
+threshold = 21
+
+# `missing = "pessimistic"` treats a function with complexity data but
+# NO coverage data as 0% covered. Combined with threshold 21, this
+# means any 0%-covered function with CC ≥ 5 trips (5²×1 + 5 = 30 > 21),
+# so even small uncovered functions surface. Pure-CC=4 0%-covered
+# functions slip past (CRAP = 20), but they are typically thin getters.
+missing = "pessimistic"
+
+# Bench / profile fixtures are not library code:
+#   - `crates/bourne-bench/benches/**`: divan benchmarks, never run as
+#     tests under `cargo test`, so they get no llvm-cov instrumentation.
+#     With `--features alloc-profile` they also report per-bench heap
+#     usage via divan's AllocProfiler.
+#   - `crates/bourne-bench/src/bin/**`: profiling binaries (perf / pprof
+#     entry points), driven manually.
+#   - `crates/bourne/tests/properties.rs`: proptest support fixtures
+#     (JsonValue::render, render_string) live alongside `proptest!`
+#     macros, which llvm-cov doesn't instrument either.
+#
+# Library code in `crates/*/src/**` is NOT excluded.
+exclude = [
+    # The bench crate is corpus + harness, not library code.
+    "crates/bourne-bench/**",
+    # Integration test helpers (`tests/**`): the test files themselves
+    # are test infrastructure, not library code. llvm-cov instruments
+    # the lib code they exercise, not the test functions, so these
+    # appear with 0% coverage even though the assertion code ran.
+    "crates/bourne/tests/**",
+    "crates/bourne-alloctest/tests/**",
+    # `teju_gen.rs` is a build-time table generator (`#[cfg(test)]`
+    # module only — never compiled into release builds). It's run on
+    # demand to regenerate `teju_tables.txt`, not as part of CI tests.
+    "crates/bourne/src/teju_gen.rs",
+]
+
+# Suppressions for individual functions where the high CRAP score is
+# accepted by design. Documented per-entry.
+allow = [
+    # `Parser::next_event`: JSON state machine. 100% covered by tests, but
+    # the cyclomatic complexity is intrinsic to the grammar — every JSON
+    # state transition is one match arm. Splitting into one-private-fn-
+    # per-state scatters the grammar walk and obscures the dispatch
+    # (per the `#[allow(clippy::too_many_lines)]` already on the
+    # function). CRAP = CC × (1-cov)³ + CC = 0 + 46 = 46, all from CC.
+    "Parser::next_event",
+]
