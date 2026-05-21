@@ -810,15 +810,14 @@ mod tests {
             assert!(json.starts_with('"') && json.ends_with('"'));
             let inner = &json[1..json.len() - 1];
             match b {
-                b'"' => unreachable!(),
-                b'\\' => unreachable!(),
+                b'"' | b'\\' => unreachable!(),
                 b'\n' => assert_eq!(inner, "\\n"),
                 b'\r' => assert_eq!(inner, "\\r"),
                 b'\t' => assert_eq!(inner, "\\t"),
                 0x08 => assert_eq!(inner, "\\b"),
                 0x0C => assert_eq!(inner, "\\f"),
                 _ => {
-                    let expected = alloc::format!("\\u00{:02x}", b);
+                    let expected = alloc::format!("\\u00{b:02x}");
                     assert_eq!(inner, expected, "byte 0x{b:02x}");
                 }
             }
