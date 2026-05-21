@@ -720,7 +720,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Coverage: ErrorKind::lexical_msg / typed_msg
+    // Coverage: ErrorKind::static_msg
     // -----------------------------------------------------------------
 
     #[test]
@@ -1193,11 +1193,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Coverage: ErrorKind::typed_msg — wildcard arm for lexical variants
+    // Coverage: ErrorKind::static_msg — cross-category variants
     // -----------------------------------------------------------------
 
     #[test]
-    fn typed_msg_wildcard_for_lexical_variant() {
+    fn static_msg_cross_category() {
         use alloc::format;
         let kind = ErrorKind::UnexpectedEof;
         let msg = format!("{kind}");

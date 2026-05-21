@@ -473,48 +473,40 @@ static QUAD_LUT: [u8; 40_000] = {
     buf
 };
 
+const DIGIT_THRESHOLDS: [u64; 16] = [
+    10_000_000_000_000_000, // ≥ this → 17
+    1_000_000_000_000_000,  // ≥ this → 16
+    100_000_000_000_000,    // ≥ this → 15
+    10_000_000_000_000,     // ≥ this → 14
+    1_000_000_000_000,      // ≥ this → 13
+    100_000_000_000,        // ≥ this → 12
+    10_000_000_000,         // ≥ this → 11
+    1_000_000_000,          // ≥ this → 10
+    100_000_000,            // ≥ this → 9
+    10_000_000,             // ≥ this → 8
+    1_000_000,              // ≥ this → 7
+    100_000,                // ≥ this → 6
+    10_000,                 // ≥ this → 5
+    1_000,                  // ≥ this → 4
+    100,                    // ≥ this → 3
+    10,                     // ≥ this → 2
+];
+
 /// Digit count for any post-teju mantissa (≤ 17 digits — that's what
-/// shortest-roundtrip guarantees). Branch chain ordered high-to-low: most
-/// mantissas have 15–17 digits, so the predictor lands on the right branch
-/// fast. Avoids the 1 KB lzcnt table that was 41% of the profile.
+/// shortest-roundtrip guarantees). Table-driven to avoid a 17-branch
+/// if-else chain. Ordered high-to-low so the common 15–17 digit case
+/// exits early.
 #[inline]
 fn mantissa_digit_count(n: u64) -> usize {
     debug_assert!(n < 100_000_000_000_000_000); // < 10^17
-    if n >= 10_000_000_000_000_000 {
-        17
-    } else if n >= 1_000_000_000_000_000 {
-        16
-    } else if n >= 100_000_000_000_000 {
-        15
-    } else if n >= 10_000_000_000_000 {
-        14
-    } else if n >= 1_000_000_000_000 {
-        13
-    } else if n >= 100_000_000_000 {
-        12
-    } else if n >= 10_000_000_000 {
-        11
-    } else if n >= 1_000_000_000 {
-        10
-    } else if n >= 100_000_000 {
-        9
-    } else if n >= 10_000_000 {
-        8
-    } else if n >= 1_000_000 {
-        7
-    } else if n >= 100_000 {
-        6
-    } else if n >= 10_000 {
-        5
-    } else if n >= 1_000 {
-        4
-    } else if n >= 100 {
-        3
-    } else if n >= 10 {
-        2
-    } else {
-        1
+    let mut i = 0;
+    while i < DIGIT_THRESHOLDS.len() {
+        if n >= DIGIT_THRESHOLDS[i] {
+            return 17 - i;
+        }
+        i += 1;
     }
+    1
 }
 
 /// Core formatter: write `value`'s shortest-roundtrip decimal into `buf`,

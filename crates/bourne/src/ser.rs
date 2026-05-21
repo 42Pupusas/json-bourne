@@ -242,33 +242,40 @@ pub trait JsonWrite {
     }
 }
 
+const HEX_LOWER: [u8; 16] = *b"0123456789abcdef";
+
+/// Escape sequences for bytes 0x00–0x1F plus `"` and `\`. `0` means
+/// the byte passes through verbatim; otherwise the value is the ASCII
+/// char after `\` (e.g. `b'n'` for `\n`).
+const ESCAPE_TABLE: [u8; 256] = {
+    let mut t = [0u8; 256];
+    t[b'"' as usize] = b'"';
+    t[b'\\' as usize] = b'\\';
+    t[b'\n' as usize] = b'n';
+    t[b'\r' as usize] = b'r';
+    t[b'\t' as usize] = b't';
+    t[0x08] = b'b';
+    t[0x0C] = b'f';
+    t
+};
+
 /// Write one byte of a string body, applying JSON escape rules.
 fn write_escape_byte<W: JsonWrite + ?Sized>(w: &mut W, b: u8) -> Result<(), W::Error> {
-    match b {
-        b'"' => w.write_str_raw("\\\""),
-        b'\\' => w.write_str_raw("\\\\"),
-        b'\n' => w.write_str_raw("\\n"),
-        b'\r' => w.write_str_raw("\\r"),
-        b'\t' => w.write_str_raw("\\t"),
-        0x08 => w.write_str_raw("\\b"),
-        0x0C => w.write_str_raw("\\f"),
-        // Other control bytes → \u00XX. Non-control bytes (including
-        // multi-byte UTF-8 continuation bytes) pass through verbatim.
-        0x00..=0x1F => {
-            let hi = HEX_LOWER[(b >> 4) as usize];
-            let lo = HEX_LOWER[(b & 0x0F) as usize];
-            w.write_byte(b'\\')?;
-            w.write_byte(b'u')?;
-            w.write_byte(b'0')?;
-            w.write_byte(b'0')?;
-            w.write_byte(hi)?;
-            w.write_byte(lo)
-        }
-        _ => w.write_byte(b),
+    let esc = ESCAPE_TABLE[b as usize];
+    if esc != 0 {
+        w.write_byte(b'\\')?;
+        return w.write_byte(esc);
     }
+    if b < 0x20 {
+        w.write_byte(b'\\')?;
+        w.write_byte(b'u')?;
+        w.write_byte(b'0')?;
+        w.write_byte(b'0')?;
+        w.write_byte(HEX_LOWER[(b >> 4) as usize])?;
+        return w.write_byte(HEX_LOWER[(b & 0x0F) as usize]);
+    }
+    w.write_byte(b)
 }
-
-const HEX_LOWER: [u8; 16] = *b"0123456789abcdef";
 
 /// Returns true for bytes that need an escape sequence inside a JSON string
 /// body (quote, backslash, or any control byte `< 0x20`). Everything else —

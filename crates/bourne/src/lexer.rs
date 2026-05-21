@@ -1142,16 +1142,8 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
             .peek()
             .ok_or_else(|| self.err(ErrorKind::InvalidUtf8))?;
 
-        let (extra, second_lo, second_hi) = match leading {
-            0xC2..=0xDF => (1, 0x80, 0xBF),
-            0xE0 => (2, 0xA0, 0xBF),
-            0xE1..=0xEC | 0xEE..=0xEF => (2, 0x80, 0xBF),
-            0xED => (2, 0x80, 0x9F),
-            0xF0 => (3, 0x90, 0xBF),
-            0xF1..=0xF3 => (3, 0x80, 0xBF),
-            0xF4 => (3, 0x80, 0x8F),
-            _ => return Err(self.err(ErrorKind::InvalidUtf8)),
-        };
+        let (extra, second_lo, second_hi) =
+            utf8_leading_byte_info(leading).ok_or_else(|| self.err(ErrorKind::InvalidUtf8))?;
         self.bump();
 
         match self.peek() {
@@ -1213,6 +1205,22 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 #[allow(clippy::cast_possible_truncation)]
 const fn compute_position(_input: &[u8], offset: usize) -> Position {
     Position::new(offset as u32)
+}
+
+/// Decode a UTF-8 leading byte into `(extra, lo, hi)` for the second byte.
+/// Returns `None` for bytes that aren't valid UTF-8 sequence starters.
+#[inline]
+const fn utf8_leading_byte_info(b: u8) -> Option<(u8, u8, u8)> {
+    match b {
+        0xC2..=0xDF => Some((1, 0x80, 0xBF)),
+        0xE0 => Some((2, 0xA0, 0xBF)),
+        0xE1..=0xEC | 0xEE..=0xEF => Some((2, 0x80, 0xBF)),
+        0xED => Some((2, 0x80, 0x9F)),
+        0xF0 => Some((3, 0x90, 0xBF)),
+        0xF1..=0xF3 => Some((3, 0x80, 0xBF)),
+        0xF4 => Some((3, 0x80, 0x8F)),
+        _ => None,
+    }
 }
 
 fn validate_escapes(raw: &[u8]) -> Result<(), ErrorKind> {

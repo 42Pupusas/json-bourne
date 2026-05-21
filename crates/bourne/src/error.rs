@@ -88,28 +88,11 @@ pub enum ErrorKind {
 }
 
 impl ErrorKind {
-    /// Static human-readable message for every variant except
-    /// `UnexpectedByte`, which carries a byte payload and is formatted
-    /// dynamically by the `Display` impl.
-    ///
-    /// Variants are split across `lexical_msg` (parse-grammar errors)
-    /// and `typed_msg` (typed-decoding errors). The split keeps each
-    /// helper's cyclomatic complexity below the project's CRAP limit
-    /// (the combined 23-arm match was 24 CC; splitting yields ~14 + 9).
-    #[must_use]
-    const fn static_msg(self) -> &'static str {
-        if let Some(s) = self.lexical_msg() {
-            return s;
-        }
-        self.typed_msg()
-    }
-
-    /// Lexer / parser–level errors. Returns `Some` only for variants
-    /// produced by the byte walker; `None` falls through to
-    /// `typed_msg` for variants emitted by the typed layer.
+    /// Lexer / parser–level errors.
     #[must_use]
     const fn lexical_msg(self) -> Option<&'static str> {
         let msg = match self {
+            Self::UnexpectedByte(_) => "unexpected byte",
             Self::UnexpectedEof => "unexpected end of input",
             Self::InvalidEscape => "invalid string escape",
             Self::InvalidUnicodeEscape => "invalid \\u escape",
@@ -125,11 +108,13 @@ impl ErrorKind {
         Some(msg)
     }
 
-    /// Typed-layer errors (`FromJson` / `ToJson`). Catch-all for
-    /// variants that didn't match `lexical_msg`. `UnexpectedByte` is
-    /// formatted dynamically by `Display` and never reaches here.
+    /// Static human-readable message for every variant except
+    /// `UnexpectedByte`, which is formatted dynamically by `Display`.
     #[must_use]
-    const fn typed_msg(self) -> &'static str {
+    const fn static_msg(self) -> &'static str {
+        if let Some(s) = self.lexical_msg() {
+            return s;
+        }
         match self {
             Self::ExpectedValue => "expected JSON value",
             Self::ExpectedString => "expected string",
@@ -143,9 +128,6 @@ impl ErrorKind {
             Self::MissingField => "missing required field",
             Self::UnknownField => "unknown field",
             Self::NonFiniteFloat => "non-finite float not representable in JSON",
-            // Lexical variants are handled by `lexical_msg`; this fall-
-            // through is unreachable in `static_msg`'s use of the API,
-            // but the match must be exhaustive.
             _ => "error",
         }
     }

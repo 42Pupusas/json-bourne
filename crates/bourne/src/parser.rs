@@ -2,11 +2,6 @@ use crate::error::{Error, ErrorKind};
 use crate::event::{Event, JsonStr};
 use crate::lexer::{DEFAULT_MAX_DEPTH, Frame, Lexer};
 
-enum LoopAction {
-    Return(Result<Option<Event>, Error>),
-    Continue,
-}
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum State {
     /// Document start — expecting a value, no events emitted yet.
@@ -88,21 +83,16 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     }
 
     pub fn next_event(&mut self) -> Result<Option<Event>, Error> {
-        loop {
-            self.lex.skip_whitespace();
-            return match self.state {
-                State::Start => self.ev_start(),
-                State::DocumentEnd => self.ev_document_end(),
-                State::ArrayValueOrEnd => self.ev_array_value_or_end(),
-                State::ArrayCommaOrEnd => self.ev_array_comma_or_end(),
-                State::ObjectKeyOrEnd => self.ev_object_key_or_end(),
-                State::ObjectColon => self.ev_object_colon(),
-                State::ObjectValue => self.ev_object_value(),
-                State::ObjectCommaOrEnd => match self.ev_object_comma_or_end() {
-                    LoopAction::Return(r) => r,
-                    LoopAction::Continue => continue,
-                },
-            };
+        self.lex.skip_whitespace();
+        match self.state {
+            State::Start => self.ev_start(),
+            State::DocumentEnd => self.ev_document_end(),
+            State::ArrayValueOrEnd => self.ev_array_value_or_end(),
+            State::ArrayCommaOrEnd => self.ev_array_comma_or_end(),
+            State::ObjectKeyOrEnd => self.ev_object_key_or_end(),
+            State::ObjectColon => self.ev_object_colon(),
+            State::ObjectValue => self.ev_object_value(),
+            State::ObjectCommaOrEnd => self.ev_object_comma_or_end(),
         }
     }
 
@@ -197,25 +187,22 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         Ok(Some(ev))
     }
 
-    fn ev_object_comma_or_end(&mut self) -> LoopAction {
+    fn ev_object_comma_or_end(&mut self) -> Result<Option<Event>, Error> {
         match self.lex.peek() {
             Some(b',') => {
                 self.lex.bump();
-                self.state = State::ObjectKeyOrEnd;
                 self.lex.skip_whitespace();
                 if self.lex.peek() == Some(b'}') {
-                    return LoopAction::Return(
-                        Err(self.lex.err(ErrorKind::UnexpectedByte(b'}'))),
-                    );
+                    return Err(self.lex.err(ErrorKind::UnexpectedByte(b'}')));
                 }
-                LoopAction::Continue
+                self.ev_object_key_or_end()
             }
             Some(b'}') => {
                 self.lex.bump();
-                LoopAction::Return(self.close_container(Frame::Object).map(Some))
+                self.close_container(Frame::Object).map(Some)
             }
-            Some(b) => LoopAction::Return(Err(self.lex.err(ErrorKind::UnexpectedByte(b)))),
-            None => LoopAction::Return(Err(self.lex.err(ErrorKind::UnexpectedEof))),
+            Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
         }
     }
 
