@@ -127,6 +127,8 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
     }
 }
 
+enum ObjectPeek { Close, Quote, Comma, Other }
+
 /// Stateless JSON lexer over a borrowed byte slice.
 ///
 /// Each `read_*` method consumes one syntactic token from the input. The
@@ -785,139 +787,126 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         }
     }
 
-    /// After a `StartObject`, return the next key as a borrowed `&'input str`,
-    /// or `None` if the object closes immediately. The cursor is left
-    /// positioned at the byte after the key's `:`, ready for the caller
-    /// to parse the field's value.
-    #[inline]
-    pub fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
-        self.skip_whitespace();
+    fn peek_object(&self) -> ObjectPeek {
         match self.peek() {
-            Some(b'}') => {
-                self.bump();
-                self.pop_frame(Frame::Object)?;
-                Ok(None)
-            }
-            Some(b'"') => {
-                let key = self.parse_str_value()?;
-                self.skip_whitespace();
-                match self.peek() {
-                    Some(b':') => self.bump(),
-                    Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                }
-                self.skip_whitespace();
-                Ok(Some(key))
-            }
+            Some(b'}') => ObjectPeek::Close,
+            Some(b'"') => ObjectPeek::Quote,
+            Some(b',') => ObjectPeek::Comma,
+            Some(_) | None => ObjectPeek::Other,
+        }
+    }
+
+    fn close_object(&mut self) -> Result<(), Error> {
+        self.bump();
+        self.pop_frame(Frame::Object)
+    }
+
+    fn expect_byte(&mut self, expected: u8) -> Result<(), Error> {
+        match self.peek() {
+            Some(b) if b == expected => { self.bump(); Ok(()) }
             Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
             None => Err(self.err(ErrorKind::UnexpectedEof)),
         }
     }
 
+    fn expect_colon(&mut self) -> Result<(), Error> {
+        self.skip_whitespace();
+        self.expect_byte(b':')?;
+        self.skip_whitespace();
+        Ok(())
+    }
+
+    fn advance_comma_to_quote(&mut self) -> Result<(), Error> {
+        self.bump();
+        self.skip_whitespace();
+        match self.peek_object() {
+            ObjectPeek::Quote => Ok(()),
+            _ => Err(self.unexpected_or_eof()),
+        }
+    }
+
+    /// After a `StartObject`, return the next key as a borrowed `&'input str`,
+    /// or `None` if the object closes immediately.
+    #[inline]
+    pub fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
+        self.skip_whitespace();
+        match self.peek_object() {
+            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Quote => {
+                let key = self.parse_str_value()?;
+                self.expect_colon()?;
+                Ok(Some(key))
+            }
+            ObjectPeek::Comma | ObjectPeek::Other => {
+                Err(self.unexpected_or_eof())
+            }
+        }
+    }
+
     /// Like [`object_first_key`], but returns the key as a raw [`JsonStr`]
-    /// span — borrowed if escape-free, recording `has_escapes()` if not.
-    /// Callers can decode escapes (typically into an `alloc::borrow::Cow`)
-    /// when they may be present.
+    /// span.
     ///
     /// [`object_first_key`]: Self::object_first_key
     #[inline]
     pub fn object_first_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
         self.skip_whitespace();
-        match self.peek() {
-            Some(b'}') => {
-                self.bump();
-                self.pop_frame(Frame::Object)?;
-                Ok(None)
-            }
-            Some(b'"') => {
+        match self.peek_object() {
+            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Quote => {
                 let key = self.read_string_no_validate()?;
-                self.skip_whitespace();
-                match self.peek() {
-                    Some(b':') => self.bump(),
-                    Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                }
-                self.skip_whitespace();
+                self.expect_colon()?;
                 Ok(Some(key))
             }
-            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => Err(self.err(ErrorKind::UnexpectedEof)),
+            ObjectPeek::Comma | ObjectPeek::Other => {
+                Err(self.unexpected_or_eof())
+            }
         }
     }
 
-    /// After a field's value, advance to the next key or close the
-    /// object. Returns `Some(key)` for the next field or `None` if the
-    /// object closed (`}` consumed and stack popped).
+    /// After a field's value, advance to the next key or close the object.
     #[inline]
     pub fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
         self.skip_whitespace();
-        match self.peek() {
-            Some(b'}') => {
-                self.bump();
-                self.pop_frame(Frame::Object)?;
-                Ok(None)
+        match self.peek_object() {
+            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Comma => {
+                self.advance_comma_to_quote()?;
+                let key = self.parse_str_value()?;
+                self.expect_colon()?;
+                Ok(Some(key))
             }
-            Some(b',') => {
-                self.bump();
-                self.skip_whitespace();
-                match self.peek() {
-                    Some(b'"') => {
-                        let key = self.parse_str_value()?;
-                        self.skip_whitespace();
-                        match self.peek() {
-                            Some(b':') => self.bump(),
-                            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                            None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                        }
-                        self.skip_whitespace();
-                        Ok(Some(key))
-                    }
-                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
-                }
+            ObjectPeek::Quote | ObjectPeek::Other => {
+                Err(self.unexpected_or_eof())
             }
-            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => Err(self.err(ErrorKind::UnexpectedEof)),
         }
     }
 
     /// Like [`object_next_key`], but returns the key as a raw [`JsonStr`]
-    /// span. See [`object_first_key_lex`] for the escape-decoding pattern
-    /// callers should follow.
+    /// span.
     ///
     /// [`object_next_key`]: Self::object_next_key
-    /// [`object_first_key_lex`]: Self::object_first_key_lex
     #[inline]
     pub fn object_next_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
         self.skip_whitespace();
-        match self.peek() {
-            Some(b'}') => {
-                self.bump();
-                self.pop_frame(Frame::Object)?;
-                Ok(None)
+        match self.peek_object() {
+            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Comma => {
+                self.advance_comma_to_quote()?;
+                let key = self.read_string_no_validate()?;
+                self.expect_colon()?;
+                Ok(Some(key))
             }
-            Some(b',') => {
-                self.bump();
-                self.skip_whitespace();
-                match self.peek() {
-                    Some(b'"') => {
-                        let key = self.read_string_no_validate()?;
-                        self.skip_whitespace();
-                        match self.peek() {
-                            Some(b':') => self.bump(),
-                            Some(b) => return Err(self.err(ErrorKind::UnexpectedByte(b))),
-                            None => return Err(self.err(ErrorKind::UnexpectedEof)),
-                        }
-                        self.skip_whitespace();
-                        Ok(Some(key))
-                    }
-                    Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.err(ErrorKind::UnexpectedEof)),
-                }
+            ObjectPeek::Quote | ObjectPeek::Other => {
+                Err(self.unexpected_or_eof())
             }
-            Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
-            None => Err(self.err(ErrorKind::UnexpectedEof)),
         }
+    }
+
+    fn unexpected_or_eof(&self) -> Error {
+        self.peek().map_or_else(
+            || self.err(ErrorKind::UnexpectedEof),
+            |b| self.err(ErrorKind::UnexpectedByte(b)),
+        )
     }
 
     /// Expect the byte that opens an array (`[`), advance past it, push a

@@ -481,54 +481,70 @@ mod alloc_impls {
         }
     }
 
+    trait DupMap<K, V> {
+        fn new_empty() -> Self;
+        fn try_insert(&mut self, k: K, v: V) -> bool;
+    }
+
+    impl<K: Ord, V> DupMap<K, V> for alloc::collections::BTreeMap<K, V> {
+        fn new_empty() -> Self { Self::new() }
+        fn try_insert(&mut self, k: K, v: V) -> bool { self.insert(k, v).is_none() }
+    }
+
+    #[cfg(feature = "std")]
+    impl<K, V, S> DupMap<K, V> for std::collections::HashMap<K, V, S>
+    where
+        K: ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn new_empty() -> Self { Self::with_hasher(S::default()) }
+        fn try_insert(&mut self, k: K, v: V) -> bool { self.insert(k, v).is_none() }
+    }
+
+    #[cfg(feature = "indexmap")]
+    impl<K, V, S> DupMap<K, V> for indexmap::IndexMap<K, V, S>
+    where
+        K: ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn new_empty() -> Self { Self::with_hasher(S::default()) }
+        fn try_insert(&mut self, k: K, v: V) -> bool { self.insert(k, v).is_none() }
+    }
+
+    fn parse_map<'input, K, V, M>(lex: &mut Lexer<'input>) -> Result<M, Error>
+    where
+        K: MapKey<'input>,
+        V: FromJson<'input>,
+        M: DupMap<K, V>,
+    {
+        if !matches!(lex.peek_value_kind()?, ValueKind::Object) {
+            return Err(type_error(lex, ErrorKind::TypeMismatch));
+        }
+        lex.object_start()?;
+        let mut out = M::new_empty();
+        let mut maybe_key = lex.object_first_key_lex()?;
+        while let Some(js) = maybe_key {
+            let key_cow = key_to_cow(js, lex)?;
+            let key = K::from_key(key_cow, lex)?;
+            let v = V::from_lex(lex)?;
+            if !out.try_insert(key, v) {
+                return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
+            }
+            maybe_key = lex.object_next_key_lex()?;
+        }
+        Ok(out)
+    }
+
     impl<'input, K, V> FromJson<'input> for alloc::collections::BTreeMap<K, V>
     where
         K: MapKey<'input> + Ord,
         V: FromJson<'input>,
     {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            if !matches!(lex.peek_value_kind()?, ValueKind::Object) {
-                return Err(type_error(lex, ErrorKind::TypeMismatch));
-            }
-            lex.object_start()?;
-            let mut out = Self::new();
-            let mut maybe_key = lex.object_first_key_lex()?;
-            while let Some(js) = maybe_key {
-                let key_cow = key_to_cow(js, lex)?;
-                let key = K::from_key(key_cow, lex)?;
-                let v = V::from_lex(lex)?;
-                if out.insert(key, v).is_some() {
-                    return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
-                }
-                maybe_key = lex.object_next_key_lex()?;
-            }
-            Ok(out)
+            parse_map(lex)
         }
     }
 
-    impl<'input, T> FromJson<'input> for alloc::collections::BTreeSet<T>
-    where
-        T: FromJson<'input> + Ord,
-    {
-        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            // JSON has no native set type — represent as an array, dedup
-            // implicitly via the BTreeSet. Duplicate elements in the
-            // input are silently coalesced (same convention as serde).
-            let mut out = Self::new();
-            if lex.array_start()? {
-                return Ok(out);
-            }
-            out.insert(T::from_lex(lex)?);
-            while !lex.array_continue(b']')? {
-                out.insert(T::from_lex(lex)?);
-            }
-            Ok(out)
-        }
-    }
-
-    // HashMap and HashSet require `std` (not just `alloc`). The crate
-    // already enables `std` by default; users on `alloc`-only get the
-    // BTree variants.
     #[cfg(feature = "std")]
     impl<'input, K, V, S> FromJson<'input> for std::collections::HashMap<K, V, S>
     where
@@ -537,22 +553,62 @@ mod alloc_impls {
         S: ::core::hash::BuildHasher + Default,
     {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            if !matches!(lex.peek_value_kind()?, ValueKind::Object) {
-                return Err(type_error(lex, ErrorKind::TypeMismatch));
-            }
-            lex.object_start()?;
-            let mut out = Self::with_hasher(S::default());
-            let mut maybe_key = lex.object_first_key_lex()?;
-            while let Some(js) = maybe_key {
-                let key_cow = key_to_cow(js, lex)?;
-                let key = K::from_key(key_cow, lex)?;
-                let v = V::from_lex(lex)?;
-                if out.insert(key, v).is_some() {
-                    return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
-                }
-                maybe_key = lex.object_next_key_lex()?;
-            }
-            Ok(out)
+            parse_map(lex)
+        }
+    }
+
+    trait SetInsert<T> {
+        fn new_empty() -> Self;
+        fn push(&mut self, v: T);
+    }
+
+    impl<T: Ord> SetInsert<T> for alloc::collections::BTreeSet<T> {
+        fn new_empty() -> Self { Self::new() }
+        fn push(&mut self, v: T) { self.insert(v); }
+    }
+
+    #[cfg(feature = "std")]
+    impl<T, S> SetInsert<T> for std::collections::HashSet<T, S>
+    where
+        T: ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn new_empty() -> Self { Self::with_hasher(S::default()) }
+        fn push(&mut self, v: T) { self.insert(v); }
+    }
+
+    #[cfg(feature = "indexmap")]
+    impl<T, S> SetInsert<T> for indexmap::IndexSet<T, S>
+    where
+        T: ::core::hash::Hash + Eq,
+        S: ::core::hash::BuildHasher + Default,
+    {
+        fn new_empty() -> Self { Self::with_hasher(S::default()) }
+        fn push(&mut self, v: T) { self.insert(v); }
+    }
+
+    fn parse_set<'input, T, C>(lex: &mut Lexer<'input>) -> Result<C, Error>
+    where
+        T: FromJson<'input>,
+        C: SetInsert<T>,
+    {
+        let mut out = C::new_empty();
+        if lex.array_start()? {
+            return Ok(out);
+        }
+        out.push(T::from_lex(lex)?);
+        while !lex.array_continue(b']')? {
+            out.push(T::from_lex(lex)?);
+        }
+        Ok(out)
+    }
+
+    impl<'input, T> FromJson<'input> for alloc::collections::BTreeSet<T>
+    where
+        T: FromJson<'input> + Ord,
+    {
+        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+            parse_set(lex)
         }
     }
 
@@ -563,15 +619,7 @@ mod alloc_impls {
         S: ::core::hash::BuildHasher + Default,
     {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            let mut out = Self::with_hasher(S::default());
-            if lex.array_start()? {
-                return Ok(out);
-            }
-            out.insert(T::from_lex(lex)?);
-            while !lex.array_continue(b']')? {
-                out.insert(T::from_lex(lex)?);
-            }
-            Ok(out)
+            parse_set(lex)
         }
     }
 
@@ -1037,22 +1085,7 @@ mod alloc_impls {
         S: ::core::hash::BuildHasher + Default,
     {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            if !matches!(lex.peek_value_kind()?, ValueKind::Object) {
-                return Err(type_error(lex, ErrorKind::TypeMismatch));
-            }
-            lex.object_start()?;
-            let mut out = Self::with_hasher(S::default());
-            let mut maybe_key = lex.object_first_key_lex()?;
-            while let Some(js) = maybe_key {
-                let key_cow = key_to_cow(js, lex)?;
-                let key = K::from_key(key_cow, lex)?;
-                let v = V::from_lex(lex)?;
-                if out.insert(key, v).is_some() {
-                    return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
-                }
-                maybe_key = lex.object_next_key_lex()?;
-            }
-            Ok(out)
+            parse_map(lex)
         }
     }
 
@@ -1063,15 +1096,7 @@ mod alloc_impls {
         S: ::core::hash::BuildHasher + Default,
     {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            let mut out = Self::with_hasher(S::default());
-            if lex.array_start()? {
-                return Ok(out);
-            }
-            out.insert(T::from_lex(lex)?);
-            while !lex.array_continue(b']')? {
-                out.insert(T::from_lex(lex)?);
-            }
-            Ok(out)
+            parse_set(lex)
         }
     }
 }

@@ -158,48 +158,31 @@ mod tests {
             let mut id: Option<u64> = None;
             let mut name: Option<&'input str> = None;
             let mut active: Option<bool> = None;
-            let mut nickname: Option<&'input str> = None;
+            let mut nickname: Option<Option<&'input str>> = None;
+
+            let dup = |lex: &Lexer<'_>| Error::new(ErrorKind::DuplicateKey, lex.position());
+            let missing = |lex: &Lexer<'_>| Error::new(ErrorKind::MissingField, lex.position());
 
             let mut maybe_key = lex.object_first_key()?;
             while let Some(key) = maybe_key {
                 match key {
-                    "id" => {
-                        if id.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
-                        }
-                        id = Some(u64::from_lex(lex)?);
+                    "id" if id.is_none() => id = Some(u64::from_lex(lex)?),
+                    "name" if name.is_none() => name = Some(<&str>::from_lex(lex)?),
+                    "active" if active.is_none() => active = Some(bool::from_lex(lex)?),
+                    "nickname" if nickname.is_none() => {
+                        nickname = Some(Option::<&str>::from_lex(lex)?);
                     }
-                    "name" => {
-                        if name.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
-                        }
-                        name = Some(<&str>::from_lex(lex)?);
-                    }
-                    "active" => {
-                        if active.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
-                        }
-                        active = Some(bool::from_lex(lex)?);
-                    }
-                    "nickname" => {
-                        if nickname.is_some() {
-                            return Err(Error::new(ErrorKind::DuplicateKey, lex.position()));
-                        }
-                        nickname = Option::<&str>::from_lex(lex)?;
-                    }
-                    _ => {
-                        return Err(Error::new(ErrorKind::UnknownField, lex.position()));
-                    }
+                    "id" | "name" | "active" | "nickname" => return Err(dup(lex)),
+                    _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
                 }
                 maybe_key = lex.object_next_key()?;
             }
 
             Ok(Self {
-                id: id.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-                name: name.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-                active: active
-                    .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
-                nickname,
+                id: id.ok_or_else(|| missing(lex))?,
+                name: name.ok_or_else(|| missing(lex))?,
+                active: active.ok_or_else(|| missing(lex))?,
+                nickname: nickname.flatten(),
             })
         }
     }
@@ -1026,6 +1009,691 @@ mod tests {
         let c: Cow<'_, str> = parse_str(r#""line\nwrap""#).unwrap();
         assert_eq!(c, "line\nwrap");
         assert!(matches!(c, Cow::Owned(_)));
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: User::from_lex — duplicate key on each field
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn struct_rejects_duplicate_name() {
+        let json = r#"{"id":1,"name":"a","name":"b","active":true}"#;
+        let err = parse_str::<User<'_>>(json).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DuplicateKey);
+    }
+
+    #[test]
+    fn struct_rejects_duplicate_active() {
+        let json = r#"{"id":1,"name":"a","active":true,"active":false}"#;
+        let err = parse_str::<User<'_>>(json).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DuplicateKey);
+    }
+
+    #[test]
+    fn struct_rejects_duplicate_nickname() {
+        let json = r#"{"id":1,"name":"a","active":true,"nickname":"x","nickname":"y"}"#;
+        let err = parse_str::<User<'_>>(json).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DuplicateKey);
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: Parser::object_first_key_lex / object_next_key_lex
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parser_object_key_lex_with_escapes() {
+        let input = br#"{"a\nb":1,"c":2}"#;
+        let mut p: Parser<'_> = Parser::new(input);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let k1 = p.object_first_key_lex().unwrap().unwrap();
+        assert!(k1.has_escapes());
+        assert_eq!(p.parse_i64_value().unwrap(), 1);
+        let k2 = p.object_next_key_lex().unwrap().unwrap();
+        assert!(!k2.has_escapes());
+        assert_eq!(p.parse_i64_value().unwrap(), 2);
+        assert!(p.object_next_key_lex().unwrap().is_none());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_object_key_lex_empty() {
+        let mut p: Parser<'_> = Parser::new(b"{}");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(p.object_first_key_lex().unwrap().is_none());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: Parser::array_start / array_continue
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parser_array_start_continue() {
+        let mut p: Parser<'_> = Parser::new(b"[1,2,3]");
+        assert!(!p.array_start().unwrap());
+        assert_eq!(p.parse_i64_value().unwrap(), 1);
+        assert!(!p.array_continue(b']').unwrap());
+        assert_eq!(p.parse_i64_value().unwrap(), 2);
+        assert!(!p.array_continue(b']').unwrap());
+        assert_eq!(p.parse_i64_value().unwrap(), 3);
+        assert!(p.array_continue(b']').unwrap());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_array_start_empty() {
+        let mut p: Parser<'_> = Parser::new(b"[]");
+        assert!(p.array_start().unwrap());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_array_nested_in_object() {
+        let mut p: Parser<'_> = Parser::new(br#"{"v":[1,2]}"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let key = p.object_first_key().unwrap().unwrap();
+        assert_eq!(key, "v");
+        assert!(!p.array_start().unwrap());
+        assert_eq!(p.parse_i64_value().unwrap(), 1);
+        assert!(!p.array_continue(b']').unwrap());
+        assert_eq!(p.parse_i64_value().unwrap(), 2);
+        assert!(p.array_continue(b']').unwrap());
+        assert!(p.object_next_key().unwrap().is_none());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: ErrorKind::lexical_msg / typed_msg
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn error_kind_display_covers_all_variants() {
+        use alloc::format;
+        let cases: &[(ErrorKind, &str)] = &[
+            (ErrorKind::UnexpectedEof, "unexpected end of input"),
+            (ErrorKind::InvalidEscape, "invalid string escape"),
+            (ErrorKind::InvalidUnicodeEscape, "invalid \\u escape"),
+            (ErrorKind::UnpairedSurrogate, "unpaired UTF-16 surrogate in \\u escape"),
+            (ErrorKind::InvalidUtf8, "invalid UTF-8"),
+            (ErrorKind::InvalidNumber, "invalid number literal"),
+            (ErrorKind::NumberOutOfRange, "number does not fit target type"),
+            (ErrorKind::ControlCharInString, "control character in string literal"),
+            (ErrorKind::TrailingData, "trailing data after JSON value"),
+            (ErrorKind::DepthLimitExceeded, "nesting depth limit exceeded"),
+            (ErrorKind::ExpectedValue, "expected JSON value"),
+            (ErrorKind::ExpectedString, "expected string"),
+            (ErrorKind::ExpectedNumber, "expected number"),
+            (ErrorKind::ExpectedBool, "expected boolean"),
+            (ErrorKind::ExpectedNull, "expected null"),
+            (ErrorKind::ExpectedArray, "expected array"),
+            (ErrorKind::ExpectedObject, "expected object"),
+            (ErrorKind::TypeMismatch, "type mismatch"),
+            (ErrorKind::DuplicateKey, "duplicate object key"),
+            (ErrorKind::MissingField, "missing required field"),
+            (ErrorKind::UnknownField, "unknown field"),
+            (ErrorKind::NonFiniteFloat, "non-finite float not representable in JSON"),
+            (ErrorKind::UnexpectedByte(0x7B), "unexpected byte 0x7b"),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(format!("{kind}"), *expected, "mismatch for {kind:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: Lexer::consume_utf8_multibyte — all leading-byte ranges
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn utf8_f4_leading_byte_valid() {
+        let s = "\"\u{100000}\"";
+        let v: &str = parse_str(s).unwrap();
+        assert_eq!(v, "\u{100000}");
+    }
+
+    #[test]
+    fn utf8_f4_leading_byte_invalid_continuation() {
+        let mut bytes = b"\"".to_vec();
+        bytes.push(0xF4);
+        bytes.push(0x90); // too high for F4 (must be 0x80..0x8F)
+        bytes.push(0x80);
+        bytes.push(0x80);
+        bytes.push(b'"');
+        let r = parse::<&str>(&bytes);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidUtf8);
+    }
+
+    #[test]
+    fn utf8_multibyte_all_leading_ranges() {
+        let cases: &[&str] = &[
+            "\"\u{0080}\"",   // C2: 2-byte
+            "\"\u{0800}\"",   // E0 A0: 3-byte low
+            "\"\u{1000}\"",   // E1: 3-byte mid
+            "\"\u{D7FF}\"",   // ED 9F: 3-byte just below surrogates
+            "\"\u{E000}\"",   // EE: 3-byte private use
+            "\"\u{10000}\"",  // F0 90: 4-byte low
+            "\"\u{40000}\"",  // F1: 4-byte mid
+            "\"\u{100000}\"", // F4 80: 4-byte high
+        ];
+        for input in cases {
+            let v: &str = parse_str(input).unwrap();
+            let expected = &input[1..input.len() - 1];
+            assert_eq!(v, expected);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: write_escape_byte — all control bytes
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn serialize_all_control_bytes() {
+        for b in 0x00_u8..=0x1F {
+            let s = alloc::string::String::from(b as char);
+            let json = to_string(&s).unwrap();
+            assert!(json.starts_with('"') && json.ends_with('"'));
+            let inner = &json[1..json.len() - 1];
+            match b {
+                b'"' => unreachable!(),
+                b'\\' => unreachable!(),
+                b'\n' => assert_eq!(inner, "\\n"),
+                b'\r' => assert_eq!(inner, "\\r"),
+                b'\t' => assert_eq!(inner, "\\t"),
+                0x08 => assert_eq!(inner, "\\b"),
+                0x0C => assert_eq!(inner, "\\f"),
+                _ => {
+                    let expected = alloc::format!("\\u00{:02x}", b);
+                    assert_eq!(inner, expected, "byte 0x{b:02x}");
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: Parser::next_event — error-path branches
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn next_event_rejects_trailing_comma_in_array() {
+        let mut p: Parser<'_> = Parser::new(b"[1,]");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        let _ = p.next_event().unwrap().unwrap(); // Int(1)
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b']'));
+    }
+
+    #[test]
+    fn next_event_rejects_trailing_comma_in_object() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a":1,}"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
+        let _ = p.next_event().unwrap().unwrap(); // Int(1)
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b'}'));
+    }
+
+    #[test]
+    fn next_event_object_colon_eof() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a""#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn next_event_object_colon_wrong_byte() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a";"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
+    }
+
+    #[test]
+    fn next_event_empty_input() {
+        let mut p: Parser<'_> = Parser::new(b"");
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn next_event_eof_inside_array() {
+        let mut p: Parser<'_> = Parser::new(b"[");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn next_event_eof_after_array_comma() {
+        let mut p: Parser<'_> = Parser::new(b"[1,");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        let _ = p.next_event().unwrap().unwrap(); // 1
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn next_event_bad_byte_after_array_value() {
+        let mut p: Parser<'_> = Parser::new(b"[1;");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        let _ = p.next_event().unwrap().unwrap(); // 1
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
+    }
+
+    #[test]
+    fn next_event_eof_in_object_key_position() {
+        let mut p: Parser<'_> = Parser::new(b"{");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn next_event_bad_byte_in_object_key_position() {
+        let mut p: Parser<'_> = Parser::new(b"{1");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b'1'));
+    }
+
+    #[test]
+    fn next_event_eof_after_object_value() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a":1"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
+        let _ = p.next_event().unwrap().unwrap(); // 1
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn next_event_bad_byte_after_object_value() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a":1;"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
+        let _ = p.next_event().unwrap().unwrap(); // 1
+        let err = p.next_event().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
+    }
+
+    #[test]
+    fn next_event_object_value_state_via_fast_path() {
+        let mut p: Parser<'_> = Parser::new(br#"{"x":42,"y":99}"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let k1 = p.object_first_key().unwrap().unwrap();
+        assert_eq!(k1, "x");
+        let v1 = p.next_event().unwrap().unwrap();
+        assert!(matches!(v1, Event::Number(_)));
+        let k2 = p.object_next_key().unwrap().unwrap();
+        assert_eq!(k2, "y");
+        let v2 = p.next_event().unwrap().unwrap();
+        assert!(matches!(v2, Event::Number(_)));
+        assert!(p.object_next_key().unwrap().is_none());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn next_event_nested_containers_close_correctly() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a":[1],"b":{"c":2}}"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_))); // "a"
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_))); // "b"
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_))); // "c"
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndObject));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndObject));
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn next_event_nested_array_in_array() {
+        let input = b"[[],[1,2]]";
+        let mut p: Parser<'_> = Parser::new(input);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn serialize_string_with_quote_and_backslash() {
+        let s = "a\"b\\c";
+        let json = to_string(&s).unwrap();
+        assert_eq!(json, r#""a\"b\\c""#);
+    }
+
+    #[test]
+    fn serialize_string_with_all_named_escapes() {
+        let s = "\x08\x0C\n\r\t";
+        let json = to_string(&s).unwrap();
+        assert_eq!(json, r#""\b\f\n\r\t""#);
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: Parser::object_first_key — nested container state paths
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn parser_object_first_key_empty_inside_array() {
+        let mut p: Parser<'_> = Parser::new(b"[{}]");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(p.object_first_key().unwrap().is_none());
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_object_first_key_empty_inside_object() {
+        let mut p: Parser<'_> = Parser::new(br#"{"a":{}}"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let k = p.object_first_key().unwrap().unwrap();
+        assert_eq!(k, "a");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(p.object_first_key().unwrap().is_none());
+        assert!(p.object_next_key().unwrap().is_none());
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_object_first_key_lex_empty_inside_array() {
+        let mut p: Parser<'_> = Parser::new(b"[{}]");
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(p.object_first_key_lex().unwrap().is_none());
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_object_next_key_close_inside_array() {
+        let mut p: Parser<'_> = Parser::new(br#"[{"a":1}]"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let k = p.object_first_key().unwrap().unwrap();
+        assert_eq!(k, "a");
+        assert_eq!(p.parse_i64_value().unwrap(), 1);
+        assert!(p.object_next_key().unwrap().is_none());
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    #[test]
+    fn parser_object_next_key_lex_close_inside_array() {
+        let mut p: Parser<'_> = Parser::new(br#"[{"a":1}]"#);
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        let k = p.object_first_key_lex().unwrap().unwrap();
+        assert!(!k.has_escapes());
+        assert_eq!(p.parse_i64_value().unwrap(), 1);
+        assert!(p.object_next_key_lex().unwrap().is_none());
+        assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
+        assert!(p.next_event().unwrap().is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: Lexer object_* — error paths via raw Lexer API
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn lexer_object_first_key_bad_byte() {
+        let mut lex: Lexer<'_> = Lexer::new(b"{1");
+        lex.object_start().unwrap();
+        let err = lex.object_first_key().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b'1'));
+    }
+
+    #[test]
+    fn lexer_object_first_key_eof() {
+        let mut lex: Lexer<'_> = Lexer::new(b"{");
+        lex.object_start().unwrap();
+        let err = lex.object_first_key().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn lexer_object_first_key_lex_bad_byte() {
+        let mut lex: Lexer<'_> = Lexer::new(b"{1");
+        lex.object_start().unwrap();
+        let err = lex.object_first_key_lex().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b'1'));
+    }
+
+    #[test]
+    fn lexer_object_first_key_lex_eof() {
+        let mut lex: Lexer<'_> = Lexer::new(b"{");
+        lex.object_start().unwrap();
+        let err = lex.object_first_key_lex().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn lexer_object_next_key_bad_byte() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a":1;"#);
+        lex.object_start().unwrap();
+        let _ = lex.object_first_key().unwrap();
+        let _ = lex.parse_i64_value().unwrap();
+        let err = lex.object_next_key().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
+    }
+
+    #[test]
+    fn lexer_object_next_key_eof() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a":1"#);
+        lex.object_start().unwrap();
+        let _ = lex.object_first_key().unwrap();
+        let _ = lex.parse_i64_value().unwrap();
+        let err = lex.object_next_key().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn lexer_object_next_key_bad_byte_after_comma() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a":1,2"#);
+        lex.object_start().unwrap();
+        let _ = lex.object_first_key().unwrap();
+        let _ = lex.parse_i64_value().unwrap();
+        let err = lex.object_next_key().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b'2'));
+    }
+
+    #[test]
+    fn lexer_object_next_key_lex_bad_byte() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a":1;"#);
+        lex.object_start().unwrap();
+        let _ = lex.object_first_key_lex().unwrap();
+        let _ = lex.parse_i64_value().unwrap();
+        let err = lex.object_next_key_lex().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
+    }
+
+    #[test]
+    fn lexer_object_next_key_lex_eof() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a":1"#);
+        lex.object_start().unwrap();
+        let _ = lex.object_first_key_lex().unwrap();
+        let _ = lex.parse_i64_value().unwrap();
+        let err = lex.object_next_key_lex().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn lexer_object_next_key_lex_bad_byte_after_comma() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a":1,2"#);
+        lex.object_start().unwrap();
+        let _ = lex.object_first_key_lex().unwrap();
+        let _ = lex.parse_i64_value().unwrap();
+        let err = lex.object_next_key_lex().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b'2'));
+    }
+
+    #[test]
+    fn lexer_expect_colon_bad_byte() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a";"#);
+        lex.object_start().unwrap();
+        let err = lex.object_first_key().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
+    }
+
+    #[test]
+    fn lexer_expect_colon_eof() {
+        let mut lex: Lexer<'_> = Lexer::new(br#"{"a""#);
+        lex.object_start().unwrap();
+        let err = lex.object_first_key().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::UnexpectedEof);
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: [T; N]::from_lex — empty array with N=0, closed early
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fixed_array_zero_length() {
+        let arr: [i32; 0] = parse_str("[]").unwrap();
+        assert_eq!(arr, [0_i32; 0]);
+    }
+
+    #[test]
+    fn fixed_array_empty_but_expected_nonempty() {
+        let r = parse_str::<[i32; 3]>("[]");
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn fixed_array_closed_early() {
+        let r = parse_str::<[i32; 3]>("[1]");
+        assert!(r.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: ErrorKind::typed_msg — wildcard arm for lexical variants
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn typed_msg_wildcard_for_lexical_variant() {
+        use alloc::format;
+        let kind = ErrorKind::UnexpectedEof;
+        let msg = format!("{kind}");
+        assert_eq!(msg, "unexpected end of input");
+
+        let kind = ErrorKind::ExpectedNull;
+        let msg = format!("{kind}");
+        assert_eq!(msg, "expected null");
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: write_escape_byte — quote and backslash arms
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn serialize_string_containing_only_quote() {
+        let s = "\"";
+        let json = to_string(&s).unwrap();
+        assert_eq!(json, r#""\"""#);
+    }
+
+    #[test]
+    fn serialize_string_containing_only_backslash() {
+        let s = "\\";
+        let json = to_string(&s).unwrap();
+        assert_eq!(json, r#""\\""#);
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: consume_utf8_multibyte — error paths
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn utf8_invalid_leading_byte() {
+        let bytes = b"\"\xFF\"";
+        let r = parse::<&str>(bytes);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidUtf8);
+    }
+
+    #[test]
+    fn utf8_truncated_3byte_sequence() {
+        let mut bytes = b"\"".to_vec();
+        bytes.push(0xE1);
+        bytes.push(0x80);
+        // missing third continuation byte — EOF
+        let r = parse::<&str>(&bytes);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidUtf8);
+    }
+
+    #[test]
+    fn utf8_bad_third_continuation_byte() {
+        let mut bytes = b"\"".to_vec();
+        bytes.push(0xE1);
+        bytes.push(0x80);
+        bytes.push(0x00); // not a continuation byte
+        let r = parse::<&str>(&bytes);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn utf8_4byte_bad_third_continuation() {
+        let mut bytes = b"\"".to_vec();
+        bytes.push(0xF0);
+        bytes.push(0x90);
+        bytes.push(0x80);
+        bytes.push(0x00); // bad fourth byte
+        let r = parse::<&str>(&bytes);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn utf8_e0_bad_second_byte() {
+        let mut bytes = b"\"".to_vec();
+        bytes.push(0xE0);
+        bytes.push(0x80); // too low for E0 (must be 0xA0..0xBF)
+        bytes.push(0x80);
+        bytes.push(b'"');
+        let r = parse::<&str>(&bytes);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidUtf8);
+    }
+
+    #[test]
+    fn utf8_ed_bad_second_byte() {
+        let mut bytes = b"\"".to_vec();
+        bytes.push(0xED);
+        bytes.push(0xA0); // too high for ED (must be 0x80..0x9F) — surrogate range
+        bytes.push(0x80);
+        bytes.push(b'"');
+        let r = parse::<&str>(&bytes);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidUtf8);
+    }
+
+    #[test]
+    fn utf8_f0_bad_second_byte() {
+        let mut bytes = b"\"".to_vec();
+        bytes.push(0xF0);
+        bytes.push(0x80); // too low for F0 (must be 0x90..0xBF)
+        bytes.push(0x80);
+        bytes.push(0x80);
+        bytes.push(b'"');
+        let r = parse::<&str>(&bytes);
+        assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidUtf8);
+    }
+
+    // -----------------------------------------------------------------
+    // Coverage: [T; N]::from_lex — line 295 too-long path
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn fixed_array_non_array_input() {
+        let r = parse_str::<[i32; 2]>("42");
+        assert!(r.is_err());
     }
 }
 

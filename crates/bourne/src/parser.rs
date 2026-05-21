@@ -2,6 +2,11 @@ use crate::error::{Error, ErrorKind};
 use crate::event::{Event, JsonStr};
 use crate::lexer::{DEFAULT_MAX_DEPTH, Frame, Lexer};
 
+enum LoopAction {
+    Return(Result<Option<Event>, Error>),
+    Continue,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum State {
     /// Document start — expecting a value, no events emitted yet.
@@ -82,109 +87,135 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
         self.lex.input()
     }
 
-    // The state machine is intrinsically large — splitting it would scatter
-    // dispatch across one private fn per state and obscure the grammar walk.
-    #[allow(clippy::too_many_lines)]
     pub fn next_event(&mut self) -> Result<Option<Event>, Error> {
         loop {
             self.lex.skip_whitespace();
             return match self.state {
-                State::Start => match self.lex.peek() {
-                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
-                    Some(_) => {
-                        let ev = self.lex.read_value()?;
-                        self.state = match ev {
-                            Event::StartObject => State::ObjectKeyOrEnd,
-                            Event::StartArray => State::ArrayValueOrEnd,
-                            _ => State::DocumentEnd,
-                        };
-                        Ok(Some(ev))
-                    }
-                },
-                State::DocumentEnd => {
-                    if self.lex.peek().is_some() {
-                        Err(self.lex.err(ErrorKind::TrailingData))
-                    } else {
-                        Ok(None)
-                    }
-                }
-                State::ArrayValueOrEnd => match self.lex.peek() {
-                    Some(b']') => {
-                        self.lex.bump();
-                        Ok(Some(self.close_container(Frame::Array)?))
-                    }
-                    Some(_) => {
-                        let ev = self.lex.read_value()?;
-                        self.state = state_after_value(&ev, State::ArrayCommaOrEnd);
-                        Ok(Some(ev))
-                    }
-                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
-                },
-                State::ArrayCommaOrEnd => match self.lex.peek() {
-                    Some(b',') => {
-                        self.lex.bump();
-                        self.lex.skip_whitespace();
-                        if self.lex.peek() == Some(b']') {
-                            return Err(self.lex.err(ErrorKind::UnexpectedByte(b']')));
-                        }
-                        let ev = self.lex.read_value()?;
-                        self.state = state_after_value(&ev, State::ArrayCommaOrEnd);
-                        Ok(Some(ev))
-                    }
-                    Some(b']') => {
-                        self.lex.bump();
-                        Ok(Some(self.close_container(Frame::Array)?))
-                    }
-                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
-                },
-                State::ObjectKeyOrEnd => match self.lex.peek() {
-                    Some(b'}') => {
-                        self.lex.bump();
-                        Ok(Some(self.close_container(Frame::Object)?))
-                    }
-                    Some(b'"') => {
-                        let s = self.lex.read_string()?;
-                        self.state = State::ObjectColon;
-                        Ok(Some(Event::Key(s)))
-                    }
-                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
-                },
-                State::ObjectColon => match self.lex.peek() {
-                    Some(b':') => {
-                        self.lex.bump();
-                        self.lex.skip_whitespace();
-                        let ev = self.lex.read_value()?;
-                        self.state = state_after_value(&ev, State::ObjectCommaOrEnd);
-                        Ok(Some(ev))
-                    }
-                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
-                },
-                State::ObjectValue => {
-                    let ev = self.lex.read_value()?;
-                    self.state = state_after_value(&ev, State::ObjectCommaOrEnd);
-                    Ok(Some(ev))
-                }
-                State::ObjectCommaOrEnd => match self.lex.peek() {
-                    Some(b',') => {
-                        self.lex.bump();
-                        self.state = State::ObjectKeyOrEnd;
-                        self.lex.skip_whitespace();
-                        if self.lex.peek() == Some(b'}') {
-                            return Err(self.lex.err(ErrorKind::UnexpectedByte(b'}')));
-                        }
-                        continue;
-                    }
-                    Some(b'}') => {
-                        self.lex.bump();
-                        Ok(Some(self.close_container(Frame::Object)?))
-                    }
-                    Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
-                    None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
+                State::Start => self.ev_start(),
+                State::DocumentEnd => self.ev_document_end(),
+                State::ArrayValueOrEnd => self.ev_array_value_or_end(),
+                State::ArrayCommaOrEnd => self.ev_array_comma_or_end(),
+                State::ObjectKeyOrEnd => self.ev_object_key_or_end(),
+                State::ObjectColon => self.ev_object_colon(),
+                State::ObjectValue => self.ev_object_value(),
+                State::ObjectCommaOrEnd => match self.ev_object_comma_or_end() {
+                    LoopAction::Return(r) => r,
+                    LoopAction::Continue => continue,
                 },
             };
+        }
+    }
+
+    fn ev_start(&mut self) -> Result<Option<Event>, Error> {
+        match self.lex.peek() {
+            None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
+            Some(_) => {
+                let ev = self.lex.read_value()?;
+                self.state = state_after_value(&ev, State::DocumentEnd);
+                Ok(Some(ev))
+            }
+        }
+    }
+
+    fn ev_document_end(&self) -> Result<Option<Event>, Error> {
+        if self.lex.peek().is_some() {
+            Err(self.lex.err(ErrorKind::TrailingData))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn ev_array_value_or_end(&mut self) -> Result<Option<Event>, Error> {
+        match self.lex.peek() {
+            Some(b']') => {
+                self.lex.bump();
+                Ok(Some(self.close_container(Frame::Array)?))
+            }
+            Some(_) => {
+                let ev = self.lex.read_value()?;
+                self.state = state_after_value(&ev, State::ArrayCommaOrEnd);
+                Ok(Some(ev))
+            }
+            None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    fn ev_array_comma_or_end(&mut self) -> Result<Option<Event>, Error> {
+        match self.lex.peek() {
+            Some(b',') => {
+                self.lex.bump();
+                self.lex.skip_whitespace();
+                if self.lex.peek() == Some(b']') {
+                    return Err(self.lex.err(ErrorKind::UnexpectedByte(b']')));
+                }
+                let ev = self.lex.read_value()?;
+                self.state = state_after_value(&ev, State::ArrayCommaOrEnd);
+                Ok(Some(ev))
+            }
+            Some(b']') => {
+                self.lex.bump();
+                Ok(Some(self.close_container(Frame::Array)?))
+            }
+            Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    fn ev_object_key_or_end(&mut self) -> Result<Option<Event>, Error> {
+        match self.lex.peek() {
+            Some(b'}') => {
+                self.lex.bump();
+                Ok(Some(self.close_container(Frame::Object)?))
+            }
+            Some(b'"') => {
+                let s = self.lex.read_string()?;
+                self.state = State::ObjectColon;
+                Ok(Some(Event::Key(s)))
+            }
+            Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    fn ev_object_colon(&mut self) -> Result<Option<Event>, Error> {
+        match self.lex.peek() {
+            Some(b':') => {
+                self.lex.bump();
+                self.lex.skip_whitespace();
+                let ev = self.lex.read_value()?;
+                self.state = state_after_value(&ev, State::ObjectCommaOrEnd);
+                Ok(Some(ev))
+            }
+            Some(b) => Err(self.lex.err(ErrorKind::UnexpectedByte(b))),
+            None => Err(self.lex.err(ErrorKind::UnexpectedEof)),
+        }
+    }
+
+    fn ev_object_value(&mut self) -> Result<Option<Event>, Error> {
+        let ev = self.lex.read_value()?;
+        self.state = state_after_value(&ev, State::ObjectCommaOrEnd);
+        Ok(Some(ev))
+    }
+
+    fn ev_object_comma_or_end(&mut self) -> LoopAction {
+        match self.lex.peek() {
+            Some(b',') => {
+                self.lex.bump();
+                self.state = State::ObjectKeyOrEnd;
+                self.lex.skip_whitespace();
+                if self.lex.peek() == Some(b'}') {
+                    return LoopAction::Return(
+                        Err(self.lex.err(ErrorKind::UnexpectedByte(b'}'))),
+                    );
+                }
+                LoopAction::Continue
+            }
+            Some(b'}') => {
+                self.lex.bump();
+                LoopAction::Return(self.close_container(Frame::Object).map(Some))
+            }
+            Some(b) => LoopAction::Return(Err(self.lex.err(ErrorKind::UnexpectedByte(b)))),
+            None => LoopAction::Return(Err(self.lex.err(ErrorKind::UnexpectedEof))),
         }
     }
 
