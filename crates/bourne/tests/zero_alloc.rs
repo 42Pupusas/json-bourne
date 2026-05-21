@@ -1,6 +1,6 @@
 //! Zero-allocation guarantees.
 //!
-//! Locks in `bourne`'s zero-copy story as a regression gate, not just an
+//! Locks in `json-bourne`'s zero-copy story as a regression gate, not just an
 //! aspirational doc claim. The counting allocator is installed as the
 //! `#[global_allocator]` for this test binary only — each `tests/*.rs` is
 //! its own binary in Cargo, so other integration tests are unaffected.
@@ -20,8 +20,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::System;
 
-use bourne::parse;
-use bourne::Parser;
+use json_bourne::parse;
+use json_bourne::Parser;
 
 struct CountingAllocator {
     allocs: AtomicUsize,

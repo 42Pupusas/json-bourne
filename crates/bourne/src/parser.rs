@@ -35,7 +35,7 @@ enum State {
 /// `Parser` is the streaming API. It owns a [`Lexer`] (the byte walker) plus
 /// a small grammar state machine that enforces JSON's "value, then comma,
 /// then value" structure when emitting events serially. Typed consumers
-/// (`bourne::FromJson`) drive the lexer directly and bypass this state
+/// (`json_bourne::FromJson`) drive the lexer directly and bypass this state
 /// machine — for them, the type's recursive structure already enforces the
 /// grammar, and the dispatch through `match self.state` is pure overhead.
 ///

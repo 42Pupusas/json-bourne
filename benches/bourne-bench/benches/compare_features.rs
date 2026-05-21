@@ -8,7 +8,7 @@
 //! escape-bearing one to surface the per-key decode cost on the new
 //! `_lex` dispatch path.
 
-use bourne::parse;
+use json_bourne::parse;
 use bourne_bench::{
     duration_seconds_array, i128_array, small_keyed_object, small_object_escaped_keys,
 };

@@ -16,7 +16,7 @@
 //! and structural punctuation are negligible at sizes >=1000 elements,
 //! so the bench isolates float cost.
 
-use bourne::to_string;
+use json_bourne::to_string;
 
 fn main() {
     divan::main();
@@ -196,7 +196,7 @@ mod bourne_write_four {
 // ---------------------------------------------------------------------------
 mod bourne_write_reuse_buf {
     use super::make_floats;
-    use bourne::{ByteSink, ToJson};
+    use json_bourne::{ByteSink, ToJson};
 
     #[divan::bench(args = [100, 1_000, 10_000])]
     fn bench(bencher: divan::Bencher, n: usize) {

@@ -723,7 +723,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 
     /// Read a JSON string and return it as a borrowed `&'input str`. Errors
     /// if the string contains escape sequences — those require a caller-owned
-    /// decode buffer, which `bourne` does not allocate.
+    /// decode buffer, which `json-bourne` does not allocate.
     ///
     /// Caller must position the lexer at the opening `"`. On return the
     /// cursor is past the closing `"`. The returned slice points into the

@@ -5,8 +5,8 @@
 
 #![cfg(feature = "std")]
 
-use bourne::{parse_str, to_string};
-use bourne::Parser;
+use json_bourne::{parse_str, to_string};
+use json_bourne::Parser;
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -37,7 +37,7 @@ proptest! {
         prop_assert_eq!(parsed.to_bits(), x.to_bits());
     }
 
-    /// Stronger property: every finite f64 that survives `bourne::to_string`
+    /// Stronger property: every finite f64 that survives `json_bourne::to_string`
     /// must parse back bit-identically. This exercises the in-tree
     /// Grisu3 path *and* its libstd fallback — the failure mode it
     /// catches is "Grisu3 emitted shorter-than-shortest output that
@@ -48,8 +48,8 @@ proptest! {
     fn bourne_serialized_finite_f64_round_trips(
         x in proptest::num::f64::NORMAL | proptest::num::f64::POSITIVE | proptest::num::f64::NEGATIVE | proptest::num::f64::ZERO,
     ) {
-        let s = to_string(&x).expect("bourne serializes finite f64");
-        let parsed: f64 = parse_str(&s).expect("bourne output parses back");
+        let s = to_string(&x).expect("json-bourne serializes finite f64");
+        let parsed: f64 = parse_str(&s).expect("json-bourne output parses back");
         prop_assert_eq!(
             parsed.to_bits(), x.to_bits(),
             "round-trip failed via {:?} for f={:e} (bits=0x{:016x})",

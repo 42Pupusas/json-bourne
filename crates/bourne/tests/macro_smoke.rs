@@ -5,7 +5,7 @@
 
 #![cfg(feature = "std")]
 
-use bourne::{ErrorKind, from_json, parse_str};
+use json_bourne::{ErrorKind, from_json, parse_str};
 
 from_json! {
     #[derive(Debug, PartialEq)]

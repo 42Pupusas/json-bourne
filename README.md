@@ -1,10 +1,10 @@
-# bourne
+# json-bourne
 
 Type-driven JSON for Rust. `no_std`-first, zero dependencies, zero allocations
 for borrowed parses.
 
 ```rust
-use bourne::{from_json, parse_str, to_string};
+use json_bourne::{from_json, parse_str, to_string};
 
 from_json! {
     #[derive(Debug, PartialEq)]
@@ -21,7 +21,7 @@ assert_eq!(u.name, "alice");
 
 ## Why
 
-`bourne` skips the generic `Value` middle layer. Each type knows how to parse
+`json-bourne` skips the generic `Value` middle layer. Each type knows how to parse
 itself directly from the lexer — the typed structure already enforces JSON's
 grammar, so the per-event state machine is pure overhead for typed consumers.
 The result is faster typed parsing and zero allocations on the borrow path.
@@ -47,7 +47,7 @@ The `bourne-bench` crate is workspace-internal and is not published.
 | `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, `BTreeMap`/`Set`, escape decoding, `to_string` |
 | `indexmap`  | no      | `FromJson`/`ToJson` for `indexmap::IndexMap` (insertion order) |
 
-`bourne` builds in `no_std + alloc` with `default-features = false, features = ["alloc"]`.
+`json-bourne` builds in `no_std + alloc` with `default-features = false, features = ["alloc"]`.
 For pure `no_std` (streaming `Lexer` / `Parser` only) build with `default-features = false`.
 
 ## Status
@@ -61,4 +61,4 @@ by a counting-allocator test.
 
 ## License
 
-Dual-licensed under MIT and Apache-2.0. See `LICENSE-MIT` and `LICENSE-APACHE`.
+Licensed under MIT. See `LICENSE-MIT`.

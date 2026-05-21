@@ -1,7 +1,7 @@
 //! Typed deserialization throughput. Compare against `stream` benches for the
 //! same input to see the cost of `FromJson` on top of the streaming parser.
 
-use bourne::parse;
+use json_bourne::parse;
 use bourne_bench::{int_array, string_array};
 
 fn main() {

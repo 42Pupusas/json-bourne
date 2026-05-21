@@ -959,7 +959,7 @@ pub trait ToJson {
 #[allow(clippy::missing_panics_doc)]
 pub fn to_string<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> {
     let bytes = to_vec(value)?;
-    Ok(String::from_utf8(bytes).expect("bourne emits only valid UTF-8"))
+    Ok(String::from_utf8(bytes).expect("json-bourne emits only valid UTF-8"))
 }
 
 /// Serialize `value` into a fresh `Vec<u8>`.
@@ -1378,7 +1378,7 @@ macro_rules! impl_int_unsigned {
 impl_int_signed!(i8, i16, i32, i64);
 impl_int_unsigned!(u8, u16, u32, u64);
 
-// `isize` / `usize` widen to 64-bit on the platforms bourne supports.
+// `isize` / `usize` widen to 64-bit on the platforms json-bourne supports.
 // `as` is acceptable here: the cast is the documented platform widening,
 // not a truncation.
 #[allow(clippy::cast_possible_wrap, clippy::cast_lossless, clippy::use_self)]

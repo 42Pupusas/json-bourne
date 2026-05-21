@@ -4,12 +4,12 @@
 //! This is the zero-dep alternative to a `#[derive(FromJson)]` proc
 //! macro. The crate's core promise is no external deps; a proc-macro
 //! crate would need `proc-macro2` / `quote` / `syn`. `macro_rules!`
-//! lives inside `bourne` itself, so the dep graph stays empty.
+//! lives inside `json-bourne` itself, so the dep graph stays empty.
 //!
 //! # Usage
 //!
 //! ```
-//! use bourne::{from_json, parse_str};
+//! use json_bourne::{from_json, parse_str};
 //!
 //! from_json! {
 //!     #[derive(Debug, PartialEq)]
@@ -5476,7 +5476,7 @@ macro_rules! __to_json_field_key {
 /// from invoking both single-trait macros on the same type.
 ///
 /// ```
-/// use bourne::{json, parse_str, to_string};
+/// use json_bourne::{json, parse_str, to_string};
 ///
 /// json! {
 ///     #[derive(Debug, PartialEq)]

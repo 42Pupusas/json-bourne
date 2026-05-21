@@ -24,7 +24,7 @@
 //! The struct/enum benches all run over `Vec<T>` of `N=1000` so per-
 //! record dispatch dominates the wall-clock instead of fixed setup.
 
-use bourne::{JsonWrite, ToJson, to_json, to_string};
+use json_bourne::{JsonWrite, ToJson, to_json, to_string};
 use bourne_bench::SMALL_OBJECT;
 use serde::Serialize;
 

@@ -5,7 +5,7 @@
 
 #![cfg(feature = "std")]
 
-use bourne::{
+use json_bourne::{
     Error, ErrorKind, FromJson, Lexer, from_json, parse_str,
 };
 

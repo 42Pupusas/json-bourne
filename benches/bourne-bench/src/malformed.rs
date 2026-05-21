@@ -11,7 +11,7 @@
 //! at a different byte offset, the bench panics with a clear message.
 //! Drop the assertion entirely if you want pure throughput.
 
-use bourne::ErrorKind;
+use json_bourne::ErrorKind;
 
 /// One malformed input plus the expected error kind. Position is checked
 /// loosely (any error at all is acceptable for some inputs — see flags).

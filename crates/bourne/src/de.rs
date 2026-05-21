@@ -1,6 +1,6 @@
 //! Type-driven deserialization.
 //!
-//! The [`FromJson`] trait is the heart of `bourne`. Each type knows how to
+//! The [`FromJson`] trait is the heart of `json-bourne`. Each type knows how to
 //! parse itself from JSON given direct access to the [`Lexer`].
 //!
 //! Why a lexer instead of an event stream? Typed parsing already enforces
@@ -792,7 +792,7 @@ mod alloc_impls {
 
     /// Transparent wrapper. `Arc` requires `target_has_atomic = "ptr"`
     /// transitively via `alloc::sync`; we don't gate it explicitly because
-    /// `bourne`'s supported targets all have it.
+    /// `json-bourne`'s supported targets all have it.
     impl<'input, T: FromJson<'input>> FromJson<'input> for alloc::sync::Arc<T> {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
             T::from_lex(lex).map(Self::new)
@@ -932,8 +932,8 @@ mod alloc_impls {
     /// UTF-8 by construction — re-validating them in safe code is the
     /// `from_utf8` re-walk that perf showed at ~12% of total time (the
     /// audit on 2026-05-19 measured the safe variant at 1.68× slower,
-    /// pushing bourne below `serde_json` on the escape-heavy workload).
-    /// `bourne`'s `unsafe_code = "deny"` lint is overridden for this one
+    /// pushing json-bourne below `serde_json` on the escape-heavy workload).
+    /// `json-bourne`'s `unsafe_code = "deny"` lint is overridden for this one
     /// function with `#[allow]`, mirroring the same localized exception
     /// the lexer makes at the equivalent site.
     ///

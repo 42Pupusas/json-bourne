@@ -12,7 +12,7 @@
 
 #![cfg(feature = "std")]
 
-use bourne::Parser;
+use json_bourne::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};
 

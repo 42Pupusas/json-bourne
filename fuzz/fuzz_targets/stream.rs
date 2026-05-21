@@ -5,7 +5,7 @@
 //!
 //! Run: `cargo +nightly fuzz run stream`
 
-use bourne::Parser;
+use json_bourne::Parser;
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

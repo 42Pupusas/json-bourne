@@ -4,14 +4,14 @@
 //! geo coordinates, JWT-id-heavy lists, varied-length / unicode / escape-
 //! heavy strings. Streaming + typed where typed has a sensible target.
 
-use bourne::parse;
+use json_bourne::parse;
 use bourne_bench::realistic::{
     escape_heavy_string_array, geo_array, giant_geojson_doc, github_event_array, jwt_id_array,
     log_line_array, metric_event_array, mixed_length_string_array,
     mixed_length_string_array_with_escapes, nested_config_doc, unicode_string_array,
     wide_key_object,
 };
-use bourne::Parser;
+use json_bourne::Parser;
 
 fn main() {
     divan::main();

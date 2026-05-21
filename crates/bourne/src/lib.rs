@@ -3,7 +3,7 @@
 //! Type-driven JSON: parse straight into the caller's chosen type and
 //! serialize from it, with no generic `Value` middle layer.
 //!
-//! `bourne` skips the dynamic-tree intermediate that crates like
+//! `json-bourne` skips the dynamic-tree intermediate that crates like
 //! `serde_json` use. Each type knows how to deserialize itself from a
 //! [`Lexer`] (via [`FromJson`](trait@FromJson)) or write itself to a [`JsonWrite`]
 //! sink (via [`ToJson`]). The typed structure already enforces JSON's
@@ -28,7 +28,7 @@
 //! Parse a primitive directly into a Rust type:
 //!
 //! ```
-//! use bourne::parse_str;
+//! use json_bourne::parse_str;
 //! let n: u32 = parse_str("42").unwrap();
 //! assert_eq!(n, 42);
 //! ```
@@ -36,7 +36,7 @@
 //! Parse a struct (no proc-macro — `from_json!` is declarative):
 //!
 //! ```
-//! use bourne::{from_json, parse_str};
+//! use json_bourne::{from_json, parse_str};
 //!
 //! from_json! {
 //!     #[derive(Debug, PartialEq)]
@@ -54,7 +54,7 @@
 //! Serialize back out:
 //!
 //! ```
-//! use bourne::{to_json, to_string};
+//! use json_bourne::{to_json, to_string};
 //!
 //! to_json! {
 //!     struct Point { x: i32, y: i32 }
@@ -2399,7 +2399,7 @@ mod json_macro_tests {
 /// contracts of the `_unchecked` Vec-tail writers in `ByteSink` and the
 /// `from_utf8_unchecked` site in `decode_escapes`. These are designed to
 /// run under miri (CI: `MIRIFLAGS=-Zmiri-disable-isolation
-/// RUSTFLAGS=--cfg bourne_no_simd cargo +nightly miri test -p bourne --lib`).
+/// RUSTFLAGS=--cfg bourne_no_simd cargo +nightly miri test -p json-bourne --lib`).
 /// Each one targets a specific invariant; if a future refactor breaks the
 /// caller-side capacity reservation or the UTF-8 boundary, miri here trips
 /// on the precise unsafe before any user code does.

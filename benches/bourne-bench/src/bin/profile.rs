@@ -12,13 +12,13 @@
 //!
 //! See `PROFILING.md` for the full runbook and notes on flamegraphs.
 
-use bourne::{FromJson, parse, to_json, to_string};
+use json_bourne::{FromJson, parse, to_json, to_string};
 use bourne_bench::realistic::{mixed_length_string_array_with_escapes, unicode_string_array};
 use bourne_bench::{
     SMALL_OBJECT, duration_seconds_array, float_array, i128_array, int_array, small_keyed_object,
     small_object_escaped_keys, string_array,
 };
-use bourne::{Error, ErrorKind, Lexer, Parser};
+use json_bourne::{Error, ErrorKind, Lexer, Parser};
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::time::Duration;

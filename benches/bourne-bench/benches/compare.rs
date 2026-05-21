@@ -17,10 +17,10 @@
 //!      path (where we should win biggest); the third is fair-fight
 //!      allocation-bound territory where the gap should be smaller.
 
-use bourne::{FromJson, from_json, parse};
+use json_bourne::{FromJson, from_json, parse};
 use bourne_bench::realistic::{metric_event_array, metric_event_array_reversed_keys};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
-use bourne::{Error, ErrorKind, Lexer, Parser};
+use json_bourne::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
 
 fn main() {

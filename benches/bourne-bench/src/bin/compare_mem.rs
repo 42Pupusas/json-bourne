@@ -24,13 +24,13 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::System;
 
-use bourne::{FromJson, parse};
+use json_bourne::{FromJson, parse};
 use bourne_bench::realistic::{
     giant_geojson_doc, metric_event_array, mixed_length_string_array_with_escapes,
     nested_config_doc, wide_key_object,
 };
 use bourne_bench::{SMALL_OBJECT, float_array, int_array, string_array};
-use bourne::{Error, ErrorKind, Lexer, Parser};
+use json_bourne::{Error, ErrorKind, Lexer, Parser};
 use serde::Deserialize;
 
 struct CountingAllocator {

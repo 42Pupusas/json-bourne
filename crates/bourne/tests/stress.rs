@@ -8,8 +8,8 @@
 
 #![cfg(feature = "std")]
 
-use bourne::{ErrorKind, parse_str};
-use bourne::DEFAULT_MAX_DEPTH;
+use json_bourne::{ErrorKind, parse_str};
+use json_bourne::DEFAULT_MAX_DEPTH;
 
 fn opens(n: usize, ch: char) -> String {
     let mut s = String::with_capacity(n);
@@ -26,7 +26,7 @@ fn deeply_nested_arrays_within_limit_succeed() {
     // Parses as Vec<Vec<...>>; we just verify it lexes & balances.
     // Use Vec<u8> at the leaf to give the type a concrete bottom.
     let bytes = input.into_bytes();
-    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
+    let mut p: json_bourne::Parser<'_> = json_bourne::Parser::new(&bytes);
     while let Some(_ev) = p.next_event().expect("parses within depth limit") {}
 }
 
@@ -35,7 +35,7 @@ fn deeply_nested_arrays_above_limit_errors() {
     let depth = DEFAULT_MAX_DEPTH + 64;
     let input = format!("{}{}", opens(depth, '['), opens(depth, ']'));
     let bytes = input.into_bytes();
-    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
+    let mut p: json_bourne::Parser<'_> = json_bourne::Parser::new(&bytes);
     let mut hit_limit = false;
     loop {
         match p.next_event() {
@@ -69,7 +69,7 @@ fn deeply_nested_objects_above_limit_errors() {
         input.push('}');
     }
     let bytes = input.into_bytes();
-    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
+    let mut p: json_bourne::Parser<'_> = json_bourne::Parser::new(&bytes);
     let mut hit_limit = false;
     loop {
         match p.next_event() {
@@ -100,7 +100,7 @@ fn alternating_array_object_above_limit_errors() {
         input.push(if i % 2 == 0 { ']' } else { '}' });
     }
     let bytes = input.into_bytes();
-    let mut p: bourne::Parser<'_> = bourne::Parser::new(&bytes);
+    let mut p: json_bourne::Parser<'_> = json_bourne::Parser::new(&bytes);
     let mut hit_limit = false;
     loop {
         match p.next_event() {
@@ -138,7 +138,7 @@ fn very_long_escaped_string_parses() {
     assert!(s.chars().all(|c| c == '\n'));
 }
 
-use bourne::from_json;
+use json_bourne::from_json;
 
 from_json! {
     #[bourne(deny_unknown_fields = false)]
