@@ -4,9 +4,9 @@
 //! number-parsing fast path slows down by 10%, this is where we'll see it
 //! before the broader stream/typed benches surface it.
 
-use json_bourne::parse;
 use bourne_bench::{deep_nesting, escaped_string_array, float_array, int_array};
 use json_bourne::Parser;
+use json_bourne::parse;
 
 fn main() {
     divan::main();

@@ -1184,10 +1184,10 @@ mod tests {
             1_234_567_890_123.0,
             12_345_678_901_234.0,
             123_456_789_012_345.0,
-            1_234_567_890_123_456.0,    // 16-digit
-            12_345_678_901_234_567.0,   // 17-digit boundary
-            1e-300,                    // far-negative exponent, scientific
-            1e300,                     // far-positive exponent, scientific
+            1_234_567_890_123_456.0,  // 16-digit
+            12_345_678_901_234_567.0, // 17-digit boundary
+            1e-300,                   // far-negative exponent, scientific
+            1e300,                    // far-positive exponent, scientific
         ];
         for &v in cases {
             assert!(v.is_finite(), "test bug: non-finite case {v}");

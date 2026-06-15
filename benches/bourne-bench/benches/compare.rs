@@ -17,10 +17,10 @@
 //!      path (where we should win biggest); the third is fair-fight
 //!      allocation-bound territory where the gap should be smaller.
 
-use json_bourne::{FromJson, from_json, parse};
 use bourne_bench::realistic::{metric_event_array, metric_event_array_reversed_keys};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use json_bourne::{Error, ErrorKind, Lexer, Parser};
+use json_bourne::{FromJson, from_json, parse};
 use serde::Deserialize;
 
 fn main() {
@@ -98,18 +98,18 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
         while let Some(key) = maybe_key {
             match key {
                 "id" => {
-                    id = Some(
-                        u64::try_from(lex.parse_i64_value()?)
-                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
-                    );
+                    id =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
                 }
                 "name" => name = Some(lex.parse_str_value()?),
                 "verified" => verified = Some(bool::from_lex(lex)?),
                 "followers" => {
-                    followers = Some(
-                        u32::try_from(lex.parse_i64_value()?)
-                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
-                    );
+                    followers =
+                        Some(u32::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
                 }
                 "bio" => bio = Option::<&str>::from_lex(lex)?,
                 "links" => links = Some(Vec::<&str>::from_lex(lex)?),
@@ -326,7 +326,10 @@ mod stream_vs_dom {
 }
 
 mod typed_struct {
-    use super::{SMALL_OBJECT, UserBourne, parse, UserDerived, UserSerde, metric_event_array, MetricEventBourne, MetricEventDerived, MetricEventSerde, metric_event_array_reversed_keys};
+    use super::{
+        MetricEventBourne, MetricEventDerived, MetricEventSerde, SMALL_OBJECT, UserBourne,
+        UserDerived, UserSerde, metric_event_array, metric_event_array_reversed_keys, parse,
+    };
 
     // Original small fixture — kept for the per-call-overhead floor.
 
@@ -483,7 +486,7 @@ mod vec_i64 {
 }
 
 mod vec_borrowed_str {
-    use super::{string_array, parse};
+    use super::{parse, string_array};
 
     #[divan::bench(args = [100, 10_000])]
     fn bourne(bencher: divan::Bencher, n: usize) {
@@ -513,7 +516,7 @@ mod vec_borrowed_str {
 }
 
 mod vec_string {
-    use super::{string_array, parse};
+    use super::{parse, string_array};
 
     #[divan::bench(args = [100, 10_000])]
     fn bourne(bencher: divan::Bencher, n: usize) {

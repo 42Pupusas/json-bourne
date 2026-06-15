@@ -127,7 +127,12 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
     }
 }
 
-enum ObjectPeek { Close, Quote, Comma, Other }
+enum ObjectPeek {
+    Close,
+    Quote,
+    Comma,
+    Other,
+}
 
 /// Stateless JSON lexer over a borrowed byte slice.
 ///
@@ -803,7 +808,10 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 
     fn expect_byte(&mut self, expected: u8) -> Result<(), Error> {
         match self.peek() {
-            Some(b) if b == expected => { self.bump(); Ok(()) }
+            Some(b) if b == expected => {
+                self.bump();
+                Ok(())
+            }
             Some(b) => Err(self.err(ErrorKind::UnexpectedByte(b))),
             None => Err(self.err(ErrorKind::UnexpectedEof)),
         }
@@ -831,15 +839,16 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     pub fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
         self.skip_whitespace();
         match self.peek_object() {
-            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Close => {
+                self.close_object()?;
+                Ok(None)
+            }
             ObjectPeek::Quote => {
                 let key = self.parse_str_value()?;
                 self.expect_colon()?;
                 Ok(Some(key))
             }
-            ObjectPeek::Comma | ObjectPeek::Other => {
-                Err(self.unexpected_or_eof())
-            }
+            ObjectPeek::Comma | ObjectPeek::Other => Err(self.unexpected_or_eof()),
         }
     }
 
@@ -851,15 +860,16 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     pub fn object_first_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
         self.skip_whitespace();
         match self.peek_object() {
-            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Close => {
+                self.close_object()?;
+                Ok(None)
+            }
             ObjectPeek::Quote => {
                 let key = self.read_string_no_validate()?;
                 self.expect_colon()?;
                 Ok(Some(key))
             }
-            ObjectPeek::Comma | ObjectPeek::Other => {
-                Err(self.unexpected_or_eof())
-            }
+            ObjectPeek::Comma | ObjectPeek::Other => Err(self.unexpected_or_eof()),
         }
     }
 
@@ -868,16 +878,17 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     pub fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
         self.skip_whitespace();
         match self.peek_object() {
-            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Close => {
+                self.close_object()?;
+                Ok(None)
+            }
             ObjectPeek::Comma => {
                 self.advance_comma_to_quote()?;
                 let key = self.parse_str_value()?;
                 self.expect_colon()?;
                 Ok(Some(key))
             }
-            ObjectPeek::Quote | ObjectPeek::Other => {
-                Err(self.unexpected_or_eof())
-            }
+            ObjectPeek::Quote | ObjectPeek::Other => Err(self.unexpected_or_eof()),
         }
     }
 
@@ -889,16 +900,17 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     pub fn object_next_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
         self.skip_whitespace();
         match self.peek_object() {
-            ObjectPeek::Close => { self.close_object()?; Ok(None) }
+            ObjectPeek::Close => {
+                self.close_object()?;
+                Ok(None)
+            }
             ObjectPeek::Comma => {
                 self.advance_comma_to_quote()?;
                 let key = self.read_string_no_validate()?;
                 self.expect_colon()?;
                 Ok(Some(key))
             }
-            ObjectPeek::Quote | ObjectPeek::Other => {
-                Err(self.unexpected_or_eof())
-            }
+            ObjectPeek::Quote | ObjectPeek::Other => Err(self.unexpected_or_eof()),
         }
     }
 

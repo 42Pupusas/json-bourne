@@ -13,7 +13,9 @@
 /// bigint code. Masking before `try_into` makes the truncation explicit and
 /// keeps the call sites lint-clean (no bare `as u64` on a u128).
 fn low_u64(x: u128) -> u64 {
-    (x & u128::from(u64::MAX)).try_into().expect("masked to u64 range")
+    (x & u128::from(u64::MAX))
+        .try_into()
+        .expect("masked to u64 range")
 }
 
 /// Low 64 bits of an i128 in the range `[0, 2^64)`. Used by the bigint

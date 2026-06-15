@@ -116,13 +116,13 @@ mod ser;
 #[cfg(all(test, feature = "std"))]
 mod teju_gen;
 
+pub use de::{FromJson, parse, parse_str};
+#[cfg(feature = "alloc")]
+pub use de::{MapKey, key_to_cow};
 pub use error::{Error, ErrorKind, LineColumn, Position};
 pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 pub use lexer::{Checkpoint, DEFAULT_MAX_DEPTH, Lexer, ValueKind};
 pub use parser::Parser;
-pub use de::{FromJson, parse, parse_str};
-#[cfg(feature = "alloc")]
-pub use de::{MapKey, key_to_cow};
 #[cfg(feature = "alloc")]
 pub use ser::{
     ByteSink, FmtWriteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string,
@@ -661,7 +661,10 @@ mod tests {
     fn parser_object_key_lex_with_escapes() {
         let input = br#"{"a\nb":1,"c":2}"#;
         let mut p: Parser<'_> = Parser::new(input);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let k1 = p.object_first_key_lex().unwrap().unwrap();
         assert!(k1.has_escapes());
         assert_eq!(p.parse_i64_value().unwrap(), 1);
@@ -675,7 +678,10 @@ mod tests {
     #[test]
     fn parser_object_key_lex_empty() {
         let mut p: Parser<'_> = Parser::new(b"{}");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(p.object_first_key_lex().unwrap().is_none());
         assert!(p.next_event().unwrap().is_none());
     }
@@ -707,7 +713,10 @@ mod tests {
     #[test]
     fn parser_array_nested_in_object() {
         let mut p: Parser<'_> = Parser::new(br#"{"v":[1,2]}"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let key = p.object_first_key().unwrap().unwrap();
         assert_eq!(key, "v");
         assert!(!p.array_start().unwrap());
@@ -730,13 +739,25 @@ mod tests {
             (ErrorKind::UnexpectedEof, "unexpected end of input"),
             (ErrorKind::InvalidEscape, "invalid string escape"),
             (ErrorKind::InvalidUnicodeEscape, "invalid \\u escape"),
-            (ErrorKind::UnpairedSurrogate, "unpaired UTF-16 surrogate in \\u escape"),
+            (
+                ErrorKind::UnpairedSurrogate,
+                "unpaired UTF-16 surrogate in \\u escape",
+            ),
             (ErrorKind::InvalidUtf8, "invalid UTF-8"),
             (ErrorKind::InvalidNumber, "invalid number literal"),
-            (ErrorKind::NumberOutOfRange, "number does not fit target type"),
-            (ErrorKind::ControlCharInString, "control character in string literal"),
+            (
+                ErrorKind::NumberOutOfRange,
+                "number does not fit target type",
+            ),
+            (
+                ErrorKind::ControlCharInString,
+                "control character in string literal",
+            ),
             (ErrorKind::TrailingData, "trailing data after JSON value"),
-            (ErrorKind::DepthLimitExceeded, "nesting depth limit exceeded"),
+            (
+                ErrorKind::DepthLimitExceeded,
+                "nesting depth limit exceeded",
+            ),
             (ErrorKind::ExpectedValue, "expected JSON value"),
             (ErrorKind::ExpectedString, "expected string"),
             (ErrorKind::ExpectedNumber, "expected number"),
@@ -748,7 +769,10 @@ mod tests {
             (ErrorKind::DuplicateKey, "duplicate object key"),
             (ErrorKind::MissingField, "missing required field"),
             (ErrorKind::UnknownField, "unknown field"),
-            (ErrorKind::NonFiniteFloat, "non-finite float not representable in JSON"),
+            (
+                ErrorKind::NonFiniteFloat,
+                "non-finite float not representable in JSON",
+            ),
             (ErrorKind::UnexpectedByte(0x7B), "unexpected byte 0x7b"),
         ];
         for (kind, expected) in cases {
@@ -831,7 +855,10 @@ mod tests {
     #[test]
     fn next_event_rejects_trailing_comma_in_array() {
         let mut p: Parser<'_> = Parser::new(b"[1,]");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
         let _ = p.next_event().unwrap().unwrap(); // Int(1)
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedByte(b']'));
@@ -840,7 +867,10 @@ mod tests {
     #[test]
     fn next_event_rejects_trailing_comma_in_object() {
         let mut p: Parser<'_> = Parser::new(br#"{"a":1,}"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
         let _ = p.next_event().unwrap().unwrap(); // Int(1)
         let err = p.next_event().unwrap_err();
@@ -850,7 +880,10 @@ mod tests {
     #[test]
     fn next_event_object_colon_eof() {
         let mut p: Parser<'_> = Parser::new(br#"{"a""#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedEof);
@@ -859,7 +892,10 @@ mod tests {
     #[test]
     fn next_event_object_colon_wrong_byte() {
         let mut p: Parser<'_> = Parser::new(br#"{"a";"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
@@ -875,7 +911,10 @@ mod tests {
     #[test]
     fn next_event_eof_inside_array() {
         let mut p: Parser<'_> = Parser::new(b"[");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedEof);
     }
@@ -883,7 +922,10 @@ mod tests {
     #[test]
     fn next_event_eof_after_array_comma() {
         let mut p: Parser<'_> = Parser::new(b"[1,");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
         let _ = p.next_event().unwrap().unwrap(); // 1
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedEof);
@@ -892,7 +934,10 @@ mod tests {
     #[test]
     fn next_event_bad_byte_after_array_value() {
         let mut p: Parser<'_> = Parser::new(b"[1;");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
         let _ = p.next_event().unwrap().unwrap(); // 1
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedByte(b';'));
@@ -901,7 +946,10 @@ mod tests {
     #[test]
     fn next_event_eof_in_object_key_position() {
         let mut p: Parser<'_> = Parser::new(b"{");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedEof);
     }
@@ -909,7 +957,10 @@ mod tests {
     #[test]
     fn next_event_bad_byte_in_object_key_position() {
         let mut p: Parser<'_> = Parser::new(b"{1");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let err = p.next_event().unwrap_err();
         assert_eq!(err.kind, ErrorKind::UnexpectedByte(b'1'));
     }
@@ -917,7 +968,10 @@ mod tests {
     #[test]
     fn next_event_eof_after_object_value() {
         let mut p: Parser<'_> = Parser::new(br#"{"a":1"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
         let _ = p.next_event().unwrap().unwrap(); // 1
         let err = p.next_event().unwrap_err();
@@ -927,7 +981,10 @@ mod tests {
     #[test]
     fn next_event_bad_byte_after_object_value() {
         let mut p: Parser<'_> = Parser::new(br#"{"a":1;"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_)));
         let _ = p.next_event().unwrap().unwrap(); // 1
         let err = p.next_event().unwrap_err();
@@ -937,7 +994,10 @@ mod tests {
     #[test]
     fn next_event_object_value_state_via_fast_path() {
         let mut p: Parser<'_> = Parser::new(br#"{"x":42,"y":99}"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let k1 = p.object_first_key().unwrap().unwrap();
         assert_eq!(k1, "x");
         let v1 = p.next_event().unwrap().unwrap();
@@ -953,13 +1013,22 @@ mod tests {
     #[test]
     fn next_event_nested_containers_close_correctly() {
         let mut p: Parser<'_> = Parser::new(br#"{"a":[1],"b":{"c":2}}"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_))); // "a"
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_))); // "b"
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Key(_))); // "c"
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndObject));
@@ -971,10 +1040,19 @@ mod tests {
     fn next_event_nested_array_in_array() {
         let input = b"[[],[1,2]]";
         let mut p: Parser<'_> = Parser::new(input);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::Number(_)));
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
@@ -1003,8 +1081,14 @@ mod tests {
     #[test]
     fn parser_object_first_key_empty_inside_array() {
         let mut p: Parser<'_> = Parser::new(b"[{}]");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(p.object_first_key().unwrap().is_none());
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
         assert!(p.next_event().unwrap().is_none());
@@ -1013,10 +1097,16 @@ mod tests {
     #[test]
     fn parser_object_first_key_empty_inside_object() {
         let mut p: Parser<'_> = Parser::new(br#"{"a":{}}"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let k = p.object_first_key().unwrap().unwrap();
         assert_eq!(k, "a");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(p.object_first_key().unwrap().is_none());
         assert!(p.object_next_key().unwrap().is_none());
         assert!(p.next_event().unwrap().is_none());
@@ -1025,8 +1115,14 @@ mod tests {
     #[test]
     fn parser_object_first_key_lex_empty_inside_array() {
         let mut p: Parser<'_> = Parser::new(b"[{}]");
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         assert!(p.object_first_key_lex().unwrap().is_none());
         assert!(matches!(p.next_event().unwrap().unwrap(), Event::EndArray));
         assert!(p.next_event().unwrap().is_none());
@@ -1035,8 +1131,14 @@ mod tests {
     #[test]
     fn parser_object_next_key_close_inside_array() {
         let mut p: Parser<'_> = Parser::new(br#"[{"a":1}]"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let k = p.object_first_key().unwrap().unwrap();
         assert_eq!(k, "a");
         assert_eq!(p.parse_i64_value().unwrap(), 1);
@@ -1048,8 +1150,14 @@ mod tests {
     #[test]
     fn parser_object_next_key_lex_close_inside_array() {
         let mut p: Parser<'_> = Parser::new(br#"[{"a":1}]"#);
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartArray));
-        assert!(matches!(p.next_event().unwrap().unwrap(), Event::StartObject));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartArray
+        ));
+        assert!(matches!(
+            p.next_event().unwrap().unwrap(),
+            Event::StartObject
+        ));
         let k = p.object_first_key_lex().unwrap().unwrap();
         assert!(!k.has_escapes());
         assert_eq!(p.parse_i64_value().unwrap(), 1);

@@ -8,8 +8,8 @@
 
 #![cfg(feature = "std")]
 
-use json_bourne::{ErrorKind, parse_str};
 use json_bourne::DEFAULT_MAX_DEPTH;
+use json_bourne::{ErrorKind, parse_str};
 
 fn opens(n: usize, ch: char) -> String {
     let mut s = String::with_capacity(n);

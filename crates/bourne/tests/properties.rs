@@ -5,8 +5,8 @@
 
 #![cfg(feature = "std")]
 
-use json_bourne::{parse_str, to_string};
 use json_bourne::Parser;
+use json_bourne::{parse_str, to_string};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------

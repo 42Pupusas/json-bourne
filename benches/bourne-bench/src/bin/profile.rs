@@ -12,13 +12,13 @@
 //!
 //! See `PROFILING.md` for the full runbook and notes on flamegraphs.
 
-use json_bourne::{FromJson, parse, to_json, to_string};
 use bourne_bench::realistic::{mixed_length_string_array_with_escapes, unicode_string_array};
 use bourne_bench::{
     SMALL_OBJECT, duration_seconds_array, float_array, i128_array, int_array, small_keyed_object,
     small_object_escaped_keys, string_array,
 };
 use json_bourne::{Error, ErrorKind, Lexer, Parser};
+use json_bourne::{FromJson, parse, to_json, to_string};
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::time::Duration;
@@ -51,18 +51,18 @@ impl<'input> FromJson<'input> for UserBourne<'input> {
         while let Some(key) = maybe_key {
             match key {
                 "id" => {
-                    id = Some(
-                        u64::try_from(lex.parse_i64_value()?)
-                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
-                    );
+                    id =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
                 }
                 "name" => name = Some(lex.parse_str_value()?),
                 "verified" => verified = Some(bool::from_lex(lex)?),
                 "followers" => {
-                    followers = Some(
-                        u32::try_from(lex.parse_i64_value()?)
-                            .map_err(|_| Error::new(ErrorKind::NumberOutOfRange, lex.position()))?,
-                    );
+                    followers =
+                        Some(u32::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
                 }
                 "bio" => bio = Option::<&str>::from_lex(lex)?,
                 "links" => links = Some(Vec::<&str>::from_lex(lex)?),

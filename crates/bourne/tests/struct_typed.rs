@@ -5,9 +5,7 @@
 
 #![cfg(feature = "std")]
 
-use json_bourne::{
-    Error, ErrorKind, FromJson, Lexer, from_json, parse_str,
-};
+use json_bourne::{Error, ErrorKind, FromJson, Lexer, from_json, parse_str};
 
 // -----------------------------------------------------------------
 // Hand-written FromJson for a representative struct.

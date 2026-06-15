@@ -24,8 +24,8 @@
 //! The struct/enum benches all run over `Vec<T>` of `N=1000` so per-
 //! record dispatch dominates the wall-clock instead of fixed setup.
 
-use json_bourne::{JsonWrite, ToJson, to_json, to_string};
 use bourne_bench::SMALL_OBJECT;
+use json_bourne::{JsonWrite, ToJson, to_json, to_string};
 use serde::Serialize;
 
 fn main() {
@@ -137,7 +137,7 @@ fn user_fixture<'a>() -> (UserMacro<'a>, UserHand<'a>, UserSerde<'a>) {
 }
 
 mod to_json_struct_small {
-    use super::{user_fixture, SMALL_OBJECT, to_string};
+    use super::{SMALL_OBJECT, to_string, user_fixture};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -293,7 +293,7 @@ fn metric_serde_vec() -> Vec<MetricEventSerde<'static>> {
 }
 
 mod to_json_struct_metric_1000 {
-    use super::{metric_macro_vec, to_string, metric_hand_vec, metric_serde_vec};
+    use super::{metric_hand_vec, metric_macro_vec, metric_serde_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -385,7 +385,7 @@ fn log_serde_vec() -> Vec<LogLineSerde<'static>> {
 }
 
 mod to_json_struct_borrowed_escape_1000 {
-    use super::{log_macro_vec, to_string, log_serde_vec};
+    use super::{log_macro_vec, log_serde_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -475,7 +475,7 @@ fn decorated_serde_vec() -> Vec<DecoratedSerde> {
 }
 
 mod to_json_struct_decorated_1000 {
-    use super::{decorated_macro_vec, to_string, decorated_serde_vec};
+    use super::{decorated_macro_vec, decorated_serde_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -541,7 +541,7 @@ fn triple_serde_vec() -> Vec<TripleSerde> {
 }
 
 mod to_json_tuple_newtype_1000 {
-    use super::{newtype_vec, to_string, newtype_serde_vec};
+    use super::{newtype_serde_vec, newtype_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -563,7 +563,7 @@ mod to_json_tuple_newtype_1000 {
 }
 
 mod to_json_tuple_multi_1000 {
-    use super::{triple_vec, to_string, triple_serde_vec};
+    use super::{to_string, triple_serde_vec, triple_vec};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -637,7 +637,7 @@ fn shape_serde_vec() -> Vec<ShapeSerde> {
 }
 
 mod to_json_enum_external_1000 {
-    use super::{shape_macro_vec, to_string, shape_serde_vec};
+    use super::{shape_macro_vec, shape_serde_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -716,7 +716,7 @@ fn event_serde_vec() -> Vec<EventSerde> {
 }
 
 mod to_json_enum_internal_1000 {
-    use super::{event_macro_vec, to_string, event_serde_vec};
+    use super::{event_macro_vec, event_serde_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -787,7 +787,7 @@ fn msg_serde_vec() -> Vec<MsgSerde> {
 }
 
 mod to_json_enum_adjacent_1000 {
-    use super::{msg_macro_vec, to_string, msg_serde_vec};
+    use super::{msg_macro_vec, msg_serde_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {
@@ -858,7 +858,7 @@ fn mixed_serde_vec() -> Vec<MixedSerde> {
 }
 
 mod to_json_enum_untagged_1000 {
-    use super::{mixed_macro_vec, to_string, mixed_serde_vec};
+    use super::{mixed_macro_vec, mixed_serde_vec, to_string};
 
     #[divan::bench]
     fn r#macro(bencher: divan::Bencher) {

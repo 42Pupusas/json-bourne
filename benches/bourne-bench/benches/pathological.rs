@@ -5,12 +5,12 @@
 //! cover the regime where SIMD digit scanning starts paying off, which
 //! the original `int_array(N)` corpus (1-5 digit ints) cannot reach.
 
-use json_bourne::parse;
 use bourne_bench::pathological::{
     empty_object_array, huge_int_literal, longest_legal_i64_array, max_depth_legal,
     mixed_width_int_array, null_array, wide_int_array,
 };
 use json_bourne::Parser;
+use json_bourne::parse;
 
 fn main() {
     divan::main();
@@ -24,7 +24,7 @@ fn drain(input: &[u8]) {
 }
 
 mod wide_int_array {
-    use super::{wide_int_array, drain, parse};
+    use super::{drain, parse, wide_int_array};
 
     // Wide ints — 13-19 digit values. Streaming + typed paths.
 

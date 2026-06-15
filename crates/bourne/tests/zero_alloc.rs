@@ -20,8 +20,8 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
 use std::alloc::System;
 
-use json_bourne::parse;
 use json_bourne::Parser;
+use json_bourne::parse;
 
 struct CountingAllocator {
     allocs: AtomicUsize,

@@ -348,10 +348,10 @@ pub use alloc_impls::{MapKey, key_to_cow};
 mod alloc_impls {
     extern crate alloc;
     use super::{FromJson, type_error};
+    use crate::{Error, ErrorKind, JsonStr, Lexer, ValueKind};
     use alloc::borrow::Cow;
     use alloc::string::String;
     use alloc::vec::Vec;
-    use crate::{Error, ErrorKind, JsonStr, Lexer, ValueKind};
 
     impl<'input> FromJson<'input> for String {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
@@ -487,8 +487,12 @@ mod alloc_impls {
     }
 
     impl<K: Ord, V> DupMap<K, V> for alloc::collections::BTreeMap<K, V> {
-        fn new_empty() -> Self { Self::new() }
-        fn try_insert(&mut self, k: K, v: V) -> bool { self.insert(k, v).is_none() }
+        fn new_empty() -> Self {
+            Self::new()
+        }
+        fn try_insert(&mut self, k: K, v: V) -> bool {
+            self.insert(k, v).is_none()
+        }
     }
 
     #[cfg(feature = "std")]
@@ -497,8 +501,12 @@ mod alloc_impls {
         K: ::core::hash::Hash + Eq,
         S: ::core::hash::BuildHasher + Default,
     {
-        fn new_empty() -> Self { Self::with_hasher(S::default()) }
-        fn try_insert(&mut self, k: K, v: V) -> bool { self.insert(k, v).is_none() }
+        fn new_empty() -> Self {
+            Self::with_hasher(S::default())
+        }
+        fn try_insert(&mut self, k: K, v: V) -> bool {
+            self.insert(k, v).is_none()
+        }
     }
 
     #[cfg(feature = "indexmap")]
@@ -507,8 +515,12 @@ mod alloc_impls {
         K: ::core::hash::Hash + Eq,
         S: ::core::hash::BuildHasher + Default,
     {
-        fn new_empty() -> Self { Self::with_hasher(S::default()) }
-        fn try_insert(&mut self, k: K, v: V) -> bool { self.insert(k, v).is_none() }
+        fn new_empty() -> Self {
+            Self::with_hasher(S::default())
+        }
+        fn try_insert(&mut self, k: K, v: V) -> bool {
+            self.insert(k, v).is_none()
+        }
     }
 
     fn parse_map<'input, K, V, M>(lex: &mut Lexer<'input>) -> Result<M, Error>
@@ -563,8 +575,12 @@ mod alloc_impls {
     }
 
     impl<T: Ord> SetInsert<T> for alloc::collections::BTreeSet<T> {
-        fn new_empty() -> Self { Self::new() }
-        fn push(&mut self, v: T) { self.insert(v); }
+        fn new_empty() -> Self {
+            Self::new()
+        }
+        fn push(&mut self, v: T) {
+            self.insert(v);
+        }
     }
 
     #[cfg(feature = "std")]
@@ -573,8 +589,12 @@ mod alloc_impls {
         T: ::core::hash::Hash + Eq,
         S: ::core::hash::BuildHasher + Default,
     {
-        fn new_empty() -> Self { Self::with_hasher(S::default()) }
-        fn push(&mut self, v: T) { self.insert(v); }
+        fn new_empty() -> Self {
+            Self::with_hasher(S::default())
+        }
+        fn push(&mut self, v: T) {
+            self.insert(v);
+        }
     }
 
     #[cfg(feature = "indexmap")]
@@ -583,8 +603,12 @@ mod alloc_impls {
         T: ::core::hash::Hash + Eq,
         S: ::core::hash::BuildHasher + Default,
     {
-        fn new_empty() -> Self { Self::with_hasher(S::default()) }
-        fn push(&mut self, v: T) { self.insert(v); }
+        fn new_empty() -> Self {
+            Self::with_hasher(S::default())
+        }
+        fn push(&mut self, v: T) {
+            self.insert(v);
+        }
     }
 
     fn parse_set<'input, T, C>(lex: &mut Lexer<'input>) -> Result<C, Error>
