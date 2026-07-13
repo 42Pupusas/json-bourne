@@ -18,7 +18,7 @@ use bourne_bench::{
     small_object_escaped_keys, string_array,
 };
 use json_bourne::{Error, ErrorKind, Lexer, Parser};
-use json_bourne::{FromJson, parse, to_json, to_string};
+use json_bourne::{FromJson, ToJson, parse, to_string};
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::time::Duration;
@@ -173,18 +173,16 @@ fn run_hashmap_keys_escaped(input: &[u8], iters: u64) {
 // Serialization workloads
 // ---------------------------------------------------------------------------
 
-to_json! {
-    #[derive(Debug)]
-    struct MetricEventSer<'input> {
-        ts: u64,
-        host: &'input str,
-        metric: &'input str,
-        count: u64,
-        bytes: u64,
-        latency_ms: f64,
-        cpu: f64,
-        throughput_rps: f64,
-    }
+#[derive(Debug, ToJson)]
+struct MetricEventSer<'input> {
+    ts: u64,
+    host: &'input str,
+    metric: &'input str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
 }
 
 const SER_N: usize = 1_000;
@@ -231,15 +229,13 @@ fn run_to_json_metric(data: &[MetricEventSer<'_>], iters: u64) {
     }
 }
 
-to_json! {
-    #[derive(Debug)]
-    struct IntStruct {
-        id: u64,
-        count: u64,
-        flags: u32,
-        status: i32,
-        version: u16,
-    }
+#[derive(Debug, ToJson)]
+struct IntStruct {
+    id: u64,
+    count: u64,
+    flags: u32,
+    status: i32,
+    version: u16,
 }
 
 fn int_struct_vec() -> Vec<IntStruct> {

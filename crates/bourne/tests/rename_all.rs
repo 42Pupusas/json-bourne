@@ -4,16 +4,14 @@
 
 #![cfg(feature = "std")]
 
-use json_bourne::{ErrorKind, from_json, json, parse_str, to_string};
+use json_bourne::{ErrorKind, FromJson, ToJson, parse_str, to_string};
 
 // --- struct fields, camelCase ---------------------------------------------
-from_json! {
-    #[bourne(rename_all = "camelCase")]
-    #[derive(Debug, PartialEq)]
-    struct CamelUser {
-        user_id: u64,
-        full_name: String,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+#[bourne(rename_all = "camelCase")]
+struct CamelUser {
+    user_id: u64,
+    full_name: String,
 }
 
 #[test]
@@ -35,12 +33,10 @@ fn struct_camel_rejects_snake_keys() {
 }
 
 // --- struct fields, SCREAMING_SNAKE_CASE ----------------------------------
-from_json! {
-    #[bourne(rename_all = "SCREAMING_SNAKE_CASE")]
-    #[derive(Debug, PartialEq)]
-    struct Screaming {
-        max_depth: u32,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+#[bourne(rename_all = "SCREAMING_SNAKE_CASE")]
+struct Screaming {
+    max_depth: u32,
 }
 
 #[test]
@@ -50,14 +46,12 @@ fn struct_screaming_snake() {
 }
 
 // --- explicit rename wins over rename_all ---------------------------------
-from_json! {
-    #[bourne(rename_all = "camelCase")]
-    #[derive(Debug, PartialEq)]
-    struct Mixed<'input> {
-        user_id: u64,
-        #[bourne(rename = "NAME")]
-        full_name: &'input str,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+#[bourne(rename_all = "camelCase")]
+struct Mixed<'input> {
+    user_id: u64,
+    #[bourne(rename = "NAME")]
+    full_name: &'input str,
 }
 
 #[test]
@@ -73,15 +67,13 @@ fn explicit_rename_overrides_rename_all() {
 }
 
 // --- json! round-trip: casing symmetric on both sides ---------------------
-json! {
-    #[bourne(rename_all = "camelCase")]
-    #[derive(Debug, PartialEq)]
-    struct RtUser {
-        user_id: u64,
-        full_name: String,
-        #[bourne(rename = "ID2")]
-        secondary_id: u64,
-    }
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(rename_all = "camelCase")]
+struct RtUser {
+    user_id: u64,
+    full_name: String,
+    #[bourne(rename = "ID2")]
+    secondary_id: u64,
 }
 
 #[test]
@@ -100,13 +92,11 @@ fn json_rename_all_roundtrips() {
     assert_eq!(to_string(&v).unwrap(), src);
 }
 
-json! {
-    #[bourne(rename_all = "kebab-case")]
-    #[derive(Debug, PartialEq)]
-    struct Kebab {
-        max_retry_count: u32,
-        base_url: String,
-    }
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(rename_all = "kebab-case")]
+struct Kebab {
+    max_retry_count: u32,
+    base_url: String,
 }
 
 #[test]
@@ -117,15 +107,13 @@ fn json_kebab_roundtrips() {
 }
 
 // --- externally-tagged enum variant tags, rename_all ----------------------
-from_json! {
-    #[bourne(rename_all = "snake_case")]
-    #[derive(Debug, PartialEq)]
-    enum Event {
-        UserLoggedIn,
-        PageViewed(u32),
-        #[bourne(rename = "BOOM")]
-        SystemCrashed,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+#[bourne(rename_all = "snake_case")]
+enum Event {
+    UserLoggedIn,
+    PageViewed(u32),
+    #[bourne(rename = "BOOM")]
+    SystemCrashed,
 }
 
 #[test]
@@ -153,13 +141,11 @@ fn enum_rejects_original_variant_name() {
 }
 
 // --- enum round-trip via json! --------------------------------------------
-json! {
-    #[bourne(rename_all = "kebab-case")]
-    #[derive(Debug, PartialEq)]
-    enum Cmd {
-        StartUp,
-        SetLevel(u8),
-    }
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(rename_all = "kebab-case")]
+enum Cmd {
+    StartUp,
+    SetLevel(u8),
 }
 
 #[test]

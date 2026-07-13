@@ -20,7 +20,7 @@
 use bourne_bench::realistic::{metric_event_array, metric_event_array_reversed_keys};
 use bourne_bench::{SMALL_OBJECT, int_array, string_array};
 use json_bourne::{Error, ErrorKind, Lexer, Parser};
-use json_bourne::{FromJson, from_json, parse};
+use json_bourne::{FromJson, parse};
 use serde::Deserialize;
 
 fn main() {
@@ -42,21 +42,19 @@ struct UserBourne<'input> {
 }
 
 // Same shape as `UserBourne`, but the `FromJson` impl comes from the
-// `from_json!` macro instead of a hand-written impl. The bench
+// `#[derive(FromJson)]` macro instead of a hand-written impl. The bench
 // compares this against the hand-tuned `UserBourne` impl below — if
-// the macro emits less efficient code, the gap shows up directly in
+// the derive emits less efficient code, the gap shows up directly in
 // the `typed_struct` group.
-from_json! {
-    #[derive(Debug, PartialEq)]
-    #[allow(dead_code)]
-    struct UserDerived<'input> {
-        id: u64,
-        name: &'input str,
-        verified: bool,
-        followers: u32,
-        bio: Option<&'input str>,
-        links: Vec<&'input str>,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+#[allow(dead_code)]
+struct UserDerived<'input> {
+    id: u64,
+    name: &'input str,
+    verified: bool,
+    followers: u32,
+    bio: Option<&'input str>,
+    links: Vec<&'input str>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,22 +152,20 @@ struct MetricEventBourne<'input> {
     throughput_rps: f64,
 }
 
-// `from_json!` mirror of `MetricEventBourne`. Pinned in the
-// `typed_struct` bench group so the macro's per-record cost is
+// `#[derive(FromJson)]` mirror of `MetricEventBourne`. Pinned in the
+// `typed_struct` bench group so the derive's per-record cost is
 // measured against the hand-tuned impl on a realistic 8-field shape.
-from_json! {
-    #[derive(Debug)]
-    #[allow(dead_code)]
-    struct MetricEventDerived<'input> {
-        ts: u64,
-        host: &'input str,
-        metric: &'input str,
-        count: u64,
-        bytes: u64,
-        latency_ms: f64,
-        cpu: f64,
-        throughput_rps: f64,
-    }
+#[derive(Debug, FromJson)]
+#[allow(dead_code)]
+struct MetricEventDerived<'input> {
+    ts: u64,
+    host: &'input str,
+    metric: &'input str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
 }
 
 #[derive(Debug, Deserialize)]

@@ -138,20 +138,17 @@ fn very_long_escaped_string_parses() {
     assert!(s.chars().all(|c| c == '\n'));
 }
 
-use json_bourne::from_json;
+use json_bourne::FromJson;
 
-from_json! {
-    #[bourne(deny_unknown_fields = false)]
-    #[derive(Debug)]
-    struct Empty {}
-}
+#[derive(Debug, FromJson)]
+#[bourne(deny_unknown_fields = false)]
+struct Empty {}
 
-from_json! {
-    #[bourne(deny_unknown_fields = false)]
-    #[derive(Debug)]
-    struct Wrap {
-        id: u32,
-    }
+#[derive(Debug, FromJson)]
+#[bourne(deny_unknown_fields = false)]
+struct Wrap {
+    #[allow(dead_code)]
+    id: u32,
 }
 
 #[test]

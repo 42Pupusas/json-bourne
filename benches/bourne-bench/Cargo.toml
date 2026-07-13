@@ -9,7 +9,7 @@ description = "Benchmarks and profiling harness for json-bourne. Not published."
 publish = false
 
 [dependencies]
-json-bourne = { path = "../../crates/bourne" }
+json-bourne = { path = "../../crates/bourne", features = ["derive"] }
 divan = { version = "0.1", optional = true }
 pprof = { version = "0.14", features = ["flamegraph"], optional = true }
 serde = { version = "1", features = ["derive"], optional = true }

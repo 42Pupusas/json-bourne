@@ -12,6 +12,10 @@ exclude = ["tests/", "fuzz/", "*.svg"]
 default = ["std"]
 std = ["alloc", "indexmap?/std"]
 alloc = []
+# Provides `#[derive(FromJson, ToJson)]`, re-exported from this crate.
+# Pulls in the proc-macro stack (syn/quote/proc-macro2) at build time;
+# the generated code itself stays no_std.
+derive = ["dep:bourne-derive"]
 # Optional: FromJson/ToJson impls for `indexmap::{IndexMap, IndexSet}`
 # preserving insertion order. Pulls in the `indexmap` crate. With our
 # `std` feature on, indexmap's `std` is also enabled, which provides
@@ -21,9 +25,13 @@ indexmap = ["dep:indexmap", "alloc"]
 
 [dependencies]
 indexmap = { version = "2", default-features = false, optional = true }
+bourne-derive = { path = "../bourne-derive", version = "=0.2.0", optional = true }
 
 [dev-dependencies]
 proptest = "1"
+# Self-dep with `derive` on so tests, benches, and doctests can use
+# `#[derive(FromJson, ToJson)]` even though it is off by default.
+json-bourne = { path = ".", features = ["derive"] }
 
 [lints]
 workspace = true

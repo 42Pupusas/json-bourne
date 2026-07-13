@@ -1,0 +1,24 @@
+[package]
+name = "bourne-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Derive macros (FromJson / ToJson) for json-bourne. Not used directly — enable json-bourne's `derive` feature."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full"] }
+quote = "1"
+proc-macro2 = "1"
+
+# NOTE: no dependency on json-bourne. The generated code refers to
+# `::json_bourne::…` paths that resolve in the *consumer's* crate graph,
+# so this crate needs neither a normal nor a dev dependency on it. That
+# also keeps the dependency graph acyclic (json-bourne depends on us).
+
+# Intentionally NOT inheriting workspace lints: proc-macro crates trip a
+# different set (e.g. the generated-code paths).

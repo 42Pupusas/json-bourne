@@ -1,15 +1,15 @@
-//! Head-to-head benches for the `to_json!` macro.
+//! Head-to-head benches for the `#[derive(ToJson)]` macro.
 //!
 //! Each benchmark group has up to three rows over the same input:
-//!   - `macro` — the `to_json!`-emitted `ToJson` impl.
+//!   - `macro` — the `#[derive(ToJson)]`-emitted `ToJson` impl.
 //!   - `hand`  — a manually written `ToJson` impl over an identically
 //!     shaped struct/enum. A meaningful gap between this and `macro`
-//!     surfaces overhead the declarative macro is leaving on the table
+//!     surfaces overhead the derive is leaving on the table
 //!     (extra branches, suboptimal punctuation order, etc.).
 //!   - `serde_json` — `serde_json::to_string` on a `serde::Serialize`
 //!     mirror. Absolute-scale anchor against the de-facto baseline.
 //!
-//! Coverage targets every shape `to_json!` supports:
+//! Coverage targets every shape the derive supports:
 //!   - small struct (`SMALL_OBJECT` shape)                    — `struct_small`
 //!   - realistic 8-field struct (`MetricEvent`)               — `struct_metric`
 //!   - struct with `&str` borrow + escape-heavy values        — `struct_borrowed_escape`
@@ -25,7 +25,7 @@
 //! record dispatch dominates the wall-clock instead of fixed setup.
 
 use bourne_bench::SMALL_OBJECT;
-use json_bourne::{JsonWrite, ToJson, to_json, to_string};
+use json_bourne::{JsonWrite, ToJson, to_string};
 use serde::Serialize;
 
 fn main() {
@@ -55,16 +55,14 @@ fn as_f64(i: usize) -> f64 {
 // 1. Small struct — same shape as `SMALL_OBJECT`.
 // ===========================================================================
 
-to_json! {
-    #[derive(Debug)]
-    struct UserMacro<'input> {
-        id: u64,
-        name: &'input str,
-        verified: bool,
-        followers: u32,
-        bio: Option<&'input str>,
-        links: Vec<&'input str>,
-    }
+#[derive(Debug, ToJson)]
+struct UserMacro<'input> {
+    id: u64,
+    name: &'input str,
+    verified: bool,
+    followers: u32,
+    bio: Option<&'input str>,
+    links: Vec<&'input str>,
 }
 
 #[derive(Debug)]
@@ -179,18 +177,16 @@ mod to_json_struct_small {
 //    int/string/f64, exercises the per-record write path.
 // ===========================================================================
 
-to_json! {
-    #[derive(Debug)]
-    struct MetricEventMacro<'input> {
-        ts: u64,
-        host: &'input str,
-        metric: &'input str,
-        count: u64,
-        bytes: u64,
-        latency_ms: f64,
-        cpu: f64,
-        throughput_rps: f64,
-    }
+#[derive(Debug, ToJson)]
+struct MetricEventMacro<'input> {
+    ts: u64,
+    host: &'input str,
+    metric: &'input str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
 }
 
 #[derive(Debug)]
@@ -338,13 +334,11 @@ mod to_json_struct_metric_1000 {
 //    back out) and exercises the `write_escaped_str` slow path.
 // ===========================================================================
 
-to_json! {
-    #[derive(Debug)]
-    struct LogLineMacro<'input> {
-        level: &'input str,
-        message: &'input str,
-        request_id: &'input str,
-    }
+#[derive(Debug, ToJson)]
+struct LogLineMacro<'input> {
+    level: &'input str,
+    message: &'input str,
+    request_id: &'input str,
 }
 
 #[derive(Debug, Serialize)]
@@ -419,17 +413,16 @@ mod to_json_struct_borrowed_escape_1000 {
 //    skip_if_none emit.
 // ===========================================================================
 
-to_json! {
-    #[derive(Debug)]
-    struct DecoratedMacro {
-        #[bourne(rename = "user-id")]
-        user_id: u32,
-        #[bourne(skip)]
-        cached: u32,
-        #[bourne(skip_if_none)]
-        note: Option<String>,
-        value: u32,
-    }
+#[derive(Debug, ToJson)]
+struct DecoratedMacro {
+    #[bourne(rename = "user-id")]
+    user_id: u32,
+    #[bourne(skip)]
+    #[allow(dead_code)]
+    cached: u32,
+    #[bourne(skip_if_none)]
+    note: Option<String>,
+    value: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -506,19 +499,15 @@ mod to_json_struct_decorated_1000 {
 // 5. Tuple structs — newtype + multi-field.
 // ===========================================================================
 
-to_json! {
-    #[derive(Debug)]
-    struct UserId(u64);
-}
+#[derive(Debug, ToJson)]
+struct UserId(u64);
 
 #[derive(Debug, Serialize)]
 #[serde(transparent)]
 struct UserIdSerde(u64);
 
-to_json! {
-    #[derive(Debug)]
-    struct Triple(i64, String, bool);
-}
+#[derive(Debug, ToJson)]
+struct Triple(i64, String, bool);
 
 #[derive(Debug, Serialize)]
 struct TripleSerde(i64, String, bool);
@@ -588,14 +577,12 @@ mod to_json_tuple_multi_1000 {
 // 6. Externally-tagged enum — all four variant kinds.
 // ===========================================================================
 
-to_json! {
-    #[derive(Debug)]
-    enum ShapeMacro {
-        Circle,
-        Wrapper(u32),
-        Pair(u32, String),
-        Box { w: u32, h: u32 },
-    }
+#[derive(Debug, ToJson)]
+enum ShapeMacro {
+    Circle,
+    Wrapper(u32),
+    Pair(u32, String),
+    Box { w: u32, h: u32 },
 }
 
 #[derive(Debug, Serialize)]
@@ -662,14 +649,12 @@ mod to_json_enum_external_1000 {
 // 7. Internally-tagged enum.
 // ===========================================================================
 
-to_json! {
-    #[bourne(tag = "type")]
-    #[derive(Debug)]
-    enum EventMacro {
-        Heartbeat,
-        Click { x: u32, y: u32 },
-        Move { x: u32, y: u32, dx: i32, dy: i32 },
-    }
+#[derive(Debug, ToJson)]
+#[bourne(tag = "type")]
+enum EventMacro {
+    Heartbeat,
+    Click { x: u32, y: u32 },
+    Move { x: u32, y: u32, dx: i32, dy: i32 },
 }
 
 #[derive(Debug, Serialize)]
@@ -741,15 +726,13 @@ mod to_json_enum_internal_1000 {
 // 8. Adjacently-tagged enum.
 // ===========================================================================
 
-to_json! {
-    #[bourne(tag = "t", content = "c")]
-    #[derive(Debug)]
-    enum MsgMacro {
-        Ping,
-        Echo(String),
-        Pair(u32, u32),
-        Body { text: String },
-    }
+#[derive(Debug, ToJson)]
+#[bourne(tag = "t", content = "c")]
+enum MsgMacro {
+    Ping,
+    Echo(String),
+    Pair(u32, u32),
+    Body { text: String },
 }
 
 #[derive(Debug, Serialize)]
@@ -812,15 +795,13 @@ mod to_json_enum_adjacent_1000 {
 // 9. Untagged enum.
 // ===========================================================================
 
-to_json! {
-    #[bourne(untagged)]
-    #[derive(Debug)]
-    enum MixedMacro {
-        Nothing,
-        One(u32),
-        Two(u32, u32),
-        Body { name: String },
-    }
+#[derive(Debug, ToJson)]
+#[bourne(untagged)]
+enum MixedMacro {
+    Nothing,
+    One(u32),
+    Two(u32, u32),
+    Body { name: String },
 }
 
 #[derive(Debug, Serialize)]

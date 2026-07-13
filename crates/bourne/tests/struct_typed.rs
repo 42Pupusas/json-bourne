@@ -5,7 +5,7 @@
 
 #![cfg(feature = "std")]
 
-use json_bourne::{Error, ErrorKind, FromJson, Lexer, from_json, parse_str};
+use json_bourne::{Error, ErrorKind, FromJson, Lexer, parse_str};
 
 // -----------------------------------------------------------------
 // Hand-written FromJson for a representative struct.
@@ -156,14 +156,12 @@ fn struct_rejects_duplicate_nickname() {
 // from_json! macro struct tests — escape keys
 // -----------------------------------------------------------------
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    struct EscKey {
-        #[bourne(rename = "user-id")]
-        user_id: u32,
-        #[bourne(rename = "x\ny")]
-        x_newline_y: u32,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+struct EscKey {
+    #[bourne(rename = "user-id")]
+    user_id: u32,
+    #[bourne(rename = "x\ny")]
+    x_newline_y: u32,
 }
 
 #[test]
@@ -181,9 +179,9 @@ fn struct_dispatch_handles_escaped_key() {
 
 #[test]
 fn struct_dispatch_handles_unicode_escape_in_key() {
-    from_json! {
-        #[derive(Debug, PartialEq)]
-        struct PlainId { id: u32 }
+    #[derive(Debug, PartialEq, FromJson)]
+    struct PlainId {
+        id: u32,
     }
     let j = r#"{"id":7}"#;
     let r: PlainId = parse_str(j).unwrap();
@@ -209,13 +207,11 @@ fn hashmap_borrowed_key_rejects_escapes() {
     assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidEscape);
 }
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    enum Tagged {
-        Plain(u32),
-        #[bourne(rename = "with\nbreak")]
-        WithBreak(u32),
-    }
+#[derive(Debug, PartialEq, FromJson)]
+enum Tagged {
+    Plain(u32),
+    #[bourne(rename = "with\nbreak")]
+    WithBreak(u32),
 }
 
 #[test]
@@ -242,14 +238,12 @@ fn hashmap_cow_key_borrows_or_owns_per_entry() {
 // from_json! macro field attributes
 // -----------------------------------------------------------------
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    struct Renamed {
-        #[bourne(rename = "user-id")]
-        user_id: u32,
-        #[bourne(rename = "displayName")]
-        display_name: u32,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+struct Renamed {
+    #[bourne(rename = "user-id")]
+    user_id: u32,
+    #[bourne(rename = "displayName")]
+    display_name: u32,
 }
 
 #[test]
@@ -271,15 +265,13 @@ fn macro_field_rename_rejects_original_name() {
     assert!(parse_str::<Renamed>(j).is_err());
 }
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    struct WithDefaults {
-        id: u32,
-        #[bourne(default)]
-        count: u32,
-        #[bourne(default)]
-        label: String,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+struct WithDefaults {
+    id: u32,
+    #[bourne(default)]
+    count: u32,
+    #[bourne(default)]
+    label: String,
 }
 
 #[test]
@@ -302,14 +294,12 @@ fn macro_field_default_overridden_by_present_value() {
     assert_eq!(r.label, "hi");
 }
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    struct WithSkip {
-        id: u32,
-        #[bourne(skip)]
-        cached: String,
-        value: u32,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+struct WithSkip {
+    id: u32,
+    #[bourne(skip)]
+    cached: String,
+    value: u32,
 }
 
 #[test]
@@ -332,13 +322,11 @@ fn macro_field_skip_rejects_key_in_input() {
     assert_eq!(err.kind, ErrorKind::UnknownField);
 }
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    struct SkipAtTail {
-        id: u32,
-        #[bourne(skip)]
-        trailing: u32,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+struct SkipAtTail {
+    id: u32,
+    #[bourne(skip)]
+    trailing: u32,
 }
 
 #[test]
@@ -347,12 +335,10 @@ fn macro_field_skip_at_last_position() {
     assert_eq!(r, SkipAtTail { id: 7, trailing: 0 });
 }
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    struct RenameAndDefault {
-        #[bourne(rename = "max-retries", default)]
-        max_retries: u32,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+struct RenameAndDefault {
+    #[bourne(rename = "max-retries", default)]
+    max_retries: u32,
 }
 
 #[test]

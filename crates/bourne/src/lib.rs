@@ -11,8 +11,10 @@
 //! consumers — skipping it makes the typed path ~2× faster on
 //! integer / string-heavy payloads.
 //!
-//! - **No proc-macros.** [`from_json!`], [`to_json!`], and [`json!`]
-//!   are declarative `macro_rules!`. Empty dependency graph.
+//! - **Derive-driven.** `#[derive(FromJson, ToJson)]` (the `derive`
+//!   feature, on by default) generates the typed impls. The generated
+//!   code is itself `no_std`; only the compile-time derive pulls in the
+//!   proc-macro stack.
 //! - **`no_std` everywhere.** The streaming [`Lexer`] / [`Parser`]
 //!   layer is `no_std` always; with the default `std` feature off
 //!   the crate is `no_std + alloc`, and with `alloc` off too it is
@@ -33,32 +35,29 @@
 //! assert_eq!(n, 42);
 //! ```
 //!
-//! Parse a struct (no proc-macro — `from_json!` is declarative):
+//! Parse a struct with `#[derive(FromJson)]`:
 //!
 //! ```
-//! use json_bourne::{from_json, parse_str};
+//! use json_bourne::{FromJson, parse_str};
 //!
-//! from_json! {
-//!     #[derive(Debug, PartialEq)]
-//!     struct User<'input> {
-//!         id: u64,
-//!         name: &'input str,
-//!         active: bool,
-//!     }
+//! #[derive(Debug, PartialEq, FromJson)]
+//! struct User<'input> {
+//!     id: u64,
+//!     name: &'input str,
+//!     active: bool,
 //! }
 //!
 //! let u: User<'_> = parse_str(r#"{"id":1,"name":"alice","active":true}"#).unwrap();
 //! assert_eq!(u.name, "alice");
 //! ```
 //!
-//! Serialize back out:
+//! Serialize back out with `#[derive(ToJson)]`:
 //!
 //! ```
-//! use json_bourne::{to_json, to_string};
+//! use json_bourne::{ToJson, to_string};
 //!
-//! to_json! {
-//!     struct Point { x: i32, y: i32 }
-//! }
+//! #[derive(ToJson)]
+//! struct Point { x: i32, y: i32 }
 //!
 //! let s = to_string(&Point { x: 3, y: -7 }).unwrap();
 //! assert_eq!(s, r#"{"x":3,"y":-7}"#);
@@ -105,6 +104,13 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+// The derive macros emit `::json_bourne::…` paths that must resolve even
+// when the derive is used *inside* this crate (tests, doctests). Alias
+// the crate to its own name so those absolute paths bind here too. This
+// is the same self-aliasing trick `serde_derive` relies on.
+#[cfg(feature = "derive")]
+extern crate self as json_bourne;
+
 mod casing;
 mod de;
 mod error;
@@ -135,7 +141,23 @@ pub use ser::{
 pub use ser::{IoWriteSink, to_writer};
 pub use ser::{JsonWrite, ToJson};
 
-mod macros;
+/// Derive `FromJson` / `ToJson` for your own structs and enums.
+///
+/// Requires the `derive` feature (on by default). The derives are
+/// implemented by the companion `bourne-derive` proc-macro crate and
+/// re-exported here so you only ever depend on and import `json_bourne`.
+///
+/// ```
+/// use json_bourne::{FromJson, ToJson, parse_str, to_string};
+///
+/// #[derive(FromJson, ToJson)]
+/// struct Point { x: i32, y: i32 }
+///
+/// let p: Point = parse_str(r#"{"x":3,"y":-7}"#).unwrap();
+/// assert_eq!(to_string(&p).unwrap(), r#"{"x":3,"y":-7}"#);
+/// ```
+#[cfg(feature = "derive")]
+pub use bourne_derive::{FromJson, ToJson};
 
 #[cfg(all(test, feature = "std"))]
 mod tests {
@@ -1756,28 +1778,25 @@ mod ser_roundtrip {
 }
 
 /// `to_json!` macro tests. Named-struct arms (PR 4 first slice).
-/// Each test pairs a `to_json!`-defined type against a manually-defined
-/// `from_json!` mirror so the round-trip exercises both macros on
+/// Each test pairs a `ToJson`-derived type against a manually-defined
+/// `FromJson` mirror so the round-trip exercises both derives on
 /// equivalent shapes.
 #[cfg(all(test, feature = "std"))]
 mod to_json_macro_tests {
     use super::{parse_str, to_string};
+    use crate::{FromJson, ToJson};
 
     // The simplest possible shape: plain struct, no attrs.
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct Plain {
-            id: u32,
-            name: String,
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct Plain {
+        id: u32,
+        name: String,
     }
 
-    crate::from_json! {
-        #[derive(Debug, PartialEq)]
-        struct PlainParse {
-            id: u32,
-            name: String,
-        }
+    #[derive(Debug, PartialEq, FromJson)]
+    struct PlainParse {
+        id: u32,
+        name: String,
     }
 
     #[test]
@@ -1800,12 +1819,10 @@ mod to_json_macro_tests {
         );
     }
 
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct Borrowed<'input> {
-            tag: &'input str,
-            count: u32,
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct Borrowed<'input> {
+        tag: &'input str,
+        count: u32,
     }
 
     #[test]
@@ -1819,17 +1836,15 @@ mod to_json_macro_tests {
     }
 
     // rename, skip, skip_if_none.
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct Decorated {
-            #[bourne(rename = "user-id")]
-            user_id: u32,
-            #[bourne(skip)]
-            cached: u32,
-            #[bourne(skip_if_none)]
-            note: Option<String>,
-            value: u32,
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct Decorated {
+        #[bourne(rename = "user-id")]
+        user_id: u32,
+        #[bourne(skip)]
+        cached: u32,
+        #[bourne(skip_if_none)]
+        note: Option<String>,
+        value: u32,
     }
 
     #[test]
@@ -1858,10 +1873,8 @@ mod to_json_macro_tests {
     }
 
     // Empty struct edge case.
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct Empty {}
-    }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct Empty {}
 
     #[test]
     fn empty_struct_emits_empty_object() {
@@ -1871,11 +1884,9 @@ mod to_json_macro_tests {
     // String escaping inside emitted values (sanity — should already
     // work via the ToJson<String> impl, but the macro shouldn't
     // double-escape or corrupt the output).
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct WithEscape {
-            text: String,
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct WithEscape {
+        text: String,
     }
 
     #[test]
@@ -1888,10 +1899,8 @@ mod to_json_macro_tests {
     }
 
     // Newtype tuple struct — emits the inner value bare.
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct UserId(u64);
-    }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct UserId(u64);
 
     #[test]
     fn newtype_emits_bare_value() {
@@ -1899,10 +1908,8 @@ mod to_json_macro_tests {
         assert_eq!(to_string(&v).unwrap(), "42");
     }
 
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct BorrowedTag<'input>(&'input str);
-    }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct BorrowedTag<'input>(&'input str);
 
     #[test]
     fn newtype_with_lifetime() {
@@ -1911,10 +1918,8 @@ mod to_json_macro_tests {
     }
 
     // Multi-field tuple struct — emits a JSON array.
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct Point(i32, i32);
-    }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct Point(i32, i32);
 
     #[test]
     fn tuple_struct_emits_array() {
@@ -1922,10 +1927,8 @@ mod to_json_macro_tests {
         assert_eq!(to_string(&v).unwrap(), "[3,-7]");
     }
 
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        struct Triple(i32, String, bool);
-    }
+    #[derive(Debug, PartialEq, ToJson)]
+    struct Triple(i32, String, bool);
 
     #[test]
     fn three_field_tuple_struct() {
@@ -1934,16 +1937,14 @@ mod to_json_macro_tests {
     }
 
     // Externally-tagged enum — the default encoding.
-    crate::to_json! {
-        #[derive(Debug, PartialEq)]
-        enum Shape {
-            Circle,
-            Wrapper(u32),
-            Pair(u32, String),
-            Box { w: u32, h: u32 },
-            #[bourne(rename = "tri")]
-            Triangle,
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    enum Shape {
+        Circle,
+        Wrapper(u32),
+        Pair(u32, String),
+        Box { w: u32, h: u32 },
+        #[bourne(rename = "tri")]
+        Triangle,
     }
 
     #[test]
@@ -1974,14 +1975,12 @@ mod to_json_macro_tests {
     }
 
     // Internally-tagged enum.
-    crate::to_json! {
-        #[bourne(tag = "type")]
-        #[derive(Debug, PartialEq)]
-        enum Event {
-            Heartbeat,
-            #[bourne(rename = "click")]
-            Click { x: u32, y: u32 },
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    #[bourne(tag = "type")]
+    enum Event {
+        Heartbeat,
+        #[bourne(rename = "click")]
+        Click { x: u32, y: u32 },
     }
 
     #[test]
@@ -1999,15 +1998,13 @@ mod to_json_macro_tests {
     }
 
     // Adjacently-tagged enum.
-    crate::to_json! {
-        #[bourne(tag = "t", content = "c")]
-        #[derive(Debug, PartialEq)]
-        enum Msg {
-            Ping,
-            Echo(String),
-            Pair(u32, u32),
-            Body { text: String },
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    #[bourne(tag = "t", content = "c")]
+    enum Msg {
+        Ping,
+        Echo(String),
+        Pair(u32, u32),
+        Body { text: String },
     }
 
     #[test]
@@ -2036,15 +2033,13 @@ mod to_json_macro_tests {
     }
 
     // Untagged enum.
-    crate::to_json! {
-        #[bourne(untagged)]
-        #[derive(Debug, PartialEq)]
-        enum Mixed {
-            Nothing,
-            One(u32),
-            Two(u32, u32),
-            Body { name: String },
-        }
+    #[derive(Debug, PartialEq, ToJson)]
+    #[bourne(untagged)]
+    enum Mixed {
+        Nothing,
+        One(u32),
+        Two(u32, u32),
+        Body { name: String },
     }
 
     #[test]
@@ -2268,18 +2263,17 @@ mod sink_adapter_tests {
     }
 }
 
-/// `json!` combined macro tests. Each type gets both `FromJson` and
-/// `ToJson` from a single invocation — the struct/enum is emitted once.
+/// Combined derive tests. Each type gets both `FromJson` and `ToJson`
+/// from one `#[derive(...)]`.
 #[cfg(all(test, feature = "std"))]
 mod json_macro_tests {
     use super::{parse_str, to_string};
+    use crate::{FromJson, ToJson};
 
-    crate::json! {
-        #[derive(Debug, PartialEq)]
-        struct Plain {
-            id: u32,
-            name: String,
-        }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    struct Plain {
+        id: u32,
+        name: String,
     }
 
     #[test]
@@ -2294,12 +2288,10 @@ mod json_macro_tests {
         assert_eq!(back, v);
     }
 
-    crate::json! {
-        #[derive(Debug, PartialEq)]
-        struct Borrowed<'input> {
-            tag: &'input str,
-            count: u32,
-        }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    struct Borrowed<'input> {
+        tag: &'input str,
+        count: u32,
     }
 
     #[test]
@@ -2316,17 +2308,15 @@ mod json_macro_tests {
         assert_eq!(to_string(&v).unwrap(), json);
     }
 
-    crate::json! {
-        #[derive(Debug, PartialEq)]
-        struct Decorated {
-            #[bourne(rename = "user-id")]
-            user_id: u32,
-            #[bourne(skip)]
-            cached: u32,
-            #[bourne(skip_if_none)]
-            note: Option<String>,
-            value: u32,
-        }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    struct Decorated {
+        #[bourne(rename = "user-id")]
+        user_id: u32,
+        #[bourne(skip)]
+        cached: u32,
+        #[bourne(skip_if_none)]
+        note: Option<String>,
+        value: u32,
     }
 
     #[test]
@@ -2344,10 +2334,8 @@ mod json_macro_tests {
         assert_eq!(back.value, 42);
     }
 
-    crate::json! {
-        #[derive(Debug, PartialEq)]
-        struct UserId(u64);
-    }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    struct UserId(u64);
 
     #[test]
     fn newtype_round_trips() {
@@ -2358,10 +2346,8 @@ mod json_macro_tests {
         assert_eq!(back, v);
     }
 
-    crate::json! {
-        #[derive(Debug, PartialEq)]
-        struct Pair(i32, i32);
-    }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    struct Pair(i32, i32);
 
     #[test]
     fn tuple_struct_round_trips() {
@@ -2372,16 +2358,14 @@ mod json_macro_tests {
         assert_eq!(back, v);
     }
 
-    crate::json! {
-        #[derive(Debug, PartialEq)]
-        enum Shape {
-            Circle,
-            Wrapper(u32),
-            Pair(u32, String),
-            Box { w: u32, h: u32 },
-            #[bourne(rename = "tri")]
-            Triangle,
-        }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    enum Shape {
+        Circle,
+        Wrapper(u32),
+        Pair(u32, String),
+        Box { w: u32, h: u32 },
+        #[bourne(rename = "tri")]
+        Triangle,
     }
 
     #[test]
@@ -2401,14 +2385,12 @@ mod json_macro_tests {
         }
     }
 
-    crate::json! {
-        #[bourne(tag = "type")]
-        #[derive(Debug, PartialEq)]
-        enum Event {
-            Heartbeat,
-            #[bourne(rename = "click")]
-            Click { x: u32, y: u32 },
-        }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    #[bourne(tag = "type")]
+    enum Event {
+        Heartbeat,
+        #[bourne(rename = "click")]
+        Click { x: u32, y: u32 },
     }
 
     #[test]
@@ -2426,15 +2408,13 @@ mod json_macro_tests {
         assert_eq!(back, click);
     }
 
-    crate::json! {
-        #[bourne(tag = "t", content = "c")]
-        #[derive(Debug, PartialEq)]
-        enum Msg {
-            Ping,
-            Echo(String),
-            Pair(u32, u32),
-            Body { text: String },
-        }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    #[bourne(tag = "t", content = "c")]
+    enum Msg {
+        Ping,
+        Echo(String),
+        Pair(u32, u32),
+        Body { text: String },
     }
 
     #[test]
@@ -2458,24 +2438,20 @@ mod json_macro_tests {
         }
     }
 
-    crate::json! {
-        #[bourne(untagged)]
-        #[derive(Debug, PartialEq)]
-        enum Mixed {
-            Nothing,
-            One(u32),
-            Two(u32, u32),
-            Body { name: String },
-        }
+    #[derive(Debug, PartialEq, FromJson, ToJson)]
+    #[bourne(untagged)]
+    enum Mixed {
+        Nothing,
+        One(u32),
+        Two(u32, u32),
+        Body { name: String },
     }
 
-    crate::json! {
-        #[derive(Debug, PartialEq, Eq)]
-        pub struct PubFields {
-            pub id: u32,
-            pub(crate) name: String,
-            value: u32,
-        }
+    #[derive(Debug, PartialEq, Eq, FromJson, ToJson)]
+    pub struct PubFields {
+        pub id: u32,
+        pub(crate) name: String,
+        value: u32,
     }
 
     #[test]
