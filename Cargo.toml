@@ -4,7 +4,7 @@ members = ["crates/bourne", "benches/bourne-bench"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/illuminodes/bourne"

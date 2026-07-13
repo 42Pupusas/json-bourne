@@ -104,6 +104,58 @@ macro_rules! from_json {
     };
 
     // -----------------------------------------------------------------
+    // Named-field struct with container `rename_all`, no generics.
+    //
+    // The casing rule applies to every field that lacks an explicit
+    // `#[bourne(rename = "…")]` (which still wins). Threaded through the
+    // body walker as a `Casing` token via `__casing_of!`.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            body: ($($body)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(
+                    __lex, (Self), strict, casing (rename_all $case), $($body)*
+                )
+            }
+        }
+    };
+
+    // Named-field struct with container `rename_all`, one lifetime.
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident < $lt:lifetime $(,)? > { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            body: ($($body)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(
+                    __lex, (Self), strict, casing (rename_all $case), $($body)*
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
     // Named-field struct, no generics.
     // -----------------------------------------------------------------
     (
@@ -491,7 +543,56 @@ macro_rules! from_json {
     //   - Struct `Foo {a, b}`    → object `{"Foo": {"a": …, "b": …}}`
     //
     // Variant-level `#[bourne(rename = "...")]` retags the variant.
+    // A container `#[bourne(rename_all = "…")]` casings every variant
+    // tag that lacks an explicit rename (explicit still wins).
     // -----------------------------------------------------------------
+
+    // Externally-tagged enum with container `rename_all`, no generics.
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_enum_dispatch!(
+                    __lex, $name, casing (rename_all $case), ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Externally-tagged enum with container `rename_all`, one lifetime.
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_enum_dispatch!(
+                    __lex, $name, casing (rename_all $case), ($($variants)*)
+                )
+            }
+        }
+    };
+
     (
         $(#[$attr:meta])*
         $vis:vis enum $name:ident { $($variants:tt)* }
@@ -1050,13 +1151,19 @@ macro_rules! __from_json_enum_strip {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __from_json_enum_dispatch {
+    // Legacy form (no container casing).
     ($lex:ident, $name:ident, ($($variants:tt)*)) => {
+        $crate::__from_json_enum_dispatch!($lex, $name, casing (none), ($($variants)*))
+    };
+    // Casing-carrying form.
+    ($lex:ident, $name:ident, casing $casing:tt, ($($variants:tt)*)) => {
         $crate::__from_json_enum_walk!(
             lex: $lex,
             name: $name,
             unit_arms: { },
             tagged_arms: { },
             cur_rename: (),
+            casing: $casing,
             has_tagged: (),
             input: ($($variants)*)
         )
@@ -1074,6 +1181,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: { $($unit:tt)* },
         tagged_arms: { },
         cur_rename: (),
+        casing: $casing:tt,
         has_tagged: (),
         input: ()
     ) => {
@@ -1100,6 +1208,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: { $($unit:tt)* },
         tagged_arms: { $($tagged:tt)* },
         cur_rename: (),
+        casing: $casing:tt,
         has_tagged: ($_h:tt $($_hrest:tt)*),
         input: ()
     ) => {
@@ -1145,6 +1254,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: $t:tt,
         cur_rename: (),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
     ) => {
@@ -1154,6 +1264,7 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: $t,
             cur_rename: ($renamed),
+            casing: $casing,
             has_tagged: ($($h)*),
             input: ($($rest)*)
         )
@@ -1166,6 +1277,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: $t:tt,
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( #[$_other:meta] $($rest:tt)* )
     ) => {
@@ -1175,6 +1287,7 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: $t,
             cur_rename: ($($rename)?),
+            casing: $casing,
             has_tagged: ($($h)*),
             input: ($($rest)*)
         )
@@ -1187,6 +1300,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: { $($u:tt)* },
         tagged_arms: $t:tt,
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident , $($rest:tt)* )
     ) => {
@@ -1195,11 +1309,12 @@ macro_rules! __from_json_enum_walk {
             name: $name,
             unit_arms: {
                 $($u)*
-                $crate::__from_json_field_key!($vname, ($($rename)?))
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing)
                     => ::core::result::Result::Ok($name::$vname),
             },
             tagged_arms: $t,
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)*),
             input: ($($rest)*)
         )
@@ -1211,6 +1326,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: { $($u:tt)* },
         tagged_arms: $t:tt,
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident )
     ) => {
@@ -1219,11 +1335,12 @@ macro_rules! __from_json_enum_walk {
             name: $name,
             unit_arms: {
                 $($u)*
-                $crate::__from_json_field_key!($vname, ($($rename)?))
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing)
                     => ::core::result::Result::Ok($name::$vname),
             },
             tagged_arms: $t,
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)*),
             input: ()
         )
@@ -1236,6 +1353,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: { $($t:tt)* },
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident ( $fty:ty $(,)? ) , $($rest:tt)* )
     ) => {
@@ -1245,11 +1363,12 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: {
                 $($t)*
-                $crate::__from_json_field_key!($vname, ($($rename)?)) => $name::$vname(
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing) => $name::$vname(
                     <$fty as $crate::FromJson<'_>>::from_lex($lex)?,
                 ),
             },
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)* ()),
             input: ($($rest)*)
         )
@@ -1260,6 +1379,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: { $($t:tt)* },
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident ( $fty:ty $(,)? ) )
     ) => {
@@ -1269,11 +1389,12 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: {
                 $($t)*
-                $crate::__from_json_field_key!($vname, ($($rename)?)) => $name::$vname(
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing) => $name::$vname(
                     <$fty as $crate::FromJson<'_>>::from_lex($lex)?,
                 ),
             },
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)* ()),
             input: ()
         )
@@ -1286,6 +1407,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: { $($t:tt)* },
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident ( $fty1:ty, $($ftyn:ty),+ $(,)? ) , $($rest:tt)* )
     ) => {
@@ -1295,7 +1417,7 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: {
                 $($t)*
-                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing) => {
                     if $lex.array_start()? {
                         return ::core::result::Result::Err(
                             $crate::Error::new($crate::ErrorKind::TypeMismatch, $lex.position()),
@@ -1311,6 +1433,7 @@ macro_rules! __from_json_enum_walk {
                 },
             },
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)* ()),
             input: ($($rest)*)
         )
@@ -1321,6 +1444,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: { $($t:tt)* },
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident ( $fty1:ty, $($ftyn:ty),+ $(,)? ) )
     ) => {
@@ -1330,7 +1454,7 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: {
                 $($t)*
-                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing) => {
                     if $lex.array_start()? {
                         return ::core::result::Result::Err(
                             $crate::Error::new($crate::ErrorKind::TypeMismatch, $lex.position()),
@@ -1346,6 +1470,7 @@ macro_rules! __from_json_enum_walk {
                 },
             },
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)* ()),
             input: ()
         )
@@ -1358,6 +1483,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: { $($t:tt)* },
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident { $($body:tt)* } , $($rest:tt)* )
     ) => {
@@ -1367,7 +1493,7 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: {
                 $($t)*
-                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing) => {
                     $crate::__from_json_named_body!(
                         $lex,
                         ($name::$vname),
@@ -1377,6 +1503,7 @@ macro_rules! __from_json_enum_walk {
                 },
             },
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)* ()),
             input: ($($rest)*)
         )
@@ -1387,6 +1514,7 @@ macro_rules! __from_json_enum_walk {
         unit_arms: $u:tt,
         tagged_arms: { $($t:tt)* },
         cur_rename: ($($rename:tt)?),
+        casing: $casing:tt,
         has_tagged: ($($h:tt)*),
         input: ( $vname:ident { $($body:tt)* } )
     ) => {
@@ -1396,7 +1524,7 @@ macro_rules! __from_json_enum_walk {
             unit_arms: $u,
             tagged_arms: {
                 $($t)*
-                $crate::__from_json_field_key!($vname, ($($rename)?)) => {
+                __bourne_t if __bourne_t == $crate::__from_json_variant_key_expr!($vname, ($($rename)?), $casing) => {
                     $crate::__from_json_named_body!(
                         $lex,
                         ($name::$vname),
@@ -1406,6 +1534,7 @@ macro_rules! __from_json_enum_walk {
                 },
             },
             cur_rename: (),
+            casing: $casing,
             has_tagged: ($($h)* ()),
             input: ()
         )
@@ -1709,6 +1838,7 @@ macro_rules! __from_json_named_body_skip_one {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: (tag_skip $skip_key),
+            casing: (none),
             decls: { },
             arms: { },
             assigns: { },
@@ -2364,12 +2494,15 @@ macro_rules! __from_json_tuple_walk {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __from_json_named_body {
-    // Strict (default): unknown key → UnknownField error.
-    ($lex:ident, ($($self_ctor:tt)+), strict, $($body:tt)*) => {
+    // ---- Casing-carrying forms (container `rename_all` active). ----
+    // The casing token is `(none)` or a `Casing` variant ident wrapped
+    // in parens, e.g. `(Camel)`, as produced by `__casing_of!`.
+    ($lex:ident, ($($self_ctor:tt)+), strict, casing $casing:tt, $($body:tt)*) => {
         $crate::__from_json_walk!(
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: strict,
+            casing: $casing,
             decls: { },
             arms: { },
             assigns: { },
@@ -2380,12 +2513,12 @@ macro_rules! __from_json_named_body {
             input: ($($body)*)
         )
     };
-    // Lenient: unknown key → lex.skip_value()?.
-    ($lex:ident, ($($self_ctor:tt)+), lenient, $($body:tt)*) => {
+    ($lex:ident, ($($self_ctor:tt)+), lenient, casing $casing:tt, $($body:tt)*) => {
         $crate::__from_json_walk!(
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: lenient,
+            casing: $casing,
             decls: { },
             arms: { },
             assigns: { },
@@ -2395,6 +2528,16 @@ macro_rules! __from_json_named_body {
             cur_default: (),
             input: ($($body)*)
         )
+    };
+
+    // ---- Legacy forms (no container casing). Delegate with `(none)`. ----
+    // Strict (default): unknown key → UnknownField error.
+    ($lex:ident, ($($self_ctor:tt)+), strict, $($body:tt)*) => {
+        $crate::__from_json_named_body!($lex, ($($self_ctor)+), strict, casing (none), $($body)*)
+    };
+    // Lenient: unknown key → lex.skip_value()?.
+    ($lex:ident, ($($self_ctor:tt)+), lenient, $($body:tt)*) => {
+        $crate::__from_json_named_body!($lex, ($($self_ctor)+), lenient, casing (none), $($body)*)
     };
 }
 
@@ -2430,6 +2573,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -2465,6 +2609,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -2478,6 +2623,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: { $($decls)* },
             arms: { $($arms)* },
             assigns: {
@@ -2497,6 +2643,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -2510,13 +2657,14 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: {
                 $($decls)*
                 let mut $fname: ::core::option::Option<$($fty)+> = ::core::option::Option::None;
             },
             arms: {
                 $($arms)*
-                $crate::__from_json_field_key!($fname, ($($rename)?)) => {
+                __bourne_k if __bourne_k == $crate::__from_json_field_key_expr!($fname, ($($rename)?), $casing) => {
                     if $fname.is_some() {
                         return ::core::result::Result::Err(
                             $crate::Error::new($crate::ErrorKind::DuplicateKey, $lex.position()),
@@ -2546,6 +2694,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2559,6 +2708,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2581,6 +2731,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2594,6 +2745,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2610,6 +2762,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2623,6 +2776,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2643,6 +2797,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2656,6 +2811,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2672,6 +2828,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2685,6 +2842,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2701,6 +2859,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2725,6 +2884,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2738,6 +2898,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2754,6 +2915,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2767,6 +2929,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2783,6 +2946,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -2796,6 +2960,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: { $($decls)* },
             arms: { $($arms)* },
             assigns: {
@@ -2815,6 +2980,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: { $($decls:tt)* },
         arms: { $($arms:tt)* },
         assigns: { $($assigns:tt)* },
@@ -2828,13 +2994,14 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: {
                 $($decls)*
                 let mut $fname: ::core::option::Option<$($fty)+> = ::core::option::Option::None;
             },
             arms: {
                 $($arms)*
-                $crate::__from_json_field_key!($fname, ($($rename)?)) => {
+                __bourne_k if __bourne_k == $crate::__from_json_field_key_expr!($fname, ($($rename)?), $casing) => {
                     if $fname.is_some() {
                         return ::core::result::Result::Err(
                             $crate::Error::new($crate::ErrorKind::DuplicateKey, $lex.position()),
@@ -2864,6 +3031,7 @@ macro_rules! __from_json_walk {
         lex: $lex:ident,
         ctor: ($($self_ctor:tt)+),
         unknown: $u:tt,
+        casing: $casing:tt,
         decls: $decls:tt,
         arms: $arms:tt,
         assigns: $assigns:tt,
@@ -2877,6 +3045,7 @@ macro_rules! __from_json_walk {
             lex: $lex,
             ctor: ($($self_ctor)+),
             unknown: $u,
+            casing: $casing,
             decls: $decls,
             arms: $arms,
             assigns: $assigns,
@@ -2947,6 +3116,63 @@ macro_rules! __from_json_field_key {
     ($fname:ident, ()) => {
         ::core::stringify!($fname)
     };
+}
+
+// ============================================================================
+// Casing-aware key expression for `#[bourne(rename_all = "…")]`.
+//
+// Unlike `__from_json_field_key!` (which yields a *literal*, usable in
+// pattern position), this yields an *expression* of type `&'static str`,
+// so it is emitted into a match **guard** (`k if k == <expr>`). That is
+// required because the converted key is produced by a `const fn` —
+// inline consts in pattern position need the unstable `inline_const_pat`
+// feature, whereas a named const inside an expression block is stable.
+//
+// Precedence (matches serde): an explicit per-field `rename` wins over
+// the container `rename_all`, so the `($renamed:literal)` arm ignores
+// the casing entirely. A field with no rename and casing `(none)` falls
+// back to the verbatim stringified name.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_field_key_expr {
+    // Explicit rename always wins — casing ignored.
+    ($fname:ident, ($renamed:literal), $casing:tt) => {
+        $renamed
+    };
+    // No rename, no container casing — verbatim field name.
+    ($fname:ident, (), (none)) => {
+        ::core::stringify!($fname)
+    };
+    // No rename, container casing active — convert at compile time.
+    // The casing is carried as the raw `rename_all` string literal so
+    // it survives `:tt` threading without eager macro expansion.
+    ($fname:ident, (), (rename_all $case:literal)) => {{
+        const __BOURNE_KEY: &str =
+            $crate::__Casing::rename(::core::stringify!($fname), $case).as_str();
+        __BOURNE_KEY
+    }};
+}
+
+// Variant-tag key resolver used by the enum walkers. Identical logic to
+// `__from_json_field_key_expr!` but named separately for clarity at the
+// (many) enum call sites. Yields an expression, so it is emitted into a
+// match **guard** (`__t if __t == …`).
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __from_json_variant_key_expr {
+    ($vname:ident, ($renamed:literal), $casing:tt) => {
+        $renamed
+    };
+    ($vname:ident, (), (none)) => {
+        ::core::stringify!($vname)
+    };
+    ($vname:ident, (), (rename_all $case:literal)) => {{
+        const __BOURNE_TAG: &str =
+            $crate::__Casing::rename(::core::stringify!($vname), $case).as_str();
+        __BOURNE_TAG
+    }};
 }
 
 // ============================================================================
@@ -3511,8 +3737,76 @@ macro_rules! to_json {
     //   - Tuple `Foo(T, U)`     → object `{"Foo": [<T>, <U>]}`
     //   - Struct `Foo {a, b}`   → object `{"Foo": {"a": ..., "b": ...}}`
     //
-    // Variant-level `#[bourne(rename = "...")]` retags.
+    // Variant-level `#[bourne(rename = "...")]` retags. A container
+    // `#[bourne(rename_all = "…")]` casings every un-renamed tag.
     // -----------------------------------------------------------------
+
+    // Externally-tagged enum with container `rename_all`, no generics.
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_enum_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    casing: (rename_all $case),
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Externally-tagged enum with container `rename_all`, one lifetime.
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_enum_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    casing: (rename_all $case),
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
     (
         $(#[$attr:meta])*
         $vis:vis enum $name:ident { $($variants:tt)* }
@@ -3589,6 +3883,26 @@ macro_rules! to_json {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __to_json_enum_walk {
+    // Legacy entry (no container casing) — default to `(none)`.
+    (
+        receiver: $r:ident,
+        sink: $w:ident,
+        name: $name:ident,
+        arms: { },
+        cur_rename: (),
+        input: ($($input:tt)*)
+    ) => {
+        $crate::__to_json_enum_walk!(
+            receiver: $r,
+            sink: $w,
+            name: $name,
+            casing: (none),
+            arms: { },
+            cur_rename: (),
+            input: ($($input)*)
+        )
+    };
+
     // ---------- Terminal: splice arms into a match. ----------
     //
     // macro_rules! cannot expand into match arms standalone — it must
@@ -3606,6 +3920,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: { $($arms:tt)* },
         cur_rename: (),
         input: ()
@@ -3620,6 +3935,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: $arms:tt,
         cur_rename: (),
         input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
@@ -3628,6 +3944,7 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: $arms,
             cur_rename: ($renamed),
             input: ($($rest)*)
@@ -3639,6 +3956,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: $arms:tt,
         cur_rename: ($($rename:tt)?),
         input: ( #[$_other:meta] $($rest:tt)* )
@@ -3647,6 +3965,7 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: $arms,
             cur_rename: ($($rename)?),
             input: ($($rest)*)
@@ -3658,6 +3977,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: { $($arms:tt)* },
         cur_rename: ($($rename:tt)?),
         input: ( $vname:ident , $($rest:tt)* )
@@ -3666,11 +3986,12 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: {
                 $($arms)*
                 &$name::$vname => {
                     $w.write_raw_bytes(b"\"")?;
-                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_str_raw($crate::__to_json_field_key_expr!($vname, ($($rename)?), $casing))?;
                     $w.write_raw_bytes(b"\"")?;
                     ::core::result::Result::Ok(())
                 }
@@ -3683,6 +4004,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: { $($arms:tt)* },
         cur_rename: ($($rename:tt)?),
         input: ( $vname:ident )
@@ -3691,11 +4013,12 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: {
                 $($arms)*
                 &$name::$vname => {
                     $w.write_raw_bytes(b"\"")?;
-                    $w.write_str_raw($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_str_raw($crate::__to_json_field_key_expr!($vname, ($($rename)?), $casing))?;
                     $w.write_raw_bytes(b"\"")?;
                     ::core::result::Result::Ok(())
                 }
@@ -3713,6 +4036,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: { $($arms:tt)* },
         cur_rename: ($($rename:tt)?),
         input: ( $vname:ident ( $_fty:ty $(,)? ) $(, $($rest:tt)*)? )
@@ -3721,11 +4045,12 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: {
                 $($arms)*
                 &$name::$vname(ref __inner) => {
                     $w.write_raw_bytes(b"{")?;
-                    $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_escaped_str($crate::__to_json_field_key_expr!($vname, ($($rename)?), $casing))?;
                     $w.write_raw_bytes(b":")?;
                     $crate::ToJson::write_json(__inner, $w)?;
                     $w.write_raw_bytes(b"}")?;
@@ -3742,6 +4067,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: { $($arms:tt)* },
         cur_rename: ($($rename:tt)?),
         input: ( $vname:ident ( $_a:ty, $_b:ty $(,)? ) $(, $($rest:tt)*)? )
@@ -3750,11 +4076,12 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b) => {
                     $w.write_raw_bytes(b"{")?;
-                    $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_escaped_str($crate::__to_json_field_key_expr!($vname, ($($rename)?), $casing))?;
                     $w.write_raw_bytes(b":[")?;
                     $crate::ToJson::write_json(__a, $w)?;
                     $w.write_raw_bytes(b",")?;
@@ -3773,6 +4100,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: { $($arms:tt)* },
         cur_rename: ($($rename:tt)?),
         input: ( $vname:ident ( $_a:ty, $_b:ty, $_c:ty $(,)? ) $(, $($rest:tt)*)? )
@@ -3781,11 +4109,12 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: {
                 $($arms)*
                 &$name::$vname(ref __a, ref __b, ref __c) => {
                     $w.write_raw_bytes(b"{")?;
-                    $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_escaped_str($crate::__to_json_field_key_expr!($vname, ($($rename)?), $casing))?;
                     $w.write_raw_bytes(b":[")?;
                     $crate::ToJson::write_json(__a, $w)?;
                     $w.write_raw_bytes(b",")?;
@@ -3806,6 +4135,7 @@ macro_rules! __to_json_enum_walk {
         receiver: $r:ident,
         sink: $w:ident,
         name: $name:ident,
+        casing: $casing:tt,
         arms: { $($arms:tt)* },
         cur_rename: ($($rename:tt)?),
         input: ( $vname:ident { $($fname:ident : $_fty:ty),+ $(,)? } $(, $($rest:tt)*)? )
@@ -3814,11 +4144,12 @@ macro_rules! __to_json_enum_walk {
             receiver: $r,
             sink: $w,
             name: $name,
+            casing: $casing,
             arms: {
                 $($arms)*
                 &$name::$vname { $(ref $fname),+ } => {
                     $w.write_raw_bytes(b"{")?;
-                    $w.write_escaped_str($crate::__to_json_field_key!($vname, ($($rename)?)))?;
+                    $w.write_escaped_str($crate::__to_json_field_key_expr!($vname, ($($rename)?), $casing))?;
                     $w.write_raw_bytes(b":{")?;
                     let mut __first: bool = true;
                     $(
@@ -5455,6 +5786,349 @@ macro_rules! __to_json_field_key {
 }
 
 // ============================================================================
+// Casing-aware key expression for the *serialize* side. Mirrors
+// `__from_json_field_key_expr!`: explicit rename wins, else the
+// container `rename_all` casing is applied to the field name at compile
+// time, else the verbatim name. Always yields a `&'static str`.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __to_json_field_key_expr {
+    ($fname:ident, ($renamed:literal), $casing:tt) => {
+        $renamed
+    };
+    ($fname:ident, (), (none)) => {
+        ::core::stringify!($fname)
+    };
+    ($fname:ident, (), (rename_all $case:literal)) => {{
+        const __BOURNE_KEY: &str =
+            $crate::__Casing::rename(::core::stringify!($fname), $case).as_str();
+        __BOURNE_KEY
+    }};
+}
+
+// ============================================================================
+// Cased serialize body + walker.
+//
+// Used only when a struct carries `#[bourne(rename_all = "…")]`. Rather
+// than thread the casing token through the 15-arm optimized
+// `__to_json_named_walk!` (with its `concat!(stringify!)` fast paths
+// that assume the key equals the field name), this is a small,
+// always-dynamic mirror: every field routes through
+// `write_escaped_str` with the cased key expression, guarded by a
+// runtime `__first` comma flag. Slightly slower than the fast path,
+// but only structs that opt into `rename_all` pay for it.
+//
+// Field attributes honored: `rename` (wins over casing), `skip`,
+// `skip_if_none`, `default` (ser no-op). Matches the plain walker's
+// attribute surface.
+// ============================================================================
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __to_json_named_body_cased {
+    ($self:ident, $w:ident, $casing:tt, $($body:tt)*) => {{
+        $w.write_raw_bytes(b"{")?;
+        #[allow(unused_assignments, unused_mut, unused_variables)]
+        let mut __first: bool = true;
+        $crate::__to_json_cased_walk!(
+            self_ref: $self,
+            sink: $w,
+            first: __first,
+            casing: $casing,
+            emit: { },
+            cur_rename: (),
+            cur_skip: (),
+            cur_skip_if_none: (),
+            cur_name: (),
+            ftokens: [],
+            input: ($($body)*)
+        );
+        $w.write_raw_bytes(b"}")?;
+        ::core::result::Result::Ok(())
+    }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __to_json_cased_walk {
+    // Terminal: input exhausted, no in-flight field.
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        casing: $casing:tt,
+        emit: { $($emit:tt)* },
+        cur_rename: (),
+        cur_skip: (),
+        cur_skip_if_none: (),
+        cur_name: (),
+        ftokens: [],
+        input: ()
+    ) => {
+        $($emit)*
+    };
+
+    // Terminal: last field (no trailing comma), skip — drop it.
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        casing: $casing:tt,
+        emit: { $($emit:tt)* },
+        cur_rename: ($($_rn:tt)?),
+        cur_skip: (skip),
+        cur_skip_if_none: ($($_si:tt)?),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        input: ()
+    ) => {
+        $($emit)*
+    };
+
+    // Terminal: last field, skip_if_none — conditional emit.
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        casing: $casing:tt,
+        emit: { $($emit:tt)* },
+        cur_rename: ($($rename:tt)?),
+        cur_skip: (),
+        cur_skip_if_none: (yes),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        input: ()
+    ) => {
+        $($emit)*
+        if let ::core::option::Option::Some(ref __v) = $self.$fname {
+            if !$first { $w.write_raw_bytes(b",")?; }
+            $w.write_escaped_str(
+                $crate::__to_json_field_key_expr!($fname, ($($rename)?), $casing)
+            )?;
+            $w.write_raw_bytes(b":")?;
+            $crate::ToJson::write_json(__v, $w)?;
+            $first = false;
+        }
+    };
+
+    // Terminal: last field, plain (or renamed) — dynamic emit.
+    (
+        self_ref: $self:ident,
+        sink: $w:ident,
+        first: $first:ident,
+        casing: $casing:tt,
+        emit: { $($emit:tt)* },
+        cur_rename: ($($rename:tt)?),
+        cur_skip: (),
+        cur_skip_if_none: (),
+        cur_name: ($fname:ident),
+        ftokens: [ $($_ft:tt)+ ],
+        input: ()
+    ) => {
+        $($emit)*
+        if !$first { $w.write_raw_bytes(b",")?; }
+        $w.write_escaped_str(
+            $crate::__to_json_field_key_expr!($fname, ($($rename)?), $casing)
+        )?;
+        $w.write_raw_bytes(b":")?;
+        $crate::ToJson::write_json(&$self.$fname, $w)?;
+        $first = false;
+    };
+
+    // Attr: rename.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: (), cur_skip: ($($skip:tt)?), cur_skip_if_none: ($($sin:tt)?),
+        cur_name: (), ftokens: [],
+        input: ( #[bourne(rename = $renamed:literal)] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: ($renamed), cur_skip: ($($skip)?), cur_skip_if_none: ($($sin)?),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Attr: skip.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: ($($rename:tt)?), cur_skip: (), cur_skip_if_none: ($($sin:tt)?),
+        cur_name: (), ftokens: [],
+        input: ( #[bourne(skip)] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: ($($rename)?), cur_skip: (skip), cur_skip_if_none: ($($sin)?),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Attr: skip_if_none.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: ($($rename:tt)?), cur_skip: ($($skip:tt)?), cur_skip_if_none: (),
+        cur_name: (), ftokens: [],
+        input: ( #[bourne(skip_if_none)] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: ($($rename)?), cur_skip: ($($skip)?), cur_skip_if_none: (yes),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Attr: default — ser no-op.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: ($($rename:tt)?), cur_skip: ($($skip:tt)?), cur_skip_if_none: ($($sin:tt)?),
+        cur_name: (), ftokens: [],
+        input: ( #[bourne(default)] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: ($($rename)?), cur_skip: ($($skip)?), cur_skip_if_none: ($($sin)?),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Attr: compound rename + default.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: (), cur_skip: ($($skip:tt)?), cur_skip_if_none: ($($sin:tt)?),
+        cur_name: (), ftokens: [],
+        input: ( #[bourne(rename = $renamed:literal, default)] $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: ($renamed), cur_skip: ($($skip)?), cur_skip_if_none: ($($sin)?),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Phase 2 entry: read field name.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: ($($rename:tt)?), cur_skip: ($($skip:tt)?), cur_skip_if_none: ($($sin:tt)?),
+        cur_name: (), ftokens: [],
+        input: ( $_fvis:vis $fname:ident : $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: ($($rename)?), cur_skip: ($($skip)?), cur_skip_if_none: ($($sin)?),
+            cur_name: ($fname), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Phase 2: comma commits the in-flight field — skip variant.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: ($($_rn:tt)?), cur_skip: (skip), cur_skip_if_none: ($($_si:tt)?),
+        cur_name: ($fname:ident), ftokens: [ $($_ft:tt)+ ],
+        input: ( , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: (), cur_skip: (), cur_skip_if_none: (),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Phase 2: comma commits — skip_if_none variant.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: { $($emit:tt)* },
+        cur_rename: ($($rename:tt)?), cur_skip: (), cur_skip_if_none: (yes),
+        cur_name: ($fname:ident), ftokens: [ $($_ft:tt)+ ],
+        input: ( , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: {
+                $($emit)*
+                if let ::core::option::Option::Some(ref __v) = $self.$fname {
+                    if !$first { $w.write_raw_bytes(b",")?; }
+                    $w.write_escaped_str(
+                        $crate::__to_json_field_key_expr!($fname, ($($rename)?), $casing)
+                    )?;
+                    $w.write_raw_bytes(b":")?;
+                    $crate::ToJson::write_json(__v, $w)?;
+                    $first = false;
+                }
+            },
+            cur_rename: (), cur_skip: (), cur_skip_if_none: (),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Phase 2: comma commits — plain / renamed variant.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: { $($emit:tt)* },
+        cur_rename: ($($rename:tt)?), cur_skip: (), cur_skip_if_none: (),
+        cur_name: ($fname:ident), ftokens: [ $($_ft:tt)+ ],
+        input: ( , $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: {
+                $($emit)*
+                if !$first { $w.write_raw_bytes(b",")?; }
+                $w.write_escaped_str(
+                    $crate::__to_json_field_key_expr!($fname, ($($rename)?), $casing)
+                )?;
+                $w.write_raw_bytes(b":")?;
+                $crate::ToJson::write_json(&$self.$fname, $w)?;
+                $first = false;
+            },
+            cur_rename: (), cur_skip: (), cur_skip_if_none: (),
+            cur_name: (), ftokens: [],
+            input: ($($rest)*)
+        )
+    };
+
+    // Phase 2: absorb one type token.
+    (
+        self_ref: $self:ident, sink: $w:ident, first: $first:ident, casing: $casing:tt,
+        emit: $emit:tt,
+        cur_rename: ($($rename:tt)?), cur_skip: ($($skip:tt)?), cur_skip_if_none: ($($sin:tt)?),
+        cur_name: ($fname:ident), ftokens: [ $($ftokens:tt)* ],
+        input: ( $tok:tt $($rest:tt)* )
+    ) => {
+        $crate::__to_json_cased_walk!(
+            self_ref: $self, sink: $w, first: $first, casing: $casing,
+            emit: $emit,
+            cur_rename: ($($rename)?), cur_skip: ($($skip)?), cur_skip_if_none: ($($sin)?),
+            cur_name: ($fname), ftokens: [ $($ftokens)* $tok ],
+            input: ($($rest)*)
+        )
+    };
+}
+
+// ============================================================================
 // `json!` — combined macro that emits the type definition once and
 // generates both `FromJson` and `ToJson` impls.
 //
@@ -5488,6 +6162,144 @@ macro_rules! __to_json_field_key {
 /// ```
 #[macro_export]
 macro_rules! json {
+    // -----------------------------------------------------------------
+    // Named-field struct with container `rename_all`, no generics.
+    //
+    // Applies the casing to both the FromJson (parse) and ToJson
+    // (serialize) sides so a round-trip stays symmetric. Explicit
+    // per-field `#[bourne(rename = "…")]` still wins on both sides.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            body: ($($body)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(
+                    __lex, (Self), strict, casing (rename_all $case), $($body)*
+                )
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::__to_json_named_body_cased!(self, __w, (rename_all $case), $($body)*)
+            }
+        }
+    };
+
+    // Named-field struct with container `rename_all`, one lifetime.
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident < $lt:lifetime $(,)? > { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            body: ($($body)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(
+                    __lex, (Self), strict, casing (rename_all $case), $($body)*
+                )
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::__to_json_named_body_cased!(self, __w, (rename_all $case), $($body)*)
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Lenient named-field struct (deny_unknown_fields = false), no
+    // generics.
+    //
+    // Mirrors the `from_json!` lenient arms: the container attribute
+    // must appear *first* among the outer attrs, because macro_rules!
+    // matches a fixed prefix per arm. Only the parse side (FromJson)
+    // is affected — serialization is identical to strict mode.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(deny_unknown_fields = false)]
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            body: ($($body)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(__lex, (Self), lenient, $($body)*)
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::__to_json_named_body!(self, __w, $($body)*)
+            }
+        }
+    };
+
+    // Lenient named-field struct, one lifetime.
+    (
+        #[bourne(deny_unknown_fields = false)]
+        $(#[$attr:meta])*
+        $vis:vis struct $name:ident < $lt:lifetime $(,)? > { $($body:tt)* }
+    ) => {
+        $crate::__from_json_emit_struct_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            body: ($($body)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_named_body!(__lex, (Self), lenient, $($body)*)
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                $crate::__to_json_named_body!(self, __w, $($body)*)
+            }
+        }
+    };
+
     // -----------------------------------------------------------------
     // Named-field struct, no generics.
     // -----------------------------------------------------------------
@@ -5936,6 +6748,92 @@ macro_rules! json {
                     sink: __w,
                     name: $name,
                     tag: $tag,
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // -----------------------------------------------------------------
+    // Externally-tagged enum with container `rename_all`, no generics.
+    // Casing applies symmetrically to parse + serialize; explicit
+    // per-variant `rename` still wins.
+    // -----------------------------------------------------------------
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (),
+            variants_input: ($($variants)*)
+        );
+
+        impl<'input> $crate::FromJson<'input> for $name {
+            fn from_lex(__lex: &mut $crate::Lexer<'input>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_enum_dispatch!(
+                    __lex, $name, casing (rename_all $case), ($($variants)*)
+                )
+            }
+        }
+
+        impl $crate::ToJson for $name {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_enum_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    casing: (rename_all $case),
+                    arms: { },
+                    cur_rename: (),
+                    input: ($($variants)*)
+                )
+            }
+        }
+    };
+
+    // Externally-tagged enum with container `rename_all`, one lifetime.
+    (
+        #[bourne(rename_all = $case:literal)]
+        $(#[$attr:meta])*
+        $vis:vis enum $name:ident < $lt:lifetime $(,)? > { $($variants:tt)* }
+    ) => {
+        $crate::__from_json_emit_enum_def!(
+            attrs: { $(#[$attr])* },
+            vis: $vis,
+            name: $name,
+            generics_def: (<$lt>),
+            variants_input: ($($variants)*)
+        );
+
+        impl<$lt> $crate::FromJson<$lt> for $name<$lt> {
+            fn from_lex(__lex: &mut $crate::Lexer<$lt>) -> ::core::result::Result<Self, $crate::Error> {
+                $crate::__from_json_enum_dispatch!(
+                    __lex, $name, casing (rename_all $case), ($($variants)*)
+                )
+            }
+        }
+
+        impl<$lt> $crate::ToJson for $name<$lt> {
+            fn write_json<__W: $crate::JsonWrite + ?::core::marker::Sized>(
+                &self,
+                __w: &mut __W,
+            ) -> ::core::result::Result<(), __W::Error> {
+                let __this: &Self = self;
+                $crate::__to_json_enum_walk!(
+                    receiver: __this,
+                    sink: __w,
+                    name: $name,
+                    casing: (rename_all $case),
                     arms: { },
                     cur_rename: (),
                     input: ($($variants)*)

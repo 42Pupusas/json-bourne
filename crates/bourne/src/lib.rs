@@ -105,6 +105,7 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+mod casing;
 mod de;
 mod error;
 mod event;
@@ -116,6 +117,8 @@ mod ser;
 #[cfg(all(test, feature = "std"))]
 mod teju_gen;
 
+#[doc(hidden)]
+pub use casing::{Casing as __Casing, Renamed as __Renamed};
 pub use de::{FromJson, parse, parse_str};
 #[cfg(feature = "alloc")]
 pub use de::{MapKey, key_to_cow};

@@ -6,7 +6,7 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Type-driven JSON parser. no_std-first. Zero-dep."
-exclude = ["tests/", "*.svg"]
+exclude = ["tests/", "fuzz/", "*.svg"]
 
 [features]
 default = ["std"]
