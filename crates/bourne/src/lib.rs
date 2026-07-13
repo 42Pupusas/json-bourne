@@ -1942,7 +1942,10 @@ mod to_json_macro_tests {
         Circle,
         Wrapper(u32),
         Pair(u32, String),
-        Box { w: u32, h: u32 },
+        Box {
+            w: u32,
+            h: u32,
+        },
         #[bourne(rename = "tri")]
         Triangle,
     }
@@ -1980,7 +1983,10 @@ mod to_json_macro_tests {
     enum Event {
         Heartbeat,
         #[bourne(rename = "click")]
-        Click { x: u32, y: u32 },
+        Click {
+            x: u32,
+            y: u32,
+        },
     }
 
     #[test]
@@ -2363,7 +2369,10 @@ mod json_macro_tests {
         Circle,
         Wrapper(u32),
         Pair(u32, String),
-        Box { w: u32, h: u32 },
+        Box {
+            w: u32,
+            h: u32,
+        },
         #[bourne(rename = "tri")]
         Triangle,
     }
@@ -2390,7 +2399,10 @@ mod json_macro_tests {
     enum Event {
         Heartbeat,
         #[bourne(rename = "click")]
-        Click { x: u32, y: u32 },
+        Click {
+            x: u32,
+            y: u32,
+        },
     }
 
     #[test]

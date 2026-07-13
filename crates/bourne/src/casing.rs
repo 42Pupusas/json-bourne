@@ -161,9 +161,7 @@ impl Casing {
             let first_in_word = !word_started;
             let out = match self {
                 Self::Lower | Self::Snake | Self::Kebab => b.to_ascii_lowercase(),
-                Self::Upper | Self::ScreamingSnake | Self::ScreamingKebab => {
-                    b.to_ascii_uppercase()
-                }
+                Self::Upper | Self::ScreamingSnake | Self::ScreamingKebab => b.to_ascii_uppercase(),
                 Self::Pascal => {
                     if first_in_word {
                         b.to_ascii_uppercase()
