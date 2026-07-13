@@ -547,19 +547,14 @@ fn from_json_enum(
     match container.enum_mode() {
         EnumMode::External => from_json_enum_external(name, variants, container),
         EnumMode::Internal(tag) => from_json_enum_internal(name, variants, &tag),
-        EnumMode::Adjacent(tag, content) => {
-            from_json_enum_adjacent(name, variants, &tag, &content)
-        }
+        EnumMode::Adjacent(tag, content) => from_json_enum_adjacent(name, variants, &tag, &content),
         EnumMode::Untagged => from_json_enum_untagged(name, variants),
     }
 }
 
 /// Read the array body for a tuple variant of arity `>= 2`, after the caller
 /// has consumed `[` and read element 0. Shared by every tagging mode.
-fn tuple_variant_read(
-    ctor: &proc_macro2::TokenStream,
-    tys: &[&Type],
-) -> proc_macro2::TokenStream {
+fn tuple_variant_read(ctor: &proc_macro2::TokenStream, tys: &[&Type]) -> proc_macro2::TokenStream {
     let mut reads = Vec::new();
     let mut idents = Vec::new();
     for (i, ty) in tys.iter().enumerate() {
@@ -1146,7 +1141,11 @@ fn to_json_named(
                 ::json_bourne::ToJson::write_json(&self.#name, __w)?;
                 __first = false;
             });
-            sf = if sf == StaticFirst::Maybe { StaticFirst::Maybe } else { StaticFirst::No };
+            sf = if sf == StaticFirst::Maybe {
+                StaticFirst::Maybe
+            } else {
+                StaticFirst::No
+            };
         }
     }
 
