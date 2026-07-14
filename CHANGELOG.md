@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-14
+
+### Fixed
+- `#[derive(ToJson)]` on a named struct emitted invalid JSON — a missing
+  separator comma — whenever a plain (un-renamed) field was immediately
+  followed by a `#[bourne(skip_if_none)]` `Option` field that was present.
+  The fast path that folds a plain field's `,"key":` into a compile-time
+  literal never set the internal `__first` flag to `false`, so the
+  following optional field's runtime comma (gated on `!__first`) was
+  wrongly suppressed, producing output like `{"a":1,"b":2"c":3}`. This
+  broke every OpenAI-compatible API request in downstream consumers
+  (`ChatRequest`'s `stream` → `stream_options`, assistant tool-call
+  messages' `role` → `tool_calls`). Fixed by setting `__first = false` in
+  the plain fast path; added a regression test.
+
 ## [0.2.0] - 2026-07-13
 
 ### Added
@@ -56,6 +71,7 @@ Initial public release.
   (`crates/bourne/tests/zero_alloc.rs`) pinning the zero-allocation
   guarantees.
 
-[Unreleased]: https://github.com/illuminodes/bourne/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/illuminodes/bourne/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/illuminodes/bourne/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/illuminodes/bourne/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/illuminodes/bourne/releases/tag/v0.1.0
