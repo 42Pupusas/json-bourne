@@ -1872,6 +1872,41 @@ mod to_json_macro_tests {
         assert_eq!(s, r#"{"user-id":1,"note":"hi","value":7}"#);
     }
 
+    // Regression: a *plain* (un-renamed) field followed by a skipped
+    // `skip_if_none` field, then a present field. The plain fast path folds
+    // the comma+key into a compile-time literal; it must still record that
+    // output was committed so the later runtime comma (gated on `!__first`)
+    // is emitted. Prior to the fix this produced `.."b""c":..` (missing
+    // comma) whenever the optional middle field was None.
+    #[derive(Debug, PartialEq, ToJson)]
+    struct PlainThenSkip {
+        a: u32,
+        b: u32,
+        #[bourne(skip_if_none)]
+        mid: Option<u32>,
+        c: u32,
+    }
+
+    #[test]
+    fn plain_field_before_skipped_option_keeps_comma() {
+        // mid = None -> the fast-path plain fields must still separate from `c`.
+        let v = PlainThenSkip {
+            a: 1,
+            b: 2,
+            mid: None,
+            c: 3,
+        };
+        assert_eq!(to_string(&v).unwrap(), r#"{"a":1,"b":2,"c":3}"#);
+        // mid = Some -> comma on both sides of the optional.
+        let v = PlainThenSkip {
+            a: 1,
+            b: 2,
+            mid: Some(9),
+            c: 3,
+        };
+        assert_eq!(to_string(&v).unwrap(), r#"{"a":1,"b":2,"mid":9,"c":3}"#);
+    }
+
     // Empty struct edge case.
     #[derive(Debug, PartialEq, ToJson)]
     struct Empty {}

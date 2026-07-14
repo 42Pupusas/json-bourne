@@ -1120,9 +1120,14 @@ fn to_json_named(
                 StaticFirst::Yes => format!("\"{name_str}\":"),
                 _ => format!(",\"{name_str}\":"),
             };
+            // Record that output has been committed. A later skip_if_none
+            // field (which flips posture to `Maybe`) gates its leading comma
+            // on `!__first`; without this, plain fields would leave `__first`
+            // set and that comma would be wrongly suppressed.
             stmts.push(quote! {
                 __w.write_raw_bytes(#lit.as_bytes())?;
                 ::json_bourne::ToJson::write_json(&self.#name, __w)?;
+                __first = false;
             });
             sf = StaticFirst::No;
         } else {
