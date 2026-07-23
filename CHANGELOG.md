@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-23
+
+### Changed
+- `bourne-derive` now depends on `syn 3` (was `syn 2`). No generated-code
+  or attribute-surface changes; `syn 3`'s `ItemImpl`/API churn doesn't
+  touch any construct `bourne-derive` uses. Downstream consumers that
+  also depend on `syn` directly (e.g. build-time codegen tools) can now
+  unify on a single `syn` major version instead of carrying both 2 and 3
+  in their dependency tree.
+
 ## [0.2.1] - 2026-07-14
 
 ### Fixed

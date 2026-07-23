@@ -112,8 +112,8 @@ enum JsonValue {
     Bool(bool),
     Int(i32),
     Str(String),
-    Array(Vec<JsonValue>),
-    Object(Vec<(String, JsonValue)>),
+    Array(Vec<Self>),
+    Object(Vec<(String, Self)>),
 }
 
 impl JsonValue {
