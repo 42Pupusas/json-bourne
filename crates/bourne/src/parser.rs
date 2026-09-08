@@ -208,11 +208,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
 
     fn close_container(&mut self, expected: Frame) -> Result<Event, Error> {
         self.lex.pop_frame(expected)?;
-        self.state = match self.lex.stack.top() {
-            None => State::DocumentEnd,
-            Some(Frame::Array) => State::ArrayCommaOrEnd,
-            Some(Frame::Object) => State::ObjectCommaOrEnd,
-        };
+        self.state = self.state_value_consumed();
         Ok(match expected {
             Frame::Array => Event::EndArray,
             Frame::Object => Event::EndObject,
@@ -228,23 +224,34 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     // skip these and avoid the state writes entirely.
     // -----------------------------------------------------------------
 
+    /// State once a value — scalar or fully-closed container — is
+    /// consumed at the current nesting level: what may follow depends
+    /// only on the enclosing frame.
+    const fn state_value_consumed(&self) -> State {
+        match self.lex.stack.top() {
+            None => State::DocumentEnd,
+            Some(Frame::Array) => State::ArrayCommaOrEnd,
+            Some(Frame::Object) => State::ObjectCommaOrEnd,
+        }
+    }
+
     pub fn parse_i64_value(&mut self) -> Result<i64, Error> {
-        self.lex.parse_i64_value()
+        let v = self.lex.parse_i64_value()?;
+        self.state = self.state_value_consumed();
+        Ok(v)
     }
 
     pub fn parse_str_value(&mut self) -> Result<&'input str, Error> {
-        self.lex.parse_str_value()
+        let s = self.lex.parse_str_value()?;
+        self.state = self.state_value_consumed();
+        Ok(s)
     }
 
     /// On `[` push a frame and, for empty arrays, pop and synchronize state.
     pub fn array_start(&mut self) -> Result<bool, Error> {
         let empty = self.lex.array_start()?;
         if empty {
-            self.state = match self.lex.stack.top() {
-                None => State::DocumentEnd,
-                Some(Frame::Array) => State::ArrayCommaOrEnd,
-                Some(Frame::Object) => State::ObjectCommaOrEnd,
-            };
+            self.state = self.state_value_consumed();
         } else {
             self.state = State::ArrayValueOrEnd;
         }
@@ -254,11 +261,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     pub fn array_continue(&mut self, end_byte: u8) -> Result<bool, Error> {
         let closed = self.lex.array_continue(end_byte)?;
         if closed {
-            self.state = match self.lex.stack.top() {
-                None => State::DocumentEnd,
-                Some(Frame::Array) => State::ArrayCommaOrEnd,
-                Some(Frame::Object) => State::ObjectCommaOrEnd,
-            };
+            self.state = self.state_value_consumed();
         }
         Ok(closed)
     }
@@ -266,11 +269,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     pub fn object_first_key(&mut self) -> Result<Option<&'input str>, Error> {
         let key = self.lex.object_first_key()?;
         self.state = match key {
-            None => match self.lex.stack.top() {
-                None => State::DocumentEnd,
-                Some(Frame::Array) => State::ArrayCommaOrEnd,
-                Some(Frame::Object) => State::ObjectCommaOrEnd,
-            },
+            None => self.state_value_consumed(),
             Some(_) => State::ObjectValue,
         };
         Ok(key)
@@ -279,11 +278,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     pub fn object_next_key(&mut self) -> Result<Option<&'input str>, Error> {
         let key = self.lex.object_next_key()?;
         self.state = match key {
-            None => match self.lex.stack.top() {
-                None => State::DocumentEnd,
-                Some(Frame::Array) => State::ArrayCommaOrEnd,
-                Some(Frame::Object) => State::ObjectCommaOrEnd,
-            },
+            None => self.state_value_consumed(),
             Some(_) => State::ObjectValue,
         };
         Ok(key)
@@ -298,11 +293,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     pub fn object_first_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
         let key = self.lex.object_first_key_lex()?;
         self.state = match key {
-            None => match self.lex.stack.top() {
-                None => State::DocumentEnd,
-                Some(Frame::Array) => State::ArrayCommaOrEnd,
-                Some(Frame::Object) => State::ObjectCommaOrEnd,
-            },
+            None => self.state_value_consumed(),
             Some(_) => State::ObjectValue,
         };
         Ok(key)
@@ -316,11 +307,7 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     pub fn object_next_key_lex(&mut self) -> Result<Option<JsonStr>, Error> {
         let key = self.lex.object_next_key_lex()?;
         self.state = match key {
-            None => match self.lex.stack.top() {
-                None => State::DocumentEnd,
-                Some(Frame::Array) => State::ArrayCommaOrEnd,
-                Some(Frame::Object) => State::ObjectCommaOrEnd,
-            },
+            None => self.state_value_consumed(),
             Some(_) => State::ObjectValue,
         };
         Ok(key)

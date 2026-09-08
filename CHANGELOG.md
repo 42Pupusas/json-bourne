@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. Keys inside skipped objects are now consumed as raw byte spans —
   still shape-validated, never decoded — so `InvalidEscape` surfaces only
   for keys and strings the caller actually receives.
+- `Parser::parse_i64_value` / `parse_str_value` did not update the grammar
+  state, so trailing data after a scalar root document went undetected
+  (`Parser::new(b"1 2").parse_i64_value()` followed by `next_event` yielded a
+  second document instead of `TrailingData`), a missing comma inside a
+  container could pass silently, and resuming event-driven parsing after a
+  fast-path scalar mis-parsed. Both now sync state through the same shared
+  helper as the sibling fast-path methods, which also deduplicates the
+  state-after-value logic (audit 3.12).
 - Internally tagged enums accepted a duplicated tag key: `{"type":"Dog",
   "type":123}` parsed (the unit arm skipped any further `tag` key and struct
   variants skipped it as a sibling). The tag now behaves like a named-struct
