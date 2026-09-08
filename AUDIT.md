@@ -481,6 +481,14 @@ Fix: correct the package names; add a `compile_error!` when both bench features
 are on, or move `compare_mem` to its own crate; run the exact CI command list
 locally before merging (there is no `just`/`Makefile` target that reproduces
 CI — add one).
+— *Landed 2026-07.* `ci.yml` names `json-bourne`/`bourne-derive`; the test
+job's matrix runs `scripts/ci.sh`, which carries the exact command list
+(all-features deliberately excluded from the workspace run) and covers the
+bare `--no-default-features`, `alloc`, and `alloc,indexmap,derive` combos;
+`bourne-bench/src/feature_guard.rs` has the `compile_error!`. The bare
+no-std build the script exercises was itself broken until 5.4 (the lexer
+reached alloc-gated `crate::float::POW10`); CI would have caught it had
+this job existed when the gate was introduced — which is the audit's point.
 
 ### 5.2 S3 — README is stale
 
@@ -494,6 +502,10 @@ from or reconciled with it.
 Untracked `Fuel.pdf`, `billions.pdf`, `decimal.pdf` and four flamegraph SVGs in
 the repo root. If they are reference material, move them under `docs/` and
 track them; otherwise delete. `lcov.info` is tracked — it should be an artifact.
+— *Landed 2026-07.* The PDFs/SVGs are gone from the tree, `.gitignore`
+carries `*.svg`, `*.pdf`, `lcov.info`, and the tracked
+`.claude/scheduled_tasks.lock` runtime artifact is untracked with `.claude/`
+ignored. The empty `docs/papers/` directory this cleanup created is removed.
 
 ### 5.4 S3 — Feature gating leaks into logic
 
