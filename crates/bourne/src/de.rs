@@ -493,7 +493,9 @@ mod alloc_impls {
     /// or wrap the key in a newtype.
     ///
     /// Returns `Result` because not every adapter is total — `&'input str`
-    /// keys can only borrow, so escaped keys reject with `InvalidEscape`.
+    /// keys can only borrow, so escape-bearing keys reject with
+    /// [`ErrorKind::BorrowedKeyNeedsDecode`] (the escape itself is valid;
+    /// the key type is the limitation).
     pub trait MapKey<'input>: Sized {
         fn from_key(key: Cow<'input, str>, lex: &Lexer<'input>) -> Result<Self, Error>;
     }
@@ -529,7 +531,7 @@ mod alloc_impls {
         fn from_key(key: Cow<'input, str>, lex: &Lexer<'input>) -> Result<Self, Error> {
             match key {
                 Cow::Borrowed(s) => Ok(s),
-                Cow::Owned(_) => Err(type_error(lex, ErrorKind::InvalidEscape)),
+                Cow::Owned(_) => Err(type_error(lex, ErrorKind::BorrowedKeyNeedsDecode)),
             }
         }
     }

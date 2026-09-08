@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. Keys inside skipped objects are now consumed as raw byte spans —
   still shape-validated, never decoded — so `InvalidEscape` surfaces only
   for keys and strings the caller actually receives.
+- Map keys typed `&str` reported escape-bearing keys as `InvalidEscape`,
+  accusing the document of a malformed escape when the escape is valid and
+  the real limitation is that a borrow-only key type cannot hold a decoded
+  key. A dedicated `ErrorKind::BorrowedKeyNeedsDecode` names the actual
+  problem and suggests the owning alternatives (audit 3.13).
 - `Parser::parse_i64_value` / `parse_str_value` did not update the grammar
   state, so trailing data after a scalar root document went undetected
   (`Parser::new(b"1 2").parse_i64_value()` followed by `next_event` yielded a

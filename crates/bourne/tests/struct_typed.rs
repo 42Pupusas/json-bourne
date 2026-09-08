@@ -204,7 +204,12 @@ fn hashmap_handles_escaped_key() {
 fn hashmap_borrowed_key_rejects_escapes() {
     use std::collections::HashMap;
     let r: Result<HashMap<&str, i32>, _> = parse_str(r#"{"a\nb":1}"#);
-    assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidEscape);
+    assert_eq!(r.unwrap_err().kind, ErrorKind::BorrowedKeyNeedsDecode);
+    // The escape is valid — the message must not call it invalid.
+    let msg = parse_str::<HashMap<&str, i32>>(r#"{"a\nb":1}"#)
+        .unwrap_err()
+        .to_string();
+    assert!(!msg.contains("invalid string escape"), "{msg}");
 }
 
 #[derive(Debug, PartialEq, FromJson)]

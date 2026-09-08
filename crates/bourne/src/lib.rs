@@ -764,6 +764,10 @@ mod tests {
         let cases: &[(ErrorKind, &str)] = &[
             (ErrorKind::UnexpectedEof, "unexpected end of input"),
             (ErrorKind::InvalidEscape, "invalid string escape"),
+            (
+                ErrorKind::BorrowedKeyNeedsDecode,
+                "key contains an escape: borrow-only key type cannot represent it; use String or Cow<str>",
+            ),
             (ErrorKind::InvalidUnicodeEscape, "invalid \\u escape"),
             (
                 ErrorKind::UnpairedSurrogate,

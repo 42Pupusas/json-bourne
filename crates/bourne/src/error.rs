@@ -65,6 +65,9 @@ pub enum ErrorKind {
     UnexpectedByte(u8),
     UnexpectedEof,
     InvalidEscape,
+    /// The escape is valid; the caller's key type (`&str`) cannot hold a
+    /// decoded key, which requires ownership. Use `String` or `Cow<str>`.
+    BorrowedKeyNeedsDecode,
     InvalidUnicodeEscape,
     UnpairedSurrogate,
     InvalidUtf8,
@@ -95,6 +98,10 @@ impl ErrorKind {
             Self::UnexpectedByte(_) => "unexpected byte",
             Self::UnexpectedEof => "unexpected end of input",
             Self::InvalidEscape => "invalid string escape",
+            Self::BorrowedKeyNeedsDecode => {
+                "key contains an escape: borrow-only key type cannot represent it; \
+                 use String or Cow<str>"
+            }
             Self::InvalidUnicodeEscape => "invalid \\u escape",
             Self::UnpairedSurrogate => "unpaired UTF-16 surrogate in \\u escape",
             Self::InvalidUtf8 => "invalid UTF-8",
