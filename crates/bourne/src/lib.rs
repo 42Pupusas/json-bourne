@@ -127,7 +127,7 @@ mod teju_gen;
 pub use casing::{Casing as __Casing, Renamed as __Renamed};
 pub use de::{FromJson, parse, parse_str};
 #[cfg(feature = "alloc")]
-pub use de::{MapKey, key_to_cow};
+pub use de::{KeyCow, MapKey, key_to_cow};
 pub use error::{Error, ErrorKind, LineColumn, Position};
 pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 pub use lexer::{Checkpoint, DEFAULT_MAX_DEPTH, Lexer, ValueKind};

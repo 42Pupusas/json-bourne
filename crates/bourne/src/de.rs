@@ -387,7 +387,7 @@ impl_tuple!(0: A, 1: B, 2: C, 3: D, 4: E, 5: F);
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "alloc")]
-pub use alloc_impls::{MapKey, key_to_cow};
+pub use alloc_impls::{KeyCow, MapKey, key_to_cow};
 
 #[cfg(feature = "alloc")]
 mod alloc_impls {
@@ -497,6 +497,14 @@ mod alloc_impls {
     pub trait MapKey<'input>: Sized {
         fn from_key(key: Cow<'input, str>, lex: &Lexer<'input>) -> Result<Self, Error>;
     }
+
+    /// The decoded object-key type derive-generated code holds between
+    /// the key read and the match.
+    ///
+    /// Borrows when the key is escape-free, owns a fresh `String` otherwise.
+    /// Exported as `json_bourne::KeyCow` so generated code never names
+    /// `::alloc` directly (which breaks std-only consumers).
+    pub type KeyCow<'input> = Cow<'input, str>;
 
     impl<'input> MapKey<'input> for String {
         #[inline]

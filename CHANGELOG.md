@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- Variant tags in derived enums were written through the raw byte-literal
+  writer, so a `#[bourne(rename = "a\"b")]` produced invalid JSON (`"a"b"`),
+  and the bare-string unit-variant parse path rejected every escaped tag.
+  Tags now serialize through the escaping writer and parse through the
+  borrow-or-decode key path used for object keys; escape-bearing renames
+  round-trip in all three tagging modes. `json_bourne::KeyCow` is a new
+  public alias for the decoded tag type the derive emits.
 - The default `JsonWrite::write_escaped_str` pushed every byte through the
   byte-oriented `write_byte`, so sinks whose `write_byte` is char-oriented
   mangled non-ASCII strings: `to_fmt("é")` produced `"Ã©"`. The default now

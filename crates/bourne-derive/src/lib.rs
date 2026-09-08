@@ -731,8 +731,12 @@ fn from_json_enum_external(
     Ok(quote! {
         match __lex.peek_value_kind()? {
             ::json_bourne::ValueKind::String => {
-                let __tag = __lex.parse_str_value()?;
-                match __tag {
+                // Read the tag via the borrow-or-decode path so an escape-
+                // bearing `rename` (which the serializer now escapes) still
+                // matches; `parse_str_value` would reject the escapes.
+                let __key_js = __lex.read_string_no_validate()?;
+                let __tag_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
+                match __tag_cow.as_ref() {
                     #(#unit_arms)*
                     _ => ::core::result::Result::Err(::json_bourne::Error::new(
                         ::json_bourne::ErrorKind::UnknownField, __lex.position())),
@@ -793,14 +797,14 @@ fn from_json_enum_internal(
         let __cp = __lex.checkpoint();
         __lex.object_start()?;
         let mut __maybe_key = __lex.object_first_key_lex()?;
-        let __tag_value: &str = loop {
+        let __tag_value: ::json_bourne::KeyCow<'_> = loop {
             let ::core::option::Option::Some(__key_js) = __maybe_key else {
                 return ::core::result::Result::Err(::json_bourne::Error::new(
                     ::json_bourne::ErrorKind::MissingField, __lex.position()));
             };
             let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
             if __key_cow.as_ref() == #tag {
-                break __lex.parse_str_value()?;
+                break ::json_bourne::key_to_cow(__lex.read_string_no_validate()?, __lex)?;
             }
             __lex.skip_value()?;
             __maybe_key = __lex.object_next_key_lex()?;
@@ -935,7 +939,8 @@ fn from_json_enum_adjacent(
 
     Ok(quote! {{
         __lex.object_start()?;
-        let mut __tag_value: ::core::option::Option<&str> = ::core::option::Option::None;
+        let mut __tag_value: ::core::option::Option<::json_bourne::KeyCow<'_>> =
+            ::core::option::Option::None;
         let mut __content_cp: ::core::option::Option<::json_bourne::Checkpoint> =
             ::core::option::Option::None;
         let mut __maybe_key = __lex.object_first_key_lex()?;
@@ -946,7 +951,8 @@ fn from_json_enum_adjacent(
                     return ::core::result::Result::Err(::json_bourne::Error::new(
                         ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
                 }
-                __tag_value = ::core::option::Option::Some(__lex.parse_str_value()?);
+                __tag_value = ::core::option::Option::Some(
+                    ::json_bourne::key_to_cow(__lex.read_string_no_validate()?, __lex)?);
             } else if __key_cow.as_ref() == #content {
                 if __content_cp.is_some() {
                     return ::core::result::Result::Err(::json_bourne::Error::new(
@@ -960,10 +966,11 @@ fn from_json_enum_adjacent(
             }
             __maybe_key = __lex.object_next_key_lex()?;
         }
-        let __tag = __tag_value.ok_or_else(|| ::json_bourne::Error::new(
-            ::json_bourne::ErrorKind::MissingField, __lex.position()))?;
+        let __tag = __tag_value
+            .ok_or_else(|| ::json_bourne::Error::new(
+                ::json_bourne::ErrorKind::MissingField, __lex.position()))?;
         let __post_cp = __lex.checkpoint();
-        let __value = match __tag {
+        let __value = match __tag.as_ref() {
             #(#arms)*
             _ => ::core::result::Result::Err(::json_bourne::Error::new(
                 ::json_bourne::ErrorKind::UnknownField, __lex.position())),
@@ -1304,9 +1311,7 @@ fn to_json_variant_arm(
         // ---- External ----
         (EnumMode::External, VShape::Unit) => quote! {
             #name::#vname => {
-                __w.write_raw_bytes(b"\"")?;
-                __w.write_str_raw(#tagkey)?;
-                __w.write_raw_bytes(b"\"")?;
+                __w.write_escaped_str(#tagkey)?;
                 ::core::result::Result::Ok(())
             }
         },
@@ -1354,9 +1359,9 @@ fn to_json_variant_arm(
             #name::#vname => {
                 __w.write_raw_bytes(b"{")?;
                 __w.write_escaped_str(#tag)?;
-                __w.write_raw_bytes(b":\"")?;
-                __w.write_str_raw(#tagkey)?;
-                __w.write_raw_bytes(b"\"}")?;
+                __w.write_raw_bytes(b":")?;
+                __w.write_escaped_str(#tagkey)?;
+                __w.write_raw_bytes(b"}")?;
                 ::core::result::Result::Ok(())
             }
         },
@@ -1377,9 +1382,8 @@ fn to_json_variant_arm(
                 #name::#vname { #pat } => {
                     __w.write_raw_bytes(b"{")?;
                     __w.write_escaped_str(#tag)?;
-                    __w.write_raw_bytes(b":\"")?;
-                    __w.write_str_raw(#tagkey)?;
-                    __w.write_raw_bytes(b"\"")?;
+                    __w.write_raw_bytes(b":")?;
+                    __w.write_escaped_str(#tagkey)?;
                     #(#stmts)*
                     __w.write_raw_bytes(b"}")?;
                     ::core::result::Result::Ok(())
@@ -1398,9 +1402,9 @@ fn to_json_variant_arm(
             #name::#vname => {
                 __w.write_raw_bytes(b"{")?;
                 __w.write_escaped_str(#tag)?;
-                __w.write_raw_bytes(b":\"")?;
-                __w.write_str_raw(#tagkey)?;
-                __w.write_raw_bytes(b"\"}")?;
+                __w.write_raw_bytes(b":")?;
+                __w.write_escaped_str(#tagkey)?;
+                __w.write_raw_bytes(b"}")?;
                 ::core::result::Result::Ok(())
             }
         },
@@ -1408,9 +1412,9 @@ fn to_json_variant_arm(
             #name::#vname(__inner) => {
                 __w.write_raw_bytes(b"{")?;
                 __w.write_escaped_str(#tag)?;
-                __w.write_raw_bytes(b":\"")?;
-                __w.write_str_raw(#tagkey)?;
-                __w.write_raw_bytes(b"\",")?;
+                __w.write_raw_bytes(b":")?;
+                __w.write_escaped_str(#tagkey)?;
+                __w.write_raw_bytes(b",")?;
                 __w.write_escaped_str(#content)?;
                 __w.write_raw_bytes(b":")?;
                 ::json_bourne::ToJson::write_json(__inner, __w)?;
@@ -1425,9 +1429,9 @@ fn to_json_variant_arm(
                 #name::#vname( #(#binds),* ) => {
                     __w.write_raw_bytes(b"{")?;
                     __w.write_escaped_str(#tag)?;
-                    __w.write_raw_bytes(b":\"")?;
-                    __w.write_str_raw(#tagkey)?;
-                    __w.write_raw_bytes(b"\",")?;
+                    __w.write_raw_bytes(b":")?;
+                    __w.write_escaped_str(#tagkey)?;
+                    __w.write_raw_bytes(b",")?;
                     __w.write_escaped_str(#content)?;
                     __w.write_raw_bytes(b":")?;
                     #writes
@@ -1443,9 +1447,9 @@ fn to_json_variant_arm(
                 #name::#vname { #pat } => {
                     __w.write_raw_bytes(b"{")?;
                     __w.write_escaped_str(#tag)?;
-                    __w.write_raw_bytes(b":\"")?;
-                    __w.write_str_raw(#tagkey)?;
-                    __w.write_raw_bytes(b"\",")?;
+                    __w.write_raw_bytes(b":")?;
+                    __w.write_escaped_str(#tagkey)?;
+                    __w.write_raw_bytes(b",")?;
                     __w.write_escaped_str(#content)?;
                     __w.write_raw_bytes(b":{")?;
                     #body
