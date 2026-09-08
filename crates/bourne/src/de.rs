@@ -395,6 +395,7 @@ pub use alloc_impls::{KeyCow, MapKey, key_to_cow};
 mod alloc_impls {
     extern crate alloc;
     use super::{FromJson, type_error};
+    use crate::escape::decoder::{EscapeDecoder, EscapeScratch};
     use crate::{Error, ErrorKind, JsonStr, Lexer, ValueKind};
     use alloc::borrow::Cow;
     use alloc::string::String;
@@ -455,14 +456,14 @@ mod alloc_impls {
                     // Escape path: the decoded form of a single-char
                     // string is at most 4 UTF-8 bytes, so decode onto
                     // the stack with the same escape walk the general
-                    // string path uses — no allocation. Overflow (a
-                    // multi-scalar string) simply truncates, and the
-                    // length check below rejects it.
+                    // string path uses — no allocation. A longer string
+                    // overflows the scratch, which reports TypeMismatch
+                    // rather than dropping the excess.
                     let raw = js
                         .raw_bytes(lex.input())
                         .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, lex.position()))?;
                     let mut scratch = EscapeScratch::<4>::new();
-                    decode_escapes_into(raw, &mut scratch)
+                    EscapeDecoder::decode(raw, &mut scratch)
                         .map_err(|kind| Error::new(kind, lex.position()))?;
                     let s = scratch
                         .as_str()
@@ -902,7 +903,7 @@ mod alloc_impls {
             .raw_bytes(lex.input())
             .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, lex.position()))?;
         let mut out = String::with_capacity(raw.len());
-        decode_escapes(raw, &mut out).map_err(|kind| Error::new(kind, lex.position()))?;
+        EscapeDecoder::decode(raw, &mut out).map_err(|kind| Error::new(kind, lex.position()))?;
         Ok(out)
     }
 
@@ -910,271 +911,6 @@ mod alloc_impls {
         fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
             T::vec_from_lex(lex)
         }
-    }
-
-    /// SIMD-accelerated single-byte search for `\\` inside a slice.
-    /// Returns the offset of the first backslash, or `None` if none.
-    ///
-    /// Why this exists: the literal-byte run inside `decode_escapes` is
-    /// the inner loop on strings with sparse escapes (~1 escape per 50
-    /// bytes is typical for production payloads). On profile, the scalar
-    /// `while i < n && bytes[i] != b'\\'` walk was 64% of `decode_owned`'s
-    /// time. SSE2's `_mm_cmpeq_epi8` + `_mm_movemask_epi8` walks 16 bytes
-    /// per iteration with the same correctness; on `x86_64` the gain is
-    /// ~10x for long literal runs.
-    ///
-    /// Same `unsafe_code` justification as the parent function: SSE2
-    /// is part of the `x86_64` ABI baseline, the `target_feature` arm
-    /// is statically enabled on `x86_64`, and the unsafe is mechanical
-    /// (intrinsics carry unsafe by signature, not by memory-safety).
-    #[allow(unsafe_code)]
-    #[inline]
-    fn find_backslash(bytes: &[u8]) -> Option<usize> {
-        // Two distinct cfg-gated function bodies — splitting them into
-        // separate items per arch avoids a `return` inside one cfg
-        // branch (which clippy flags as `needless_return`) while
-        // keeping each arm a single expression. The `bourne_no_simd`
-        // cfg disables the SIMD path (used by miri).
-        #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
-        {
-            find_backslash_sse2(bytes)
-        }
-        #[cfg(not(all(target_arch = "x86_64", not(bourne_no_simd))))]
-        {
-            bytes.iter().position(|&b| b == b'\\')
-        }
-    }
-
-    #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
-    #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-    #[inline]
-    fn find_backslash_sse2(bytes: &[u8]) -> Option<usize> {
-        use core::arch::x86_64::{
-            _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
-        };
-
-        let n = bytes.len();
-        let mut i = 0;
-        // SAFETY: SSE2 is part of the x86_64 ABI baseline; rustc's default
-        // target features include `+sse2`, so the intrinsics are statically
-        // available. `_mm_loadu_si128` is documented as accepting unaligned
-        // addresses, and the bounds check `i + 16 <= n` ensures the load
-        // stays inside `bytes`.
-        unsafe {
-            let backslash = _mm_set1_epi8(b'\\' as i8);
-            while i + 16 <= n {
-                let chunk = _mm_loadu_si128(bytes.as_ptr().add(i).cast());
-                let m = _mm_cmpeq_epi8(chunk, backslash);
-                let bits = _mm_movemask_epi8(m) as u32;
-                if bits != 0 {
-                    return Some(i + bits.trailing_zeros() as usize);
-                }
-                i += 16;
-            }
-        }
-        // Tail: scalar walk for the final <16 bytes.
-        bytes[i..]
-            .iter()
-            .position(|&b| b == b'\\')
-            .map(|off| i + off)
-    }
-
-    /// Decode a JSON string body into `dst`, expanding escape sequences.
-    ///
-    /// `raw` is the bytes between (but not including) the surrounding `"`s,
-    /// produced by [`Lexer::read_string_no_validate`]. This function is
-    /// the *only* validator on that path: it covers every escape sequence
-    /// (each escape is inspected to dispatch into the right branch), every
-    /// hex digit (via `parse_hex4`), and every surrogate pairing — so the
-    /// lexer can skip the redundant `validate_escapes` walk.
-    ///
-    /// Output is always valid UTF-8: the non-escape bytes are validated by
-    /// the lexer's inline UTF-8 walk, and `\u`-derived bytes come from
-    /// `encode_utf8` on a checked `char`.
-    ///
-    /// # Safety justification for the `unsafe` block
-    ///
-    /// The literal-byte path uses `core::str::from_utf8_unchecked`. The
-    /// invariant: every byte in `raw` reached this function via the lexer,
-    /// which validates UTF-8 inline against the RFC 3629 byte ranges as it
-    /// scans (see `Parser::consume_utf8_multibyte` and `scan_ascii_string_run`
-    /// in the lexer). The bytes between escapes are therefore valid
-    /// UTF-8 by construction — re-validating them in safe code is the
-    /// `from_utf8` re-walk that perf showed at ~12% of total time (the
-    /// audit on 2026-05-19 measured the safe variant at 1.68× slower,
-    /// pushing json-bourne below `serde_json` on the escape-heavy workload).
-    /// `json-bourne`'s `unsafe_code = "deny"` lint is overridden for this one
-    /// function with `#[allow]`, mirroring the same localized exception
-    /// the lexer makes at the equivalent site.
-    ///
-    /// The outer loop dispatches between literal-byte runs and escape
-    /// sequences. Escape decoding is delegated to `decode_simple_escape`
-    /// (the 8 single-byte arms) and `decode_unicode_escape_char` (the
-    /// `\u` branch including surrogate-pair logic) so this fn stays
-    /// inside the project's cyclomatic-complexity budget.
-    #[inline]
-    fn decode_escapes(raw: &[u8], dst: &mut String) -> Result<(), ErrorKind> {
-        decode_escapes_into(raw, dst)
-    }
-
-    /// The escape walk, generic over the destination so the `char`
-    /// path can decode onto a stack buffer without allocating.
-    #[allow(unsafe_code)]
-    fn decode_escapes_into<S: EscapeSink>(raw: &[u8], dst: &mut S) -> Result<(), ErrorKind> {
-        let mut i = 0;
-        while i < raw.len() {
-            if raw[i] != b'\\' {
-                // Literal byte run: find the next `\` (or end) and append the
-                // whole stretch in one push. This is the hot path for strings
-                // with sparse escapes (most production payloads).
-                //
-                // Use SIMD scan when available — the scalar walk that used
-                // to live here was 64% of total decode time on profile.
-                let start = i;
-                i = find_backslash(&raw[i..]).map_or(raw.len(), |off| i + off);
-                // SAFETY: see the function-level comment. The lexer
-                // validated these bytes as UTF-8 inline.
-                let chunk = unsafe { core::str::from_utf8_unchecked(&raw[start..i]) };
-                dst.push_str(chunk);
-                continue;
-            }
-            // At a backslash: need at least one more byte.
-            if i + 1 >= raw.len() {
-                return Err(ErrorKind::InvalidEscape);
-            }
-            if raw[i + 1] == b'u' {
-                let (ch, last) = decode_unicode_escape_char(raw, i + 1)?;
-                dst.push(ch);
-                i = last + 1;
-            } else {
-                dst.push(decode_simple_escape(raw[i + 1])?);
-                i += 2;
-            }
-        }
-        Ok(())
-    }
-
-    /// Decode a single non-`u` JSON escape byte to its char. The 8
-    /// match arms (`"`, `\\`, `/`, `b`, `f`, `n`, `r`, `t`) plus the
-    /// catch-all error arm live here so `decode_escapes` doesn't carry
-    /// their cyclomatic complexity.
-    #[inline]
-    const fn decode_simple_escape(b: u8) -> Result<char, ErrorKind> {
-        Ok(match b {
-            b'"' => '"',
-            b'\\' => '\\',
-            b'/' => '/',
-            b'b' => '\u{0008}',
-            b'f' => '\u{000C}',
-            b'n' => '\n',
-            b'r' => '\r',
-            b't' => '\t',
-            _ => return Err(ErrorKind::InvalidEscape),
-        })
-    }
-
-    /// Decode `\uXXXX` (and optionally a surrogate-pair `\uYYYY`) into
-    /// a single `char`. `i` points at the `u` of the first escape.
-    /// Returns the char and the index of the last hex digit consumed.
-    ///
-    /// Pure — no output-channel dependency — so the `char::FromJson`
-    /// path reuses it to decode onto the stack.
-    fn decode_unicode_escape_char(raw: &[u8], i: usize) -> Result<(char, usize), ErrorKind> {
-        if i + 5 > raw.len() {
-            return Err(ErrorKind::InvalidUnicodeEscape);
-        }
-        let cp = parse_hex4(&raw[i + 1..i + 5])?;
-        // After the four hex digits, the consumed-up-to index is i + 4.
-        let new_i = i + 4;
-        if (0xDC00..=0xDFFF).contains(&cp) {
-            return Err(ErrorKind::UnpairedSurrogate);
-        }
-        if (0xD800..=0xDBFF).contains(&cp) {
-            if new_i + 7 > raw.len() || raw[new_i + 1] != b'\\' || raw[new_i + 2] != b'u' {
-                return Err(ErrorKind::UnpairedSurrogate);
-            }
-            let low = parse_hex4(&raw[new_i + 3..new_i + 7])?;
-            if !(0xDC00..=0xDFFF).contains(&low) {
-                return Err(ErrorKind::UnpairedSurrogate);
-            }
-            let scalar = 0x1_0000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
-            let ch = char::from_u32(scalar).ok_or(ErrorKind::InvalidUnicodeEscape)?;
-            return Ok((ch, new_i + 6));
-        }
-        // BMP scalar — char::from_u32 always succeeds for values
-        // outside the surrogate range.
-        let ch = char::from_u32(cp).ok_or(ErrorKind::InvalidUnicodeEscape)?;
-        Ok((ch, new_i))
-    }
-
-    /// Destination for decoded escape output — a `String` on the general
-    /// path, a fixed stack buffer on the `char` path.
-    trait EscapeSink {
-        fn push(&mut self, c: char);
-        fn push_str(&mut self, s: &str);
-    }
-
-    impl EscapeSink for String {
-        #[inline]
-        fn push(&mut self, c: char) {
-            Self::push(self, c);
-        }
-        #[inline]
-        fn push_str(&mut self, s: &str) {
-            Self::push_str(self, s);
-        }
-    }
-
-    /// Fixed-capacity scratch for decoding at most `N` UTF-8 bytes.
-    /// A decoded single scalar is ≤ 4 bytes, so the `char` path uses
-    /// `EscapeScratch<4>` instead of allocating a `String`.
-    struct EscapeScratch<const N: usize> {
-        buf: [u8; N],
-        len: usize,
-    }
-
-    impl<const N: usize> EscapeScratch<N> {
-        const fn new() -> Self {
-            Self {
-                buf: [0; N],
-                len: 0,
-            }
-        }
-        fn as_str(&self) -> Option<&str> {
-            core::str::from_utf8(&self.buf[..self.len]).ok()
-        }
-    }
-
-    impl<const N: usize> EscapeSink for EscapeScratch<N> {
-        #[inline]
-        fn push(&mut self, c: char) {
-            let mut enc = [0u8; 4];
-            self.push_str(c.encode_utf8(&mut enc));
-        }
-        #[inline]
-        fn push_str(&mut self, s: &str) {
-            if let Some(rest) = self.buf.get_mut(self.len..self.len + s.len()) {
-                rest.copy_from_slice(s.as_bytes());
-                self.len += s.len();
-            }
-        }
-    }
-
-    /// Same digit-walk as the lexer's `parse_hex4`. Duplicated here
-    /// rather than re-exporting because it is a four-line helper and
-    /// keeping it private avoids widening the public API.
-    fn parse_hex4(bytes: &[u8]) -> Result<u32, ErrorKind> {
-        let mut v: u32 = 0;
-        for &b in bytes {
-            let d = match b {
-                b'0'..=b'9' => b - b'0',
-                b'a'..=b'f' => b - b'a' + 10,
-                b'A'..=b'F' => b - b'A' + 10,
-                _ => return Err(ErrorKind::InvalidUnicodeEscape),
-            };
-            v = (v << 4) | u32::from(d);
-        }
-        Ok(v)
     }
 
     // Ensure JsonStr stays imported even if a future refactor drops the

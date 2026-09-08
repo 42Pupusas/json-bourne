@@ -1,15 +1,12 @@
 //! JSON string escaping — the single implementation shared by every sink.
 //!
-//! One escape walk (`EscapeWriter`), one byte classifier (`needs_escape`),
-//! and the shared LUTs. Sinks drive it through `JsonWrite`, so the walk
-//! behaves as each sink needs: `StringSink`/`ByteSink`/`PrettyStringSink`
-//! emit multi-byte UTF-8 through `write_str_raw`; char-oriented sinks like
-//! `FmtWriteSink` stay byte-safe because the default
-//! `JsonWrite::write_escaped_str` routes literal runs through
-//! `write_str_raw` and only escape bytes through `write_byte` (audit 3.9).
-//!
-//! `de.rs` reuses `needs_escape` to split its escape decoding runs, the
-//! inverse of what happens here.
+//! One escape walk, one byte classifier (`needs_escape`), and the shared
+//! LUTs. Sinks drive it through `JsonWrite`, so the walk behaves as each
+//! sink needs: `StringSink`/`ByteSink`/`PrettyStringSink` emit multi-byte
+//! UTF-8 through `write_str_raw`; char-oriented sinks like `FmtWriteSink`
+//! stay byte-safe because the default `JsonWrite::write_escaped_str`
+//! routes literal runs through `write_str_raw` and only escape bytes
+//! through `write_byte` (audit 3.9).
 
 use crate::JsonWrite;
 

@@ -19,6 +19,7 @@
 //! machine.
 
 use crate::error::{Error, ErrorKind, Position};
+use crate::escape::validator::EscapeValidator;
 use crate::event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 
 /// `i64::MIN`'s magnitude as a `u64`: `i64::MAX as u64 + 1`. This is the
@@ -405,7 +406,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
                     self.bump(); // closing quote
                     if validate && has_escapes {
                         let raw = &self.input[start..end];
-                        validate_escapes(raw).map_err(|kind| self.err(kind))?;
+                        EscapeValidator::check(raw).map_err(|kind| self.err(kind))?;
                     }
                     #[allow(clippy::cast_possible_truncation)]
                     return Ok(JsonStr::new(start as u32, end as u32, has_escapes));
@@ -1654,59 +1655,4 @@ const fn utf8_leading_byte_info(b: u8) -> Option<(u8, u8, u8)> {
         0xF4 => Some((3, 0x80, 0x8F)),
         _ => None,
     }
-}
-
-fn validate_escapes(raw: &[u8]) -> Result<(), ErrorKind> {
-    let mut i = 0;
-    while i < raw.len() {
-        let b = raw[i];
-        if b == b'\\' {
-            i += 1;
-            if i >= raw.len() {
-                return Err(ErrorKind::InvalidEscape);
-            }
-            match raw[i] {
-                b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => i += 1,
-                b'u' => {
-                    if i + 5 > raw.len() {
-                        return Err(ErrorKind::InvalidUnicodeEscape);
-                    }
-                    let cp = parse_hex4(&raw[i + 1..i + 5])?;
-                    i += 5;
-                    if (0xD800..=0xDBFF).contains(&cp) {
-                        if i + 6 > raw.len() || raw[i] != b'\\' || raw[i + 1] != b'u' {
-                            return Err(ErrorKind::UnpairedSurrogate);
-                        }
-                        let low = parse_hex4(&raw[i + 2..i + 6])?;
-                        if !(0xDC00..=0xDFFF).contains(&low) {
-                            return Err(ErrorKind::UnpairedSurrogate);
-                        }
-                        i += 6;
-                    } else if (0xDC00..=0xDFFF).contains(&cp) {
-                        return Err(ErrorKind::UnpairedSurrogate);
-                    }
-                }
-                _ => return Err(ErrorKind::InvalidEscape),
-            }
-        } else if b < 0x20 {
-            return Err(ErrorKind::ControlCharInString);
-        } else {
-            i += 1;
-        }
-    }
-    Ok(())
-}
-
-fn parse_hex4(bytes: &[u8]) -> Result<u32, ErrorKind> {
-    let mut v: u32 = 0;
-    for &b in bytes {
-        let d = match b {
-            b'0'..=b'9' => b - b'0',
-            b'a'..=b'f' => b - b'a' + 10,
-            b'A'..=b'F' => b - b'A' + 10,
-            _ => return Err(ErrorKind::InvalidUnicodeEscape),
-        };
-        v = (v << 4) | u32::from(d);
-    }
-    Ok(v)
 }
