@@ -568,8 +568,10 @@ fn from_json_enum(
 ) -> syn::Result<proc_macro2::TokenStream> {
     match container.enum_mode() {
         EnumMode::External => from_json_enum_external(name, variants, container),
-        EnumMode::Internal(tag) => from_json_enum_internal(name, variants, &tag),
-        EnumMode::Adjacent(tag, content) => from_json_enum_adjacent(name, variants, &tag, &content),
+        EnumMode::Internal(tag) => from_json_enum_internal(name, variants, container, &tag),
+        EnumMode::Adjacent(tag, content) => {
+            from_json_enum_adjacent(name, variants, container, &tag, &content)
+        }
         EnumMode::Untagged => from_json_enum_untagged(name, variants),
     }
 }
@@ -746,13 +748,14 @@ fn from_json_enum_external(
 fn from_json_enum_internal(
     name: &Ident,
     variants: &syn::punctuated::Punctuated<syn::Variant, syn::Token![,]>,
+    container: &ContainerAttrs,
     tag: &str,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut arms = Vec::new();
     for v in variants {
         let vname = &v.ident;
         let rename = parse_variant_rename(&v.attrs)?;
-        let key = key_expr(vname, &rename, &None);
+        let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
         match classify_variant(v) {
             VShape::Unit => arms.push(quote! {
@@ -869,6 +872,7 @@ fn internal_struct_variant_read(
 fn from_json_enum_adjacent(
     name: &Ident,
     variants: &syn::punctuated::Punctuated<syn::Variant, syn::Token![,]>,
+    container: &ContainerAttrs,
     tag: &str,
     content: &str,
 ) -> syn::Result<proc_macro2::TokenStream> {
@@ -876,7 +880,7 @@ fn from_json_enum_adjacent(
     for v in variants {
         let vname = &v.ident;
         let rename = parse_variant_rename(&v.attrs)?;
-        let key = key_expr(vname, &rename, &None);
+        let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
         match classify_variant(v) {
             VShape::Unit => arms.push(quote! {

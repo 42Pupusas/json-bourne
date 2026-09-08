@@ -162,3 +162,105 @@ fn enum_json_roundtrips_newtype() {
     assert_eq!(v, Cmd::SetLevel(3));
     assert_eq!(to_string(&v).unwrap(), src);
 }
+
+// --- internally-tagged enums: rename_all applies on parse too -------------
+// Regression for audit 3.4: the parse side passed `&None` for rename_all,
+// so these enums serialized their cased tags and then rejected their own
+// output with UnknownField.
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(tag = "kind", rename_all = "snake_case")]
+enum InternalCased {
+    JobDone,
+    Status { status_code: u32 },
+}
+
+#[test]
+fn internal_tag_unit_accepts_cased_tag() {
+    let v: InternalCased = parse_str(r#"{"kind":"job_done"}"#).unwrap();
+    assert_eq!(v, InternalCased::JobDone);
+}
+
+#[test]
+fn internal_tag_unit_rejects_original_name() {
+    let err = parse_str::<InternalCased>(r#"{"kind":"JobDone"}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+#[test]
+fn internal_tag_struct_variant_accepts_cased_tag() {
+    let v: InternalCased = parse_str(r#"{"kind":"status","status_code":200}"#).unwrap();
+    assert_eq!(v, InternalCased::Status { status_code: 200 });
+}
+
+#[test]
+fn internal_tag_roundtrips() {
+    for v in [
+        InternalCased::JobDone,
+        InternalCased::Status { status_code: 404 },
+    ] {
+        let s = to_string(&v).unwrap();
+        let back: InternalCased = parse_str(&s).expect("own output must re-parse");
+        assert_eq!(back, v, "round-trip through {s}");
+    }
+}
+
+// --- adjacently-tagged enums: rename_all applies on parse too --------------
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(tag = "kind", content = "data", rename_all = "kebab-case")]
+enum AdjacentCased {
+    PlainValue,
+    WithPayload(u64),
+}
+
+#[test]
+fn adjacent_tag_unit_accepts_cased_tag() {
+    let v: AdjacentCased = parse_str(r#"{"kind":"plain-value"}"#).unwrap();
+    assert_eq!(v, AdjacentCased::PlainValue);
+}
+
+#[test]
+fn adjacent_tag_newtype_accepts_cased_tag() {
+    let v: AdjacentCased = parse_str(r#"{"kind":"with-payload","data":9}"#).unwrap();
+    assert_eq!(v, AdjacentCased::WithPayload(9));
+}
+
+#[test]
+fn adjacent_tag_content_first_still_accepts_cased_tag() {
+    let v: AdjacentCased = parse_str(r#"{"data":5,"kind":"with-payload"}"#).unwrap();
+    assert_eq!(v, AdjacentCased::WithPayload(5));
+}
+
+#[test]
+fn adjacent_tag_rejects_original_name() {
+    let err = parse_str::<AdjacentCased>(r#"{"kind":"WithPayload","data":9}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+#[test]
+fn adjacent_tag_roundtrips() {
+    for v in [AdjacentCased::PlainValue, AdjacentCased::WithPayload(12)] {
+        let s = to_string(&v).unwrap();
+        let back: AdjacentCased = parse_str(&s).expect("own output must re-parse");
+        assert_eq!(back, v, "round-trip through {s}");
+    }
+}
+
+// --- untagged is unaffected: there is no tag to case -----------------------
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(untagged, rename_all = "snake_case")]
+enum UntaggedCased {
+    Num(u64),
+    Text(String),
+}
+
+#[test]
+fn untagged_still_matches_by_shape() {
+    assert_eq!(
+        parse_str::<UntaggedCased>("7").unwrap(),
+        UntaggedCased::Num(7)
+    );
+    assert_eq!(
+        parse_str::<UntaggedCased>(r#""hi""#).unwrap(),
+        UntaggedCased::Text(String::from("hi"))
+    );
+}

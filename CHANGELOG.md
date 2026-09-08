@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `#[bourne(tag = "…", rename_all = "…")]` (internally tagged) and the adjacent
+  `tag`/`content` form now apply `rename_all` (and per-variant `rename`) when
+  parsing, matching the serialize side. Previously these enums emitted their
+  cased variant tags and then rejected their own output with `UnknownField`;
+  round-trips work for all four tagging modes now.
 - `Vec<u64>` / `Vec<usize>` and `u64`/`usize` fields in derived structs no
   longer reject values above `i64::MAX`. The fused array fast path went through
   the signed parser and failed on exactly the values `u64` exists to hold;
