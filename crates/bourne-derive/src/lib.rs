@@ -139,8 +139,11 @@ fn parse_container_attrs(attrs: &[syn::Attribute]) -> syn::Result<ContainerAttrs
 // Helpers shared by both directions.
 // ---------------------------------------------------------------------------
 
-/// Is this type spelled `Option<...>`? (Textual, matching the macro's
-/// leading-`Option`-ident detection — good enough and identical in effect.)
+/// Is this type spelled `Option<...>`? Textual on the last path segment,
+/// like the macro's detection generally. A type alias
+/// (`type Maybe<T> = Option<T>`) therefore reads as required — same
+/// limitation as serde's derive, so behavioral compatibility wins over
+/// deeper type resolution here.
 fn is_option(ty: &Type) -> bool {
     if let Type::Path(tp) = ty {
         if let Some(seg) = tp.path.segments.last() {

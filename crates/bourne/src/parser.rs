@@ -55,13 +55,23 @@ impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
     /// # Panics
     ///
     /// Panics if `input.len()` exceeds `MAX_INPUT_LEN`. See
-    /// [`Lexer::new`].
+    /// [`Lexer::new`]; [`Self::try_new`] returns `Err` instead.
     #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
         Self {
             lex: Lexer::new(input),
             state: State::Start,
         }
+    }
+
+    /// Construct a parser over `input`, returning
+    /// [`ErrorKind::InputTooLarge`] instead of panicking when the input
+    /// exceeds [`crate::MAX_INPUT_LEN`].
+    pub fn try_new(input: &'input [u8]) -> Result<Self, Error> {
+        Ok(Self {
+            lex: Lexer::try_new(input)?,
+            state: State::Start,
+        })
     }
 
     /// Borrow the underlying lexer mutably. Typed consumers use this to

@@ -23,13 +23,15 @@
 //! Each element costs exactly one `T::from_lex` plus one `array_continue`
 //! — no per-element `next_event`, no `match self.state`.
 
-use crate::{Error, ErrorKind, Event, JsonNum, Lexer, Parser, ValueKind};
+use crate::{Error, ErrorKind, Event, JsonNum, Lexer, ValueKind};
 
 /// Parse a value of type `T` from a slice of JSON bytes.
+///
+/// Inputs above [`crate::MAX_INPUT_LEN`] (~2 GB) return
+/// [`ErrorKind::InputTooLarge`] rather than panicking.
 pub fn parse<'input, T: FromJson<'input>>(input: &'input [u8]) -> Result<T, Error> {
-    let mut p: Parser<'input> = Parser::new(input);
-    let lex = p.lexer();
-    let value = T::from_lex(lex)?;
+    let mut lex = Lexer::try_new(input)?;
+    let value = T::from_lex(&mut lex)?;
     lex.finish()?;
     Ok(value)
 }
@@ -450,12 +452,22 @@ mod alloc_impls {
                         return single_char(borrowed)
                             .ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch));
                     }
-                    // Escape path: decode into a small scratch buffer.
-                    // Most escape sequences produce ≤4 UTF-8 bytes, so a
-                    // small allocation is fine; we still error if the
-                    // decoded content isn't exactly one scalar.
-                    let decoded = decode_owned(js, lex)?;
-                    single_char(&decoded).ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch))
+                    // Escape path: the decoded form of a single-char
+                    // string is at most 4 UTF-8 bytes, so decode onto
+                    // the stack with the same escape walk the general
+                    // string path uses — no allocation. Overflow (a
+                    // multi-scalar string) simply truncates, and the
+                    // length check below rejects it.
+                    let raw = js
+                        .raw_bytes(lex.input())
+                        .ok_or_else(|| Error::new(ErrorKind::InvalidEscape, lex.position()))?;
+                    let mut scratch = EscapeScratch::<4>::new();
+                    decode_escapes_into(raw, &mut scratch)
+                        .map_err(|kind| Error::new(kind, lex.position()))?;
+                    let s = scratch
+                        .as_str()
+                        .ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch))?;
+                    single_char(s).ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch))
                 }
                 _ => Err(type_error(lex, ErrorKind::ExpectedString)),
             }
@@ -1018,11 +1030,18 @@ mod alloc_impls {
     ///
     /// The outer loop dispatches between literal-byte runs and escape
     /// sequences. Escape decoding is delegated to `decode_simple_escape`
-    /// (the 8 single-byte arms) and `decode_unicode_escape` (the `\u`
-    /// branch including surrogate-pair logic) so this fn stays inside
-    /// the project's cyclomatic-complexity budget.
-    #[allow(unsafe_code)]
+    /// (the 8 single-byte arms) and `decode_unicode_escape_char` (the
+    /// `\u` branch including surrogate-pair logic) so this fn stays
+    /// inside the project's cyclomatic-complexity budget.
+    #[inline]
     fn decode_escapes(raw: &[u8], dst: &mut String) -> Result<(), ErrorKind> {
+        decode_escapes_into(raw, dst)
+    }
+
+    /// The escape walk, generic over the destination so the `char`
+    /// path can decode onto a stack buffer without allocating.
+    #[allow(unsafe_code)]
+    fn decode_escapes_into<S: EscapeSink>(raw: &[u8], dst: &mut S) -> Result<(), ErrorKind> {
         let mut i = 0;
         while i < raw.len() {
             if raw[i] != b'\\' {
@@ -1040,17 +1059,18 @@ mod alloc_impls {
                 dst.push_str(chunk);
                 continue;
             }
-            // At a backslash. Need at least one more byte.
-            i += 1;
-            if i >= raw.len() {
+            // At a backslash: need at least one more byte.
+            if i + 1 >= raw.len() {
                 return Err(ErrorKind::InvalidEscape);
             }
-            if raw[i] == b'u' {
-                i = decode_unicode_escape(raw, i, dst)?;
+            if raw[i + 1] == b'u' {
+                let (ch, last) = decode_unicode_escape_char(raw, i + 1)?;
+                dst.push(ch);
+                i = last + 1;
             } else {
-                dst.push(decode_simple_escape(raw[i])?);
+                dst.push(decode_simple_escape(raw[i + 1])?);
+                i += 2;
             }
-            i += 1;
         }
         Ok(())
     }
@@ -1075,53 +1095,90 @@ mod alloc_impls {
     }
 
     /// Decode `\uXXXX` (and optionally a surrogate-pair `\uYYYY`) into
-    /// a char, push it to `dst`, and return the new index of the last
-    /// byte consumed inside `raw`. `i` points at the `u` of the first
-    /// escape. Returns the index of the last hex digit (the caller
-    /// bumps by 1 to move past it).
-    fn decode_unicode_escape(raw: &[u8], i: usize, dst: &mut String) -> Result<usize, ErrorKind> {
+    /// a single `char`. `i` points at the `u` of the first escape.
+    /// Returns the char and the index of the last hex digit consumed.
+    ///
+    /// Pure — no output-channel dependency — so the `char::FromJson`
+    /// path reuses it to decode onto the stack.
+    fn decode_unicode_escape_char(raw: &[u8], i: usize) -> Result<(char, usize), ErrorKind> {
         if i + 5 > raw.len() {
             return Err(ErrorKind::InvalidUnicodeEscape);
         }
         let cp = parse_hex4(&raw[i + 1..i + 5])?;
         // After the four hex digits, the consumed-up-to index is i + 4.
         let new_i = i + 4;
-        if (0xD800..=0xDBFF).contains(&cp) {
-            return decode_surrogate_pair(raw, new_i, cp, dst);
-        }
         if (0xDC00..=0xDFFF).contains(&cp) {
             return Err(ErrorKind::UnpairedSurrogate);
+        }
+        if (0xD800..=0xDBFF).contains(&cp) {
+            if new_i + 7 > raw.len() || raw[new_i + 1] != b'\\' || raw[new_i + 2] != b'u' {
+                return Err(ErrorKind::UnpairedSurrogate);
+            }
+            let low = parse_hex4(&raw[new_i + 3..new_i + 7])?;
+            if !(0xDC00..=0xDFFF).contains(&low) {
+                return Err(ErrorKind::UnpairedSurrogate);
+            }
+            let scalar = 0x1_0000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+            let ch = char::from_u32(scalar).ok_or(ErrorKind::InvalidUnicodeEscape)?;
+            return Ok((ch, new_i + 6));
         }
         // BMP scalar — char::from_u32 always succeeds for values
         // outside the surrogate range.
         let ch = char::from_u32(cp).ok_or(ErrorKind::InvalidUnicodeEscape)?;
-        dst.push(ch);
-        Ok(new_i)
+        Ok((ch, new_i))
     }
 
-    /// Combine a high surrogate at position `i` with the low surrogate
-    /// at `i+3..i+7`. Caller has validated the high half is in
-    /// 0xD800..=0xDBFF. Returns the index of the last hex digit of the
-    /// low half so the outer loop can resume.
-    fn decode_surrogate_pair(
-        raw: &[u8],
-        i: usize,
-        cp: u32,
-        dst: &mut String,
-    ) -> Result<usize, ErrorKind> {
-        if i + 7 > raw.len() || raw[i + 1] != b'\\' || raw[i + 2] != b'u' {
-            return Err(ErrorKind::UnpairedSurrogate);
+    /// Destination for decoded escape output — a `String` on the general
+    /// path, a fixed stack buffer on the `char` path.
+    trait EscapeSink {
+        fn push(&mut self, c: char);
+        fn push_str(&mut self, s: &str);
+    }
+
+    impl EscapeSink for String {
+        #[inline]
+        fn push(&mut self, c: char) {
+            Self::push(self, c);
         }
-        let low = parse_hex4(&raw[i + 3..i + 7])?;
-        if !(0xDC00..=0xDFFF).contains(&low) {
-            return Err(ErrorKind::UnpairedSurrogate);
+        #[inline]
+        fn push_str(&mut self, s: &str) {
+            Self::push_str(self, s);
         }
-        let high_off = cp - 0xD800;
-        let low_off = low - 0xDC00;
-        let scalar = 0x1_0000 + (high_off << 10) + low_off;
-        let ch = char::from_u32(scalar).ok_or(ErrorKind::InvalidUnicodeEscape)?;
-        dst.push(ch);
-        Ok(i + 6) // skip `\uXXXX`
+    }
+
+    /// Fixed-capacity scratch for decoding at most `N` UTF-8 bytes.
+    /// A decoded single scalar is ≤ 4 bytes, so the `char` path uses
+    /// `EscapeScratch<4>` instead of allocating a `String`.
+    struct EscapeScratch<const N: usize> {
+        buf: [u8; N],
+        len: usize,
+    }
+
+    impl<const N: usize> EscapeScratch<N> {
+        const fn new() -> Self {
+            Self {
+                buf: [0; N],
+                len: 0,
+            }
+        }
+        fn as_str(&self) -> Option<&str> {
+            core::str::from_utf8(&self.buf[..self.len]).ok()
+        }
+    }
+
+    impl<const N: usize> EscapeSink for EscapeScratch<N> {
+        #[inline]
+        fn push(&mut self, c: char) {
+            let mut enc = [0u8; 4];
+            self.push_str(c.encode_utf8(&mut enc));
+        }
+        #[inline]
+        fn push_str(&mut self, s: &str) {
+            if let Some(rest) = self.buf.get_mut(self.len..self.len + s.len()) {
+                rest.copy_from_slice(s.as_bytes());
+                self.len += s.len();
+            }
+        }
     }
 
     /// Same digit-walk as the lexer's `parse_hex4`. Duplicated here

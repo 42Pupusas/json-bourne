@@ -17,6 +17,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand 89.7 ns.
 
 ### Fixed
+- `char` deserialization of escape-bearing single-char strings allocated a
+  `String` for a decoded value at most 4 bytes; it now decodes onto a
+  stack scratch through the same escape walk general strings use.
+- Inputs over `MAX_INPUT_LEN` (~2 GiB) reached `parse` as a panic via
+  `Lexer::new`'s const `assert!`; they now return
+  `ErrorKind::InputTooLarge` from `parse`, and `Lexer::try_new` /
+  `Parser::try_new` expose the same `Result` construction (the panicking
+  `new` constructors remain for const callers) (audit 3.15).
+- `JsonWrite::write_raw_bytes` `expect`ed valid UTF-8 on a `pub` method
+  fed by user-written `ToJson` impls; non-UTF-8 input now returns `Err`
+  (`ErrorKind::InvalidUtf8`) through a new `on_invalid_utf8` hook each
+  sink maps into its own error type (audit 3.15). The `is_option` derive
+  helper documents its known alias blindness (`type Maybe<T> =
+  Option<T>` reads as required — same limitation as serde).
 - Variant tags in derived enums were written through the raw byte-literal
   writer, so a `#[bourne(rename = "a\"b")]` produced invalid JSON (`"a"b"`),
   and the bare-string unit-variant parse path rejected every escaped tag.
@@ -47,6 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the real limitation is that a borrow-only key type cannot hold a decoded
   key. A dedicated `ErrorKind::BorrowedKeyNeedsDecode` names the actual
   problem and suggests the owning alternatives (audit 3.13).
+### Changed
+- Inputs over `MAX_INPUT_LEN` (~2 GiB) reach `parse` as
+  `ErrorKind::InputTooLarge` instead of panicking; `Lexer::try_new` and
+  `Parser::try_new` expose the same `Result`-returning construction, and
+  the panicking `new` constructors remain for const callers (audit 3.15).
+- `JsonWrite::write_raw_bytes` returns `Err` (`ErrorKind::InvalidUtf8`, via
+  a new required `on_invalid_utf8` hook each sink maps into its own error
+  type) for non-UTF-8 input instead of `expect`-panicking — the bytes can
+  come from a user-written `ToJson` impl the compiler cannot verify (audit
+  3.15).
+- `char` deserialization decodes escapes onto a 4-byte stack scratch via
+  the same escape walk as general strings instead of allocating a `String`
+  for a value at most 4 bytes (audit 3.15); the `is_option` derive helper
+  documents its known alias blindness (`type Maybe<T> = Option<T>` reads
+  as required — same limitation as serde).
 - `Parser::parse_i64_value` / `parse_str_value` did not update the grammar
   state, so trailing data after a scalar root document went undetected
   (`Parser::new(b"1 2").parse_i64_value()` followed by `next_event` yielded a

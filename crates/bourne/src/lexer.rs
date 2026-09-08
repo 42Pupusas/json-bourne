@@ -197,7 +197,8 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     /// representation in `JsonStr`/`JsonNum` reserves the top bit of a `u32`
     /// for `has_escapes`, so positions are limited to 31 bits. Real-world
     /// JSON documents are far smaller than this; consumers needing larger
-    /// streams should chunk and parse incrementally.
+    /// streams should chunk and parse incrementally. Use [`Self::try_new`]
+    /// for a `Result`-returning constructor.
     #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
         assert!(input.len() <= MAX_INPUT_LEN, "input exceeds MAX_INPUT_LEN");
@@ -206,6 +207,15 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
             offset: 0,
             stack: Stack::new(),
         }
+    }
+
+    /// Construct a lexer over `input`, returning [`ErrorKind::InputTooLarge`]
+    /// instead of panicking when the input exceeds [`MAX_INPUT_LEN`].
+    pub const fn try_new(input: &'input [u8]) -> Result<Self, Error> {
+        if input.len() > MAX_INPUT_LEN {
+            return Err(Error::new(ErrorKind::InputTooLarge, Position::START));
+        }
+        Ok(Self::new(input))
     }
 
     #[must_use]

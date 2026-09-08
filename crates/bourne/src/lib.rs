@@ -3135,6 +3135,10 @@ mod unsafe_boundary_tests {
             Ok(())
         }
 
+        fn on_invalid_utf8(&mut self) -> Self::Error {
+            crate::Error::new(crate::ErrorKind::InvalidUtf8, crate::Position::START)
+        }
+
         fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
             if f.is_nan() {
                 // Tolerant: record the sentinel so the test can tell a
@@ -3174,6 +3178,54 @@ mod unsafe_boundary_tests {
         };
         f64::NAN.write_json(&mut sink).unwrap();
         assert!(sink.saw_bytes);
+    }
+
+    /// Audit 3.15: `write_raw_bytes` with non-UTF-8 input returns `Err`
+    /// instead of panicking — a custom `ToJson` impl feeding arbitrary
+    /// bytes must not be able to panic the serializer.
+    #[test]
+    fn write_raw_bytes_rejects_non_utf8_with_err() {
+        struct BareSink {
+            out: String,
+        }
+        impl JsonWrite for BareSink {
+            type Error = crate::Error;
+
+            fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
+                self.out.push(b as char);
+                Ok(())
+            }
+            fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
+                self.out.push_str(s);
+                Ok(())
+            }
+            fn on_invalid_utf8(&mut self) -> Self::Error {
+                crate::Error::new(crate::ErrorKind::InvalidUtf8, crate::Position::START)
+            }
+            fn write_float_f64(&mut self, _f: f64) -> Result<(), Self::Error> {
+                unimplemented!()
+            }
+        }
+
+        let mut sink = BareSink { out: String::new() };
+        // 0x80 alone is never valid UTF-8.
+        let err = sink.write_raw_bytes(&[b'h', 0x80, b'i']).unwrap_err();
+        assert_eq!(err.kind, crate::ErrorKind::InvalidUtf8);
+        // Valid input still writes through.
+        sink.write_raw_bytes(b"ok").unwrap();
+        assert_eq!(sink.out, "ok");
+    }
+
+    /// Audit 3.15: the `InputTooLarge` kind carries a helpful message,
+    /// and `try_new` accepts normal inputs through the `Result` API.
+    #[test]
+    fn oversized_input_api_returns_err_not_panic() {
+        let lex: Lexer<'_> = Lexer::try_new(b"[1]").expect("small input parses");
+        assert_eq!(lex.input().len(), 3);
+        assert_eq!(
+            ErrorKind::InputTooLarge.to_string(),
+            "input exceeds the maximum supported JSON document size"
+        );
     }
 
     /// `PrettyStringSink::write_float_f64` — covers the pretty-sink

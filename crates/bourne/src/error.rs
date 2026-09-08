@@ -88,6 +88,9 @@ pub enum ErrorKind {
     MissingField,
     UnknownField,
     NonFiniteFloat,
+    /// Input exceeds [`crate::MAX_INPUT_LEN`] (~2 GB) — a representational
+    /// limit of the packed-offset `Event`, not a document problem.
+    InputTooLarge,
 }
 
 impl ErrorKind {
@@ -135,6 +138,7 @@ impl ErrorKind {
             Self::MissingField => "missing required field",
             Self::UnknownField => "unknown field",
             Self::NonFiniteFloat => "non-finite float not representable in JSON",
+            Self::InputTooLarge => "input exceeds the maximum supported JSON document size",
             _ => "error",
         }
     }

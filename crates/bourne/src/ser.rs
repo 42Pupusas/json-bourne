@@ -97,14 +97,23 @@ pub trait JsonWrite {
     /// (e.g. `b"{\"id\":"`) into a single write. The default routes
     /// through [`Self::write_str_raw`]; byte-oriented sinks like
     /// [`ByteSink`] override to avoid the `&str` conversion.
-    //
-    // The `expect` is unreachable: callers feed compile-time byte-string
-    // literals from `concat!` / `b"..."`, which are ASCII by construction.
+    ///
+    /// Non-UTF-8 input returns [`ErrorKind::InvalidUtf8`] rather than
+    /// panicking — the contents may come from a user-written `ToJson`
+    /// impl, which the compiler cannot verify.
     #[inline]
     fn write_raw_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error> {
-        let s = core::str::from_utf8(b).expect("write_raw_bytes input must be valid UTF-8");
-        self.write_str_raw(s)
+        match core::str::from_utf8(b) {
+            Ok(s) => self.write_str_raw(s),
+            Err(_) => Err(self.on_invalid_utf8()),
+        }
     }
+
+    /// Error produced when [`Self::write_raw_bytes`] receives non-UTF-8
+    /// input — the contents may come from a user-written `ToJson` impl,
+    /// which the compiler cannot verify. Required because each sink owns
+    /// its error type; map to your [`Self::Error`]'s closest equivalent.
+    fn on_invalid_utf8(&mut self) -> Self::Error;
 
     /// Open a JSON object (`{`).
     ///
@@ -283,6 +292,11 @@ impl JsonWrite for StringSink<'_> {
         Ok(())
     }
 
+    #[inline]
+    fn on_invalid_utf8(&mut self) -> Self::Error {
+        Error::new(ErrorKind::InvalidUtf8, Position::START)
+    }
+
     /// Single shared escape walk ([`crate::escape`]); this sink keeps
     /// the default quotes-via-`write_byte` shape.
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
@@ -362,6 +376,11 @@ impl JsonWrite for ByteSink<'_> {
     fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
         self.out.extend_from_slice(s.as_bytes());
         Ok(())
+    }
+
+    #[inline]
+    fn on_invalid_utf8(&mut self) -> Self::Error {
+        Error::new(ErrorKind::InvalidUtf8, Position::START)
     }
 
     #[inline]
@@ -831,6 +850,11 @@ impl<W: core::fmt::Write + ?Sized> JsonWrite for FmtWriteSink<'_, W> {
     }
 
     #[inline]
+    fn on_invalid_utf8(&mut self) -> Self::Error {
+        Error::new(ErrorKind::InvalidUtf8, Position::START)
+    }
+
+    #[inline]
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
         if !f.is_finite() {
             return Err(Error::new(ErrorKind::NonFiniteFloat, Position::START));
@@ -900,6 +924,14 @@ impl<W: std::io::Write + ?Sized> JsonWrite for IoWriteSink<'_, W> {
     #[inline]
     fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
         self.out.write_all(&[b])
+    }
+
+    #[inline]
+    fn on_invalid_utf8(&mut self) -> Self::Error {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            ErrorKind::InvalidUtf8.to_string(),
+        )
     }
 
     #[inline]
@@ -1123,6 +1155,11 @@ impl JsonWrite for PrettyStringSink<'_> {
         self.flush_pending_open();
         self.out.push_str(s);
         Ok(())
+    }
+
+    #[inline]
+    fn on_invalid_utf8(&mut self) -> Self::Error {
+        Error::new(ErrorKind::InvalidUtf8, Position::START)
     }
 
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
