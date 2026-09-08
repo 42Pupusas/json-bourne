@@ -59,6 +59,68 @@ pub const fn needs_escape(b: u8) -> bool {
     b == b'"' || b == b'\\' || b < 0x20
 }
 
+/// Offset of the first byte in `bytes` that [`needs_escape`], if any.
+///
+/// On `x86_64` a 16-byte SSE2 compare walks the run — one vector load
+/// and two compares (`"`, `\`) plus an unsigned `< 0x20` test folded as
+/// `_mm_cmpeq_epi8(_mm_and_si128(v, 0xE0), 0)` trick-free `min` compare
+/// — per 16 bytes, replacing the per-byte scalar walk that dominated
+/// profiles of escape-sparse strings (audit 4.5.1; same shape as
+/// `de.rs`'s `find_backslash`).
+#[inline]
+pub fn find_escape(bytes: &[u8]) -> Option<usize> {
+    #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
+    {
+        find_escape_sse2(bytes)
+    }
+    #[cfg(not(all(target_arch = "x86_64", not(bourne_no_simd))))]
+    {
+        bytes.iter().position(|&b| needs_escape(b))
+    }
+}
+
+#[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
+#[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+#[inline]
+fn find_escape_sse2(bytes: &[u8]) -> Option<usize> {
+    use core::arch::x86_64::{
+        _mm_cmpeq_epi8, _mm_loadu_si128, _mm_min_epu8, _mm_movemask_epi8, _mm_or_si128,
+        _mm_set1_epi8,
+    };
+
+    let n = bytes.len();
+    let mut i = 0;
+    // SAFETY: SSE2 is part of the x86_64 ABI baseline; `_mm_loadu_si128`
+    // accepts unaligned addresses, and `i + 16 <= n` keeps the load in
+    // bounds.
+    unsafe {
+        let quote = _mm_set1_epi8(b'"' as i8);
+        let backslash = _mm_set1_epi8(b'\\' as i8);
+        // Control bytes are < 0x20: unsigned min with 0x1F equals the
+        // byte itself only when it is ≤ 0x1F, so comparing the min back
+        // against the chunk tests the whole class.
+        let ctrl = _mm_set1_epi8(0x1F);
+        while i + 16 <= n {
+            let chunk = _mm_loadu_si128(bytes.as_ptr().add(i).cast());
+            let is_quote = _mm_cmpeq_epi8(chunk, quote);
+            let is_backslash = _mm_cmpeq_epi8(chunk, backslash);
+            let is_ctrl = _mm_cmpeq_epi8(_mm_min_epu8(chunk, ctrl), chunk);
+            let mask =
+                _mm_movemask_epi8(_mm_or_si128(_mm_or_si128(is_quote, is_backslash), is_ctrl))
+                    as u32;
+            if mask != 0 {
+                return Some(i + mask.trailing_zeros() as usize);
+            }
+            i += 16;
+        }
+    }
+    // Tail: scalar walk for the final <16 bytes.
+    bytes[i..]
+        .iter()
+        .position(|&b| needs_escape(b))
+        .map(|off| i + off)
+}
+
 /// Write `s` as a complete JSON string — quotes included — escaping
 /// quote, backslash and control bytes, copying every other stretch as a
 /// literal run through `write_str_raw`.
@@ -71,22 +133,22 @@ pub fn write_escaped<W: JsonWrite + ?Sized>(w: &mut W, s: &str) -> Result<(), W:
 /// Write the *body* of a JSON string without the surrounding quotes.
 ///
 /// Same walk as [`write_escaped`], minus the outer writes, for callers
-/// that have already emitted the opening quote.
+/// that have already emitted the opening quote. Runs of safe bytes are
+/// located with [`find_escape`] (SSE2 on `x86_64`) rather than a per-byte
+/// scan, then copied in one `write_str_raw` each.
 pub fn write_escaped_body<W: JsonWrite + ?Sized>(w: &mut W, s: &str) -> Result<(), W::Error> {
     let bytes = s.as_bytes();
     let mut start = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        if needs_escape(b) {
-            if start < i {
-                // Escape bytes are all ASCII, so `start` and `i` sit on
-                // char boundaries and the stretch between them is valid
-                // UTF-8 — multi-byte sequences stay intact inside one
-                // `write_str_raw` copy.
-                w.write_str_raw(&s[start..i])?;
-            }
-            write_escape_byte(w, b)?;
-            start = i + 1;
+    while let Some(off) = find_escape(&bytes[start..]) {
+        let i = start + off;
+        // Escape bytes are all ASCII, so `start` and `i` sit on char
+        // boundaries and the stretch between them is valid UTF-8 —
+        // multi-byte sequences stay intact inside one `write_str_raw`.
+        if start < i {
+            w.write_str_raw(&s[start..i])?;
         }
+        write_escape_byte(w, bytes[i])?;
+        start = i + 1;
     }
     if start < bytes.len() {
         w.write_str_raw(&s[start..])?;

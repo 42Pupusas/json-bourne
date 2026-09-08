@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Performance
+- String-escape scanning uses the lexer's SSE2 shape: a 16-byte compare
+  locates the next quote/backslash/control byte instead of a per-byte walk,
+  for both serialization (`ser::escape::find_escape`) and, unchanged,
+  decoding. Escape-sparse strings — the common payload — copy as large
+  literal runs (audit 4.5.1).
+- The slice writer reserves in bounded 256 KiB windows and re-hints as it
+  crosses each window, instead of reserving `len * (MAX + 1)` up front:
+  a 10 M-element `Vec<i64>` reserved ~210 MB against ~30 MB of output;
+  peak extra reservation is now one window (audit 4.5.2). The delimited
+  loop stays on the sink's raw-tail write path inside each window.
 - The derive-vs-hand-written serialize gap closed (audit 4.1): generated
   writers emit fused fast paths for `f64`, `f32`, and `bool` fields and go
   through `Lexer::parse_u64_value` for unsigned fields, and the pretty-
