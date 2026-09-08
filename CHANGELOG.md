@@ -27,6 +27,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. Keys inside skipped objects are now consumed as raw byte spans —
   still shape-validated, never decoded — so `InvalidEscape` surfaces only
   for keys and strings the caller actually receives.
+- `to_string_pretty` serialized derive-generated types compactly: the
+  derive fused structural bytes (`,"id":`) into raw literals that the
+  pretty sink treats as opaque text, so a derived struct printed on one
+  line while a `Vec` field inside it was indented. `JsonWrite` now has
+  explicit structural methods (`begin_object`, `object_key`,
+  `separator`, …) that pretty sinks override, and an associated const
+  (`FUSES_STRUCTURAL_BYTES`) lets generated writers keep the fused
+  compact path for byte-oriented sinks — compact output is byte-identical
+  and the pretty path folds the choice at compile time. This also removes
+  the pretty sink's bracket-reparsing in `write_byte` and its
+  `depth -= 1` underflow hazard.
 - The default `JsonWrite::write_escaped_str` pushed every byte through the
   byte-oriented `write_byte`, so sinks whose `write_byte` is char-oriented
   mangled non-ASCII strings: `to_fmt("é")` produced `"Ã©"`. The default now

@@ -127,6 +127,84 @@ pub trait JsonWrite {
         self.write_str_raw(s)
     }
 
+    /// Open a JSON object (`{`).
+    ///
+    /// Writers must use the structural methods instead of pushing `{` /
+    /// `}` / `[` / `]` / `,` / `:` through [`Self::write_byte`] or fusing
+    /// them into raw literals: pretty sinks recognize structure only
+    /// through these hooks, and raw bytes reach them as opaque text (a
+    /// derived struct serialized compactly even under
+    /// `to_string_pretty`, audit 3.8).
+    #[inline]
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
+        self.write_byte(b'{')
+    }
+
+    /// Whether byte runs fed to [`Self::write_raw_bytes`] render
+    /// verbatim on this sink, so a writer may fuse structural
+    /// punctuation into one literal (e.g. `,"id":`).
+    ///
+    /// Sinks that treat raw text as opaque content — the pretty sink
+    /// needs to see the comma, key, and colon as separate structural
+    /// events — set this to `false`, and generated writers take the
+    /// structural-method path instead. The flag is an associated
+    /// constant, so the branch folds away per instantiation and neither
+    /// path costs anything at runtime.
+    const FUSES_STRUCTURAL_BYTES: bool = true;
+
+    /// Close a JSON object (`}`).
+    #[inline]
+    fn end_object(&mut self) -> Result<(), Self::Error> {
+        self.write_byte(b'}')
+    }
+
+    /// Open a JSON array (`[`).
+    #[inline]
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
+        self.write_byte(b'[')
+    }
+
+    /// Close a JSON array (`]`).
+    #[inline]
+    fn end_array(&mut self) -> Result<(), Self::Error> {
+        self.write_byte(b']')
+    }
+
+    /// Write the comma between two elements of an object or array.
+    #[inline]
+    fn separator(&mut self) -> Result<(), Self::Error> {
+        self.write_byte(b',')
+    }
+
+    /// Write an object key and its colon: `"key":`. The key is escaped
+    /// by the sink, like [`Self::write_escaped_str`].
+    #[inline]
+    fn object_key(&mut self, key: &str) -> Result<(), Self::Error> {
+        self.write_escaped_str(key)?;
+        self.write_byte(b':')
+    }
+
+    /// Open a JSON array on the hinted path — the structural twin of
+    /// [`Self::write_byte_hinted`]. Only the array writer after a
+    /// `reserve_hint` uses this; the brace-pair defaults mirror
+    /// [`Self::begin_array`] / [`Self::end_array`].
+    #[inline]
+    fn begin_array_hinted(&mut self) -> Result<(), Self::Error> {
+        self.write_byte_hinted(b'[')
+    }
+
+    /// Comma between elements on the hinted path.
+    #[inline]
+    fn separator_hinted(&mut self) -> Result<(), Self::Error> {
+        self.write_byte_hinted(b',')
+    }
+
+    /// Close a JSON array on the hinted path.
+    #[inline]
+    fn end_array_hinted(&mut self) -> Result<(), Self::Error> {
+        self.write_byte_hinted(b']')
+    }
+
     /// Write a signed 64-bit integer as a JSON number.
     #[inline]
     fn write_int_i64(&mut self, n: i64) -> Result<(), Self::Error> {
@@ -1052,6 +1130,23 @@ impl<'a> PrettyStringSink<'a> {
         }
     }
 
+    /// Close the container opened by `begin_object` / `begin_array`.
+    /// An immediately-closed empty container stays compact (`[]` /
+    /// `{}`); otherwise the close lands on its own indented line.
+    /// Paired with the begin hooks, so `depth` can only ever track
+    /// actually-opened containers — it cannot underflow the way a
+    /// byte-sniffing close could.
+    fn end_container(&mut self, close: u8) {
+        if let Some(open) = self.pending_open.take() {
+            self.out.push(open as char);
+            self.out.push(close as char);
+            return;
+        }
+        self.depth -= 1;
+        self.newline_and_indent();
+        self.out.push(close as char);
+    }
+
     fn newline_and_indent(&mut self) {
         self.out.push('\n');
         for _ in 0..self.depth {
@@ -1064,55 +1159,66 @@ impl<'a> PrettyStringSink<'a> {
 impl JsonWrite for PrettyStringSink<'_> {
     type Error = Error;
 
+    // Raw text reaches this sink as opaque content; writers must emit
+    // structure through the begin/end/separator/object_key hooks.
+    const FUSES_STRUCTURAL_BYTES: bool = false;
+
+    fn begin_object(&mut self) -> Result<(), Self::Error> {
+        // A nested open resolves the outer container as non-empty
+        // before deferring itself — the pending slot holds one byte.
+        self.flush_pending_open();
+        self.pending_open = Some(b'{');
+        Ok(())
+    }
+
+    fn end_object(&mut self) -> Result<(), Self::Error> {
+        self.end_container(b'}');
+        Ok(())
+    }
+
+    fn begin_array(&mut self) -> Result<(), Self::Error> {
+        self.flush_pending_open();
+        self.pending_open = Some(b'[');
+        Ok(())
+    }
+
+    fn end_array(&mut self) -> Result<(), Self::Error> {
+        self.end_container(b']');
+        Ok(())
+    }
+
+    fn begin_array_hinted(&mut self) -> Result<(), Self::Error> {
+        self.begin_array()
+    }
+
+    fn separator_hinted(&mut self) -> Result<(), Self::Error> {
+        self.separator()
+    }
+
+    fn end_array_hinted(&mut self) -> Result<(), Self::Error> {
+        self.end_array()
+    }
+
+    fn separator(&mut self) -> Result<(), Self::Error> {
+        // Only reachable after a value has been written, which already
+        // flushed the pending open.
+        self.out.push(',');
+        self.newline_and_indent();
+        Ok(())
+    }
+
+    fn object_key(&mut self, key: &str) -> Result<(), Self::Error> {
+        self.flush_pending_open();
+        let mut inner = StringSink::new(self.out);
+        inner.write_escaped_str(key)?;
+        self.out.push_str(": ");
+        Ok(())
+    }
+
     fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
-        match b {
-            b'[' | b'{' => {
-                // Resolve any prior pending open: the prior container
-                // is non-empty, so emit it + indent for our position.
-                self.flush_pending_open();
-                // Defer this open — we don't know yet if it's empty.
-                self.pending_open = Some(b);
-                Ok(())
-            }
-            b']' | b'}' => {
-                if let Some(open) = self.pending_open.take() {
-                    // Empty container: write the open and matching
-                    // close back-to-back with no whitespace.
-                    self.out.push(open as char);
-                    self.out.push(b as char);
-                    return Ok(());
-                }
-                self.depth -= 1;
-                self.newline_and_indent();
-                self.out.push(b as char);
-                Ok(())
-            }
-            b',' => {
-                // After a value inside a container: newline + indent
-                // before the next element. The pending_open state
-                // can't be live here — we must have written at least
-                // one value to be at a comma.
-                debug_assert!(self.pending_open.is_none());
-                self.out.push(',');
-                self.newline_and_indent();
-                Ok(())
-            }
-            b':' => {
-                // Object key/value separator. JSON-pretty convention
-                // is `key: value` (one space after the colon, none
-                // before).
-                self.out.push_str(": ");
-                Ok(())
-            }
-            _ => {
-                // Any other single byte (rare via this entry — most
-                // bulk text comes through write_str_raw or
-                // write_escaped_str).
-                self.flush_pending_open();
-                self.out.push(b as char);
-                Ok(())
-            }
-        }
+        self.flush_pending_open();
+        self.out.push(b as char);
+        Ok(())
     }
 
     fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
@@ -1295,7 +1401,7 @@ fn write_array<T: ToJson, I: IntoIterator<Item = T>, W: JsonWrite + ?Sized>(
     iter: I,
     w: &mut W,
 ) -> Result<(), W::Error> {
-    w.write_byte(b'[')?;
+    w.begin_array()?;
     // Peel the first element so the inner loop never re-evaluates a
     // `first` flag — every subsequent element unconditionally writes
     // `,` then itself. Saves one branch per element on hot Vec/slice
@@ -1305,11 +1411,11 @@ fn write_array<T: ToJson, I: IntoIterator<Item = T>, W: JsonWrite + ?Sized>(
     if let Some(v) = iter.next() {
         v.write_json(w)?;
         for v in iter {
-            w.write_byte(b',')?;
+            w.separator()?;
             v.write_json(w)?;
         }
     }
-    w.write_byte(b']')
+    w.end_array()
 }
 
 /// Like `write_array`, but callable only after `reserve_hint` has been
@@ -1323,15 +1429,15 @@ fn write_array_hinted<T: ToJson, W: JsonWrite + ?Sized>(
     slice: &[T],
     w: &mut W,
 ) -> Result<(), W::Error> {
-    w.write_byte_hinted(b'[')?;
+    w.begin_array_hinted()?;
     if let Some((first, rest)) = slice.split_first() {
         first.write_json(w)?;
         for v in rest {
-            w.write_byte_hinted(b',')?;
+            w.separator_hinted()?;
             v.write_json(w)?;
         }
     }
-    w.write_byte_hinted(b']')
+    w.end_array_hinted()
 }
 
 impl<T: ToJson> ToJson for [T] {
@@ -1373,13 +1479,13 @@ macro_rules! impl_tuple_to_json {
     ($first_idx:tt: $First:ident $(, $idx:tt: $T:ident)* $(,)?) => {
         impl<$First: ToJson $(, $T: ToJson)*> ToJson for ($First, $($T,)*) {
             fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
-                w.write_byte(b'[')?;
+                w.begin_array()?;
                 self.$first_idx.write_json(w)?;
                 $(
-                    w.write_byte(b',')?;
+                    w.separator()?;
                     self.$idx.write_json(w)?;
                 )*
-                w.write_byte(b']')
+                w.end_array()
             }
         }
     };
@@ -1554,18 +1660,17 @@ mod alloc_impls {
         I: IntoIterator<Item = (&'a K, &'a V)>,
         W: JsonWrite + ?Sized,
     {
-        w.write_byte(b'{')?;
+        w.begin_object()?;
         let mut first = true;
         for (k, v) in iter {
             if !first {
-                w.write_byte(b',')?;
+                w.separator()?;
             }
-            w.write_escaped_str(k.as_str())?;
-            w.write_byte(b':')?;
+            w.object_key(k.as_str())?;
             v.write_json(w)?;
             first = false;
         }
-        w.write_byte(b'}')
+        w.end_object()
     }
 
     impl<K: MapKeyOut, V: ToJson> ToJson for alloc::collections::BTreeMap<K, V> {

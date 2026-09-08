@@ -1103,10 +1103,19 @@ fn to_json_named(
     // The macro does this with a `static_first` state token; here it's just
     // a running boolean over the field list.
     let mut stmts = Vec::new();
-    stmts.push(quote! { __w.write_raw_bytes(b"{")?; });
+    stmts.push(quote! { __w.begin_object()?; });
     stmts.push(quote! {
         #[allow(unused_assignments, unused_mut, unused_variables)]
         let mut __first: bool = true;
+    });
+    // Derived writers fuse `,"key":` into one literal for speed. That
+    // fusion is only valid when the sink renders raw bytes verbatim;
+    // the pretty sink needs the comma/key/colon as separate structural
+    // events. The associated const is a compile-time constant per sink
+    // instantiation, so the branch folds away and neither path costs
+    // anything at runtime.
+    stmts.push(quote! {
+        let __FUSED: bool = <__W as ::json_bourne::JsonWrite>::FUSES_STRUCTURAL_BYTES;
     });
 
     // Static-comma tracking mirrors the macro's `static_first` token:
@@ -1137,14 +1146,20 @@ fn to_json_named(
             let key = key_expr(name, &fa.rename, &container.rename_all);
             let comma = match sf {
                 StaticFirst::Yes => quote! {},
-                StaticFirst::No => quote! { __w.write_raw_bytes(b",")?; },
-                StaticFirst::Maybe => quote! { if !__first { __w.write_raw_bytes(b",")?; } },
+                StaticFirst::No => quote! { if __FUSED { __w.separator()?; } },
+                StaticFirst::Maybe => {
+                    quote! { if !__first && __FUSED { __w.separator()?; } }
+                }
             };
             stmts.push(quote! {
                 if let ::core::option::Option::Some(ref __v) = self.#name {
                     #comma
-                    __w.write_escaped_str(#key)?;
-                    __w.write_raw_bytes(b":")?;
+                    if __FUSED {
+                        __w.write_escaped_str(#key)?;
+                        __w.write_raw_bytes(b":")?;
+                    } else {
+                        __w.object_key(#key)?;
+                    }
                     ::json_bourne::ToJson::write_json(__v, __w)?;
                     __first = false;
                 }
@@ -1166,7 +1181,14 @@ fn to_json_named(
             // on `!__first`; without this, plain fields would leave `__first`
             // set and that comma would be wrongly suppressed.
             stmts.push(quote! {
-                __w.write_raw_bytes(#lit.as_bytes())?;
+                if __FUSED {
+                    __w.write_raw_bytes(#lit.as_bytes())?;
+                } else {
+                    if !__first {
+                        __w.separator()?;
+                    }
+                    __w.object_key(#name_str)?;
+                }
                 ::json_bourne::ToJson::write_json(&self.#name, __w)?;
                 __first = false;
             });
@@ -1177,13 +1199,19 @@ fn to_json_named(
             let key = key_expr(name, &fa.rename, &container.rename_all);
             let comma = match sf {
                 StaticFirst::Yes => quote! {},
-                StaticFirst::No => quote! { __w.write_raw_bytes(b",")?; },
-                StaticFirst::Maybe => quote! { if !__first { __w.write_raw_bytes(b",")?; } },
+                StaticFirst::No => quote! { if __FUSED { __w.separator()?; } },
+                StaticFirst::Maybe => {
+                    quote! { if !__first && __FUSED { __w.separator()?; } }
+                }
             };
             stmts.push(quote! {
                 #comma
-                __w.write_escaped_str(#key)?;
-                __w.write_raw_bytes(b":")?;
+                if __FUSED {
+                    __w.write_escaped_str(#key)?;
+                    __w.write_raw_bytes(b":")?;
+                } else {
+                    __w.object_key(#key)?;
+                }
                 ::json_bourne::ToJson::write_json(&self.#name, __w)?;
                 __first = false;
             });
@@ -1195,7 +1223,7 @@ fn to_json_named(
         }
     }
 
-    stmts.push(quote! { __w.write_raw_bytes(b"}")?; });
+    stmts.push(quote! { __w.end_object()?; });
     stmts.push(quote! { ::core::result::Result::Ok(()) });
     Ok(quote! { #(#stmts)* })
 }
@@ -1207,15 +1235,15 @@ fn to_json_tuple(n: usize) -> proc_macro2::TokenStream {
         };
     }
     let mut stmts = Vec::new();
-    stmts.push(quote! { __w.write_raw_bytes(b"[")?; });
+    stmts.push(quote! { __w.begin_array()?; });
     for i in 0..n {
         let idx = syn::Index::from(i);
         if i > 0 {
-            stmts.push(quote! { __w.write_raw_bytes(b",")?; });
+            stmts.push(quote! { __w.separator()?; });
         }
         stmts.push(quote! { ::json_bourne::ToJson::write_json(&self.#idx, __w)?; });
     }
-    stmts.push(quote! { __w.write_raw_bytes(b"]")?; });
+    stmts.push(quote! { __w.end_array()?; });
     stmts.push(quote! { ::core::result::Result::Ok(()) });
     quote! { #(#stmts)* }
 }
@@ -1268,7 +1296,10 @@ fn to_json_enum(
 /// already on the wire, making the first field's comma mandatory.
 fn write_variant_fields(fields: &[VariantField<'_>], emitted: bool) -> proc_macro2::TokenStream {
     let mut stmts = Vec::new();
-    stmts.push(quote! { let mut __first = !(#emitted); });
+    stmts.push(quote! {
+        let __FUSED: bool = <__W as ::json_bourne::JsonWrite>::FUSES_STRUCTURAL_BYTES;
+        let mut __first = !(#emitted);
+    });
     for f in fields {
         if f.attrs.skip {
             continue;
@@ -1280,10 +1311,19 @@ fn write_variant_fields(fields: &[VariantField<'_>], emitted: bool) -> proc_macr
             let lit_comma = format!(",\"{name_str}\":");
             stmts.push(quote! {
                 if __first {
-                    __w.write_raw_bytes(#lit.as_bytes())?;
+                    if __FUSED {
+                        __w.write_raw_bytes(#lit.as_bytes())?;
+                    } else {
+                        __w.object_key(#name_str)?;
+                    }
                     __first = false;
                 } else {
-                    __w.write_raw_bytes(#lit_comma.as_bytes())?;
+                    if __FUSED {
+                        __w.write_raw_bytes(#lit_comma.as_bytes())?;
+                    } else {
+                        __w.separator()?;
+                        __w.object_key(#name_str)?;
+                    }
                 }
                 ::json_bourne::ToJson::write_json(#bind, __w)?;
             });
@@ -1291,11 +1331,10 @@ fn write_variant_fields(fields: &[VariantField<'_>], emitted: bool) -> proc_macr
             let key = &f.key;
             stmts.push(quote! {
                 if !__first {
-                    __w.write_raw_bytes(b",")?;
+                    __w.separator()?;
                 }
                 __first = false;
-                __w.write_escaped_str(#key)?;
-                __w.write_raw_bytes(b":")?;
+                __w.object_key(#key)?;
                 ::json_bourne::ToJson::write_json(#bind, __w)?;
             });
         }
@@ -1346,9 +1385,9 @@ fn to_json_variant_arm(
             let body = write_variant_fields(fields, false);
             quote! {
                 #name::#vname { #pat } => {
-                    __w.write_raw_bytes(b"{")?;
+                    __w.begin_object()?;
                     #body
-                    __w.write_raw_bytes(b"}")?;
+                    __w.end_object()?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1363,11 +1402,10 @@ fn to_json_variant_arm(
         },
         (EnumMode::External, VShape::Newtype(_)) => quote! {
             #name::#vname(__inner) => {
-                __w.write_raw_bytes(b"{")?;
-                __w.write_escaped_str(#tagkey)?;
-                __w.write_raw_bytes(b":")?;
+                __w.begin_object()?;
+                __w.object_key(#tagkey)?;
                 ::json_bourne::ToJson::write_json(__inner, __w)?;
-                __w.write_raw_bytes(b"}")?;
+                __w.end_object()?;
                 ::core::result::Result::Ok(())
             }
         },
@@ -1376,11 +1414,10 @@ fn to_json_variant_arm(
             let writes = tuple_payload_writes(&binds);
             quote! {
                 #name::#vname( #(#binds),* ) => {
-                    __w.write_raw_bytes(b"{")?;
-                    __w.write_escaped_str(#tagkey)?;
-                    __w.write_raw_bytes(b":")?;
+                    __w.begin_object()?;
+                    __w.object_key(#tagkey)?;
                     #writes
-                    __w.write_raw_bytes(b"}")?;
+                    __w.end_object()?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1390,11 +1427,12 @@ fn to_json_variant_arm(
             let body = write_variant_fields(fields, false);
             quote! {
                 #name::#vname { #pat } => {
-                    __w.write_raw_bytes(b"{")?;
-                    __w.write_escaped_str(#tagkey)?;
-                    __w.write_raw_bytes(b":{")?;
+                    __w.begin_object()?;
+                    __w.object_key(#tagkey)?;
+                    __w.begin_object()?;
                     #body
-                    __w.write_raw_bytes(b"}}")?;
+                    __w.end_object()?;
+                    __w.end_object()?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1403,11 +1441,10 @@ fn to_json_variant_arm(
         // ---- Internal ----
         (EnumMode::Internal(tag), VShape::Unit) => quote! {
             #name::#vname => {
-                __w.write_raw_bytes(b"{")?;
-                __w.write_escaped_str(#tag)?;
-                __w.write_raw_bytes(b":")?;
+                __w.begin_object()?;
+                __w.object_key(#tag)?;
                 __w.write_escaped_str(#tagkey)?;
-                __w.write_raw_bytes(b"}")?;
+                __w.end_object()?;
                 ::core::result::Result::Ok(())
             }
         },
@@ -1425,27 +1462,30 @@ fn to_json_variant_arm(
                     let key = f.ident.to_string();
                     let lit = format!(",\"{key}\":");
                     stmts.push(quote! {
-                        __w.write_raw_bytes(#lit.as_bytes())?;
+                        if <__W as ::json_bourne::JsonWrite>::FUSES_STRUCTURAL_BYTES {
+                            __w.write_raw_bytes(#lit.as_bytes())?;
+                        } else {
+                            __w.separator()?;
+                            __w.object_key(#key)?;
+                        }
                         ::json_bourne::ToJson::write_json(#bind, __w)?;
                     });
                 } else {
                     let key = &f.key;
                     stmts.push(quote! {
-                        __w.write_raw_bytes(b",")?;
-                        __w.write_escaped_str(#key)?;
-                        __w.write_raw_bytes(b":")?;
+                        __w.separator()?;
+                        __w.object_key(#key)?;
                         ::json_bourne::ToJson::write_json(#bind, __w)?;
                     });
                 }
             }
             quote! {
                 #name::#vname { #pat } => {
-                    __w.write_raw_bytes(b"{")?;
-                    __w.write_escaped_str(#tag)?;
-                    __w.write_raw_bytes(b":")?;
+                    __w.begin_object()?;
+                    __w.object_key(#tag)?;
                     __w.write_escaped_str(#tagkey)?;
                     #(#stmts)*
-                    __w.write_raw_bytes(b"}")?;
+                    __w.end_object()?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1460,25 +1500,22 @@ fn to_json_variant_arm(
         // ---- Adjacent ----
         (EnumMode::Adjacent(tag, _content), VShape::Unit) => quote! {
             #name::#vname => {
-                __w.write_raw_bytes(b"{")?;
-                __w.write_escaped_str(#tag)?;
-                __w.write_raw_bytes(b":")?;
+                __w.begin_object()?;
+                __w.object_key(#tag)?;
                 __w.write_escaped_str(#tagkey)?;
-                __w.write_raw_bytes(b"}")?;
+                __w.end_object()?;
                 ::core::result::Result::Ok(())
             }
         },
         (EnumMode::Adjacent(tag, content), VShape::Newtype(_)) => quote! {
             #name::#vname(__inner) => {
-                __w.write_raw_bytes(b"{")?;
-                __w.write_escaped_str(#tag)?;
-                __w.write_raw_bytes(b":")?;
+                __w.begin_object()?;
+                __w.object_key(#tag)?;
                 __w.write_escaped_str(#tagkey)?;
-                __w.write_raw_bytes(b",")?;
-                __w.write_escaped_str(#content)?;
-                __w.write_raw_bytes(b":")?;
+                __w.separator()?;
+                __w.object_key(#content)?;
                 ::json_bourne::ToJson::write_json(__inner, __w)?;
-                __w.write_raw_bytes(b"}")?;
+                __w.end_object()?;
                 ::core::result::Result::Ok(())
             }
         },
@@ -1487,15 +1524,13 @@ fn to_json_variant_arm(
             let writes = tuple_payload_writes(&binds);
             quote! {
                 #name::#vname( #(#binds),* ) => {
-                    __w.write_raw_bytes(b"{")?;
-                    __w.write_escaped_str(#tag)?;
-                    __w.write_raw_bytes(b":")?;
+                    __w.begin_object()?;
+                    __w.object_key(#tag)?;
                     __w.write_escaped_str(#tagkey)?;
-                    __w.write_raw_bytes(b",")?;
-                    __w.write_escaped_str(#content)?;
-                    __w.write_raw_bytes(b":")?;
+                    __w.separator()?;
+                    __w.object_key(#content)?;
                     #writes
-                    __w.write_raw_bytes(b"}")?;
+                    __w.end_object()?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1505,15 +1540,15 @@ fn to_json_variant_arm(
             let body = write_variant_fields(fields, false);
             quote! {
                 #name::#vname { #pat } => {
-                    __w.write_raw_bytes(b"{")?;
-                    __w.write_escaped_str(#tag)?;
-                    __w.write_raw_bytes(b":")?;
+                    __w.begin_object()?;
+                    __w.object_key(#tag)?;
                     __w.write_escaped_str(#tagkey)?;
-                    __w.write_raw_bytes(b",")?;
-                    __w.write_escaped_str(#content)?;
-                    __w.write_raw_bytes(b":{")?;
+                    __w.separator()?;
+                    __w.object_key(#content)?;
+                    __w.begin_object()?;
                     #body
-                    __w.write_raw_bytes(b"}}")?;
+                    __w.end_object()?;
+                    __w.end_object()?;
                     ::core::result::Result::Ok(())
                 }
             }
@@ -1524,13 +1559,13 @@ fn to_json_variant_arm(
 /// For a tuple payload write bindings `__f0..` as a JSON array.
 fn tuple_payload_writes(binds: &[Ident]) -> proc_macro2::TokenStream {
     let mut stmts = Vec::new();
-    stmts.push(quote! { __w.write_raw_bytes(b"[")?; });
+    stmts.push(quote! { __w.begin_array()?; });
     for (i, b) in binds.iter().enumerate() {
         if i > 0 {
-            stmts.push(quote! { __w.write_raw_bytes(b",")?; });
+            stmts.push(quote! { __w.separator()?; });
         }
         stmts.push(quote! { ::json_bourne::ToJson::write_json(#b, __w)?; });
     }
-    stmts.push(quote! { __w.write_raw_bytes(b"]")?; });
+    stmts.push(quote! { __w.end_array()?; });
     quote! { #(#stmts)* }
 }
