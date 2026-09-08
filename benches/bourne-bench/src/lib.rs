@@ -55,6 +55,54 @@ pub fn int_array(n: usize) -> String {
     s
 }
 
+/// A flat array of N integers, pretty-printed — one newline + indentation
+/// per element. Exercises the whitespace skipper without key overhead.
+#[must_use]
+pub fn pretty_int_array(n: usize) -> String {
+    let mut s = String::with_capacity(n * 10);
+    s.push_str("[\n");
+    for i in 0..n {
+        if i > 0 {
+            s.push_str(",\n");
+        }
+        let _ = write!(&mut s, "  {i}");
+    }
+    s.push_str("\n]");
+    s
+}
+
+/// A flat array of N short strings, pretty-printed — one newline + indentation
+/// per element. Exercises the whitespace skipper on the borrowed-string path.
+#[must_use]
+pub fn pretty_string_array(n: usize) -> String {
+    let mut s = String::with_capacity(n * 16);
+    s.push_str("[\n");
+    for i in 0..n {
+        if i > 0 {
+            s.push_str(",\n");
+        }
+        let _ = write!(&mut s, "  \"item-{i:08}\"");
+    }
+    s.push_str("\n]");
+    s
+}
+
+/// `SMALL_OBJECT` pretty-printed — each member on its own line at one
+/// indentation level, arrays inline. The config-file shape.
+#[must_use]
+pub fn pretty_small_object() -> String {
+    let mut s = String::with_capacity(256);
+    s.push_str("{\n");
+    s.push_str("  \"id\": 1234567890,\n");
+    s.push_str("  \"name\": \"alice\",\n");
+    s.push_str("  \"verified\": true,\n");
+    s.push_str("  \"followers\": 42,\n");
+    s.push_str("  \"bio\": null,\n");
+    s.push_str("  \"links\": [\n    \"a\",\n    \"b\",\n    \"c\"\n  ]\n");
+    s.push('}');
+    s
+}
+
 /// A flat array of N short strings without escapes — exercises the borrowed-string fast path.
 #[must_use]
 pub fn string_array(n: usize) -> String {

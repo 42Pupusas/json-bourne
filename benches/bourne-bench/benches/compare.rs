@@ -321,6 +321,59 @@ mod stream_vs_dom {
     }
 }
 
+mod pretty_stream_vs_dom {
+    use super::bourne_drain;
+    use bourne_bench::pretty_int_array;
+
+    // Same workloads as `stream_vs_dom`, pretty-printed: every element on
+    // its own line. Whitespace skipping is a much larger share of the
+    // parse than in the compact case.
+
+    #[divan::bench(args = [100, 10_000])]
+    fn pretty_ints_bourne_stream(bencher: divan::Bencher, n: usize) {
+        let big_ints = pretty_int_array(n);
+        let bytes = big_ints.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| bourne_drain(divan::black_box(bytes)));
+    }
+
+    #[divan::bench(args = [100, 10_000])]
+    fn pretty_ints_serde_json_value(bencher: divan::Bencher, n: usize) {
+        let big_ints = pretty_int_array(n);
+        let bytes = big_ints.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(divan::black_box(bytes)).expect("valid input");
+                divan::black_box(v);
+            });
+    }
+
+    #[divan::bench]
+    fn pretty_small_object_bourne_stream(bencher: divan::Bencher) {
+        let bytes = bourne_bench::pretty_small_object();
+        let bytes = bytes.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| bourne_drain(divan::black_box(bytes)));
+    }
+
+    #[divan::bench]
+    fn pretty_small_object_serde_json_value(bencher: divan::Bencher) {
+        let bytes = bourne_bench::pretty_small_object();
+        let bytes = bytes.as_bytes();
+        bencher
+            .counter(divan::counter::BytesCount::new(bytes.len()))
+            .bench(|| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(divan::black_box(bytes)).expect("valid input");
+                divan::black_box(v);
+            });
+    }
+}
+
 mod typed_struct {
     use super::{
         MetricEventBourne, MetricEventDerived, MetricEventSerde, SMALL_OBJECT, UserBourne,

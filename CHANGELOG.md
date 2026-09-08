@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Performance
+- Pretty-printed parse benches added (`pretty_*` fixtures and a
+  `pretty_stream_vs_dom` group): arrays and a small object, one newline +
+  indentation per member. Baseline shows bourne's streaming parser ahead
+  of serde_json's DOM on pretty input by the same margin as compact input
+  (audit 4.4.1).
 - String-escape scanning uses the lexer's SSE2 shape: a 16-byte compare
   locates the next quote/backslash/control byte instead of a per-byte walk,
   for both serialization (`ser::escape::find_escape`) and, unchanged,
