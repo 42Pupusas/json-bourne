@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `Vec<u64>` / `Vec<usize>` and `u64`/`usize` fields in derived structs no
+  longer reject values above `i64::MAX`. The fused array fast path went through
+  the signed parser and failed on exactly the values `u64` exists to hold;
+  a new `Lexer::parse_u64_value` (rejecting a leading `-`, including `-0`)
+  backs the unsigned path, and the derive emits it too. All unsigned entry
+  points now agree: `-0` and negatives are rejected, `u64::MAX` parses.
+- `#[derive(FromJson)]` structs gain fused fast paths for `f64`, `f32`, and
+  `bool` fields (previously only integers and `&str` bypassed the generic
+  dispatch), matching the hand-written-impl shape.
 - **(security)** The array serialization fast path treated
   `ToJson::MAX_SERIALIZED_LEN` — a safe associated const on a public trait — as
   a hard precondition for unchecked `ptr::write` appends, so a downstream impl

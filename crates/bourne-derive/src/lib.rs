@@ -232,18 +232,40 @@ fn acquire_expr(ty: &Type) -> proc_macro2::TokenStream {
             })?
         }
     };
+    let uint_narrow = |t: &str| {
+        let t: proc_macro2::TokenStream = t.parse().unwrap();
+        quote! {
+            <#t>::try_from(__lex.parse_u64_value()?).map_err(|_| {
+                ::json_bourne::Error::new(
+                    ::json_bourne::ErrorKind::NumberOutOfRange,
+                    __lex.position(),
+                )
+            })?
+        }
+    };
     match ty_str.as_str() {
         "&str" | "&'inputstr" => quote! { __lex.parse_str_value()? },
         "i64" => quote! { __lex.parse_i64_value()? },
+        "u64" => quote! { __lex.parse_u64_value()? },
+        "f64" => quote! { __lex.parse_f64_value()? },
+        "f32" => quote! { __lex.parse_f64_value()? as f32 },
         "i8" => int_narrow("i8"),
         "i16" => int_narrow("i16"),
         "i32" => int_narrow("i32"),
         "isize" => int_narrow("isize"),
-        "u8" => int_narrow("u8"),
-        "u16" => int_narrow("u16"),
-        "u32" => int_narrow("u32"),
-        "u64" => int_narrow("u64"),
-        "usize" => int_narrow("usize"),
+        "u8" => uint_narrow("u8"),
+        "u16" => uint_narrow("u16"),
+        "u32" => uint_narrow("u32"),
+        "usize" => uint_narrow("usize"),
+        "bool" => quote! {
+            match __lex.read_value()? {
+                ::json_bourne::Event::Bool(b) => b,
+                _ => return ::core::result::Result::Err(::json_bourne::Error::new(
+                    ::json_bourne::ErrorKind::ExpectedBool,
+                    __lex.position(),
+                )),
+            }
+        },
         _ => quote! {
             <#ty as ::json_bourne::FromJson<'_>>::from_lex(__lex)?
         },

@@ -166,7 +166,52 @@ macro_rules! impl_int {
 }
 
 impl_int!(i8 => as_i64, i16 => as_i64, i32 => as_i64, i64 => as_i64, isize => as_i64);
-impl_int!(u8 => as_u64, u16 => as_u64, u32 => as_u64, u64 => as_u64, usize => as_u64);
+
+macro_rules! impl_uint {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl<'input> FromJson<'input> for $t {
+                fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+                    match lex.peek_value_kind()? {
+                        ValueKind::Number => {
+                            let n: JsonNum = lex.read_number()?;
+                            let big = n.as_u64(lex.input())
+                                .map_err(|kind| Error::new(kind, lex.position()))?;
+                            <$t>::try_from(big).map_err(|_| {
+                                Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                            })
+                        }
+                        _ => Err(type_error(lex, ErrorKind::ExpectedNumber)),
+                    }
+                }
+
+                /// Fused-pass fast path via `parse_u64_value`. The signed
+                /// one rejects everything above `i64::MAX`; this keeps the
+                /// whole `u64` range parseable inside `Vec<$t>`.
+                #[cfg(feature = "alloc")]
+                fn vec_from_lex(lex: &mut Lexer<'input>) -> Result<alloc::vec::Vec<Self>, Error> {
+                    let mut out: alloc::vec::Vec<Self> = alloc::vec::Vec::new();
+                    if lex.array_start()? {
+                        return Ok(out);
+                    }
+                    let v = lex.parse_u64_value()?;
+                    out.push(<$t>::try_from(v).map_err(|_| {
+                        Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                    })?);
+                    while !lex.array_continue(b']')? {
+                        let v = lex.parse_u64_value()?;
+                        out.push(<$t>::try_from(v).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
+                    }
+                    Ok(out)
+                }
+            }
+        )*
+    };
+}
+
+impl_uint!(u8, u16, u32, u64, usize);
 
 // 128-bit ints — fused lex + decode via `parse_i128_value` /
 // `parse_u128_value`. The earlier path went through `JsonNum::as_*128`

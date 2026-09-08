@@ -64,6 +64,11 @@ const U128_FAST_DIGITS: u32 = 38;
 /// with a different `MAX_DEPTH`.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
+/// `u64::MAX` has 20 decimal digits: up to 19, `acc * 10 + d` cannot
+/// overflow a `u64`, so the fused unsigned parse skips `checked_*` until
+/// the 20th digit.
+const U64_FAST_DIGITS: u32 = 19;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::redundant_pub_crate)]
 pub(crate) enum Frame {
@@ -482,6 +487,80 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
                 Ok(0)
             }
             Some(b'1'..=b'9') => self.parse_i64_digits(i, negative),
+            Some(b) => {
+                self.offset = i;
+                Err(self.err(ErrorKind::UnexpectedByte(b)))
+            }
+            None => {
+                self.offset = i;
+                Err(self.err(ErrorKind::UnexpectedEof))
+            }
+        }
+    }
+
+    /// Parse a JSON integer directly into `u64`, fusing lex and conversion.
+    ///
+    /// Same shape as [`parse_i64_value`] but unsigned: a leading `-` is
+    /// rejected outright (including `-0` — JSON has one zero and `u64`
+    /// cannot represent its negation), and the full `u64` range up to
+    /// `18446744073709551615` is accepted. Without this fused unsigned
+    /// path, `Vec<u64>` and derived `u64` fields had to go through the
+    /// signed path and rejected every value above `i64::MAX` (audit 3.3).
+    ///
+    /// Caller must position the lexer at the first byte of the value
+    /// (after any whitespace). Returns the parsed `u64` and leaves the
+    /// cursor at the byte after the number. Rejects fractional and
+    /// exponent forms — those are not integers.
+    pub fn parse_u64_value(&mut self) -> Result<u64, Error> {
+        let start = self.offset;
+        let bytes = self.input;
+        let mut i = start;
+
+        if matches!(bytes.get(i), Some(&b'-')) {
+            self.offset = i;
+            return Err(self.err(ErrorKind::NumberOutOfRange));
+        }
+
+        match bytes.get(i).copied() {
+            Some(b'0') => {
+                i += 1;
+                self.offset = i;
+                if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+                    return Err(self.err(ErrorKind::ExpectedNumber));
+                }
+                Ok(0)
+            }
+            Some(b'1'..=b'9') => {
+                let end = bytes.len();
+                let mut acc: u64 = 0;
+                let mut count: u32 = 0;
+                while i < end {
+                    let d = bytes[i].wrapping_sub(b'0');
+                    if d >= 10 {
+                        break;
+                    }
+                    if count < U64_FAST_DIGITS {
+                        // Up to 19 digits fit in u64 without overflow;
+                        // the 20-digit boundary is u64::MAX.
+                        acc = acc * 10 + u64::from(d);
+                    } else {
+                        acc = acc
+                            .checked_mul(10)
+                            .and_then(|v| v.checked_add(u64::from(d)))
+                            .ok_or_else(|| {
+                                self.offset = i;
+                                self.err(ErrorKind::NumberOutOfRange)
+                            })?;
+                    }
+                    i += 1;
+                    count += 1;
+                }
+                self.offset = i;
+                if matches!(bytes.get(i), Some(&b'.' | &b'e' | &b'E')) {
+                    return Err(self.err(ErrorKind::ExpectedNumber));
+                }
+                Ok(acc)
+            }
             Some(b) => {
                 self.offset = i;
                 Err(self.err(ErrorKind::UnexpectedByte(b)))
