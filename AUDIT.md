@@ -339,6 +339,47 @@ L1-dcache-load-misses`:
    buffer for L1 once the working set exceeds L1. serde_json's formatter uses a
    200-byte pair table. Try a build with the 2-digit LUT only and compare at
    n=10000.
+   — *Tested 2026-09; hypothesis refuted, no change landed.* The experiment
+   was run exactly as specified: `write_digits_at_ptr` rebuilt to use only
+   the 200-byte `DIGIT_LUT` (bottom 8 digits as four pair-copies, tail loop
+   two digits per iteration), full test suite green, benched against the
+   unmodified baseline on the same machine and run:
+
+   | n=10 000, `bourne_write` median | throughput |
+   |---|---|
+   | `QUAD_LUT` (baseline) | 268 µs — 37.3 Mitem/s |
+   | pair-LUT only | 301 µs — 33.3 Mitem/s |
+
+   Dropping the 40 KB table made the target case **12 % slower**, and the
+   n=1000→n=10000 cliff *survived* the change (37.6 → 33.3 Mitem/s, still
+   ≈−12 %). A table-vs-buffer L1 conflict cannot explain a cliff that
+   persists once the table is gone. `QUAD_LUT` stays.
+
+   The bench's own diagnostics localize the real cause, and they were
+   already in the file: the cliff appears **only** under unbounded magnitude
+   variance. Scaling n=1000→n=10000, `bourne_write` loses ≈15 %
+   (43.8→37.3 Mitem/s) while `bourne_write_same` (one repeated value) and
+   `bourne_write_four` (4 cycling values) are flat, and `serde_json` is flat.
+   `perf stat` on the `profile` binary's 10k float workloads, normalized per
+   iteration (bourne 7 000 iters, serde 23 000):
+
+   | per iteration | bourne | serde_json |
+   |---|---|---|
+   | cycles | 1 045 581 | 949 575 |
+   | instructions | 3 386 625 | 2 287 721 |
+   | IPC | 3.2 | 2.4 |
+   | **branch-misses** | **7 050** | **843** |
+
+   bourne retires 48 % more instructions at a *higher* IPC and mispredicts
+   **8.4× more branches**. The cost is branch misprediction in the
+   data-dependent shape selection — `write_f64_to_ptr`'s three-way
+   fixed-point split plus the `point`/`digits_count` comparisons, and the
+   variable trip counts of the digit loop — not cache pressure. serde_json's
+   formatter is branch-lean by comparison. This reframes §4.2: the lever is
+   reducing or straightening data-dependent branches in the shape selection
+   (the sign branch was already removed this way, per the comment at
+   `write_f64_to_ptr`), not shrinking tables. Left unimplemented pending a
+   design that does not regress the flat cases.
 2. The reservation `len * 33 + 2` is ~1.65× the real output (~20 bytes/float),
    so the `Vec` is realloc'd once to 330 KB; not a per-element cost, unlikely to
    be the cause, but it does inflate peak memory (§4.5).
@@ -618,7 +659,11 @@ alloc`, default, `--features derive`, `--all-features`; tests + clippy
 **Phase 3 — performance (measure before/after each, `compare` + `floats`)**
 16. Derive: literal-pattern `match` for keys; borrowed-key-first; `f64`/`bool`
     acquire arms; structural `&str` detection. Target: derived ≤ 1.05× hand-written. (§4.3)
-17. `QUAD_LUT` vs pair-LUT experiment at n=10 000. (§4.2)
+17. ~~`QUAD_LUT` vs pair-LUT experiment at n=10 000.~~ **Done — hypothesis
+    refuted, no change.** Pair-LUT is 12 % slower and the cliff survives it;
+    `perf` attributes the gap to branch misprediction (8.4× serde's rate),
+    not cache pressure. Any future work here targets the data-dependent
+    shape-selection branches. (§4.2)
 18. SIMD whitespace skip; SIMD escape scan in serializer. (§4.4.1, §4.5.1)
 19. SWAR digit parsing; fused simple-float path. (§4.4.2, §4.4.3)
 20. Bitset `Stack`; reservation cap. (§4.4.4, §4.5.2)

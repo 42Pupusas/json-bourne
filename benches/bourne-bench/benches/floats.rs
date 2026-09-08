@@ -123,6 +123,16 @@ mod serde_json {
 // (random input → scattered LUT access pattern → L1d misses), the cliff
 // should disappear here. If the cliff persists, the bottleneck is in the
 // output-write loop, not the data-dependent inner work.
+//
+// ANSWERED (audit §4.2): the cliff is data-dependent, but the mechanism is
+// branch misprediction, not cache. `bourne_write` loses ~15 % throughput
+// from n=1000 to n=10000 while `_same` and `_four` stay flat. Rebuilding
+// `write_digits_at_ptr` without the 40 KB QUAD_LUT (200-byte pair table
+// only) made n=10000 *12 % slower* and the cliff persisted, refuting the
+// L1-conflict hypothesis. `perf stat` per iteration: bourne mispredicts
+// 7 050 branches vs serde_json's 843 (8.4×) while retiring 48 % more
+// instructions at higher IPC. The cost lives in the data-dependent shape
+// selection in `write_f64_to_ptr`.
 // ---------------------------------------------------------------------------
 
 mod bourne_write_same {
