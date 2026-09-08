@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Reproduce .github/workflows/ci.yml locally: `scripts/ci.sh [job]`
+# (test | msrv | clippy | fmt | miri | fuzz | all). No args runs everything
+# except miri and fuzz, which need a nightly toolchain installed.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+test_suite() {
+  # `--all-features` is deliberately absent from the workspace run:
+  # bourne-bench's `alloc-profile` (lib) and `compare-mem` (bin) features
+  # each install a #[global_allocator] and cannot share one build.
+  cargo test --workspace
+  cargo test -p json-bourne --all-features
+  cargo test -p json-bourne --no-default-features
+  cargo test -p json-bourne --no-default-features --features alloc
+  cargo test -p json-bourne --no-default-features --features alloc,indexmap,derive
+}
+
+run_test() {
+  test_suite
+  for target in thumbv7em-none-eabihf aarch64-unknown-none; do
+    cargo build -p json-bourne --no-default-features --target "$target"
+    cargo build -p json-bourne --no-default-features --features alloc --target "$target"
+  done
+}
+
+run_msrv() {
+  cargo +1.85 build --workspace
+}
+
+run_clippy() {
+  cargo clippy -p json-bourne -p bourne-derive --all-targets --all-features -- -D warnings
+  cargo clippy -p json-bourne --no-default-features -- -D warnings
+}
+
+run_fmt() {
+  cargo fmt --all -- --check
+}
+
+run_miri() {
+  MIRIFLAGS="-Zmiri-disable-isolation" RUSTFLAGS="--cfg bourne_no_simd" \
+    cargo +nightly miri test -p json-bourne --lib
+}
+
+run_fuzz() {
+  (cd fuzz && cargo +nightly fuzz run stream -- -max_total_time=60 -runs=10000)
+  (cd fuzz && cargo +nightly fuzz run typed -- -max_total_time=60 -runs=10000)
+}
+
+case "${1:-all}" in
+  test)   run_test ;;
+  msrv)   run_msrv ;;
+  clippy) run_clippy ;;
+  fmt)    run_fmt ;;
+  miri)   run_miri ;;
+  fuzz)   run_fuzz ;;
+  all)    run_test; run_msrv; run_clippy; run_fmt ;;
+  *) echo "usage: scripts/ci.sh [test|msrv|clippy|fmt|miri|fuzz|all]" >&2; exit 2 ;;
+esac

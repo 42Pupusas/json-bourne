@@ -29,6 +29,7 @@ extern crate alloc;
 #[global_allocator]
 static ALLOC: divan::AllocProfiler = divan::AllocProfiler::system();
 
+mod feature_guard;
 pub mod malformed;
 pub mod pathological;
 pub mod realistic;

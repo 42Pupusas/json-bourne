@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- CI no longer references the removed `bourne-core` package; the workflow and
+  `scripts/ci.sh` (new — reproduces the CI job list locally) now target
+  `json-bourne` / `bourne-derive`, and the bare-metal `no_std` job builds
+  `json-bourne` with and without `alloc`.
+- Enabling both of `bourne-bench`'s allocator features (`alloc-profile` and
+  `compare-mem`) is now a `compile_error!` instead of a link-time
+  `#[global_allocator]` conflict.
+
 ## [0.2.2] - 2026-07-23
 
 ### Changed

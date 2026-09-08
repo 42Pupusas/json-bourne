@@ -4,19 +4,27 @@ Type-driven JSON for Rust. `no_std`-first, zero dependencies, zero allocations
 for borrowed parses.
 
 ```rust
-use json_bourne::{from_json, parse_str, to_string};
+use json_bourne::{FromJson, parse_str};
 
-from_json! {
-    #[derive(Debug, PartialEq)]
-    struct User<'input> {
-        id: u64,
-        name: &'input str,
-        active: bool,
-    }
+#[derive(Debug, PartialEq, FromJson)]
+struct User<'input> {
+    id: u64,
+    name: &'input str,
+    active: bool,
 }
 
 let u: User<'_> = parse_str(r#"{"id":1,"name":"alice","active":true}"#).unwrap();
 assert_eq!(u.name, "alice");
+```
+
+```rust
+use json_bourne::{ToJson, to_string};
+
+#[derive(ToJson)]
+struct Point { x: i32, y: i32 }
+
+let s = to_string(&Point { x: 3, y: -7 }).unwrap();
+assert_eq!(s, r#"{"x":3,"y":-7}"#);
 ```
 
 ## Why
@@ -26,8 +34,9 @@ itself directly from the lexer — the typed structure already enforces JSON's
 grammar, so the per-event state machine is pure overhead for typed consumers.
 The result is faster typed parsing and zero allocations on the borrow path.
 
-- **No proc-macros.** `from_json!` and `to_json!` are declarative
-  `macro_rules!`, so the dependency graph is empty.
+- **Derive-driven.** `#[derive(FromJson, ToJson)]` (the `derive` feature) generates
+  the typed impls. The generated code itself is `no_std`; only the compile-time
+  derive pulls in the proc-macro stack.
 - **`no_std` everywhere.** The streaming `Lexer` / `Parser` layer is `no_std`
   always; with the default `std` feature off the crate is `no_std + alloc`,
   and turning `alloc` off too gives a pure `no_std` build (`HashMap` /
@@ -44,18 +53,21 @@ The `bourne-bench` crate is workspace-internal and is not published.
 | Feature     | Default | Pulls in                                            |
 |-------------|---------|-----------------------------------------------------|
 | `std`       | yes     | `alloc`, `HashMap`, `std::net`, `std::path`, `io::Write` adapter |
-| `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, `BTreeMap`/`Set`, escape decoding, `to_string` |
-| `indexmap`  | no      | `FromJson`/`ToJson` for `indexmap::IndexMap` (insertion order) |
+| `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, `BTreeMap`/`Set`, escape decoding, `to_string`, float serialization |
+| `indexmap`  | no      | `FromJson`/`ToJson` for `indexmap::IndexMap`/`IndexSet` (insertion order) |
+| `derive`    | no      | `#[derive(FromJson, ToJson)]` via the companion `bourne-derive` crate |
 
 `json-bourne` builds in `no_std + alloc` with `default-features = false, features = ["alloc"]`.
-For pure `no_std` (streaming `Lexer` / `Parser` only) build with `default-features = false`.
+For pure `no_std` (streaming `Lexer` / `Parser` and stack-only typed parsing) build
+with `default-features = false`. Note that `f64`/`f32` round-trips need `alloc`
+(the float formatter's output helpers are alloc-gated).
 
 ## Status
 
-This is a v0.1 release. The public API is reserved-the-right-to-break until
-v1.0. The streaming layer is fuzzed; conformance against
-[JSONTestSuite][jts] is asserted in CI; zero-allocation guarantees are pinned
-by a counting-allocator test.
+The public API is reserved-the-right-to-break until v1.0. The streaming layer is
+fuzzed; conformance against [JSONTestSuite][jts] is asserted in CI; zero-allocation
+guarantees are pinned by a counting-allocator test. `scripts/ci.sh` reproduces the
+CI job list locally.
 
 [jts]: https://github.com/nst/JSONTestSuite
 

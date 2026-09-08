@@ -3,3 +3,7 @@
 dhat-heap.json
 *.profraw
 lcov.info
+# Profiling artifacts (flamegraph SVGs, perf-analysis PDFs) are outputs of
+# the bench harness, not source; keep them out of the tree.
+*.svg
+*.pdf
