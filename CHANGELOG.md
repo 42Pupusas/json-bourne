@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SocketAddr` writers) formats into a 64-byte stack buffer
   (`DisplayScratch`) instead of allocating a `String` per value
   (audit 4.5.3).
+- **Breaking (no_std):** `ToJson` for `f64`/`f32` and the `JsonWrite`
+  float methods are no longer `alloc`-gated, so no-std builds now
+  serialize floats (audit 5.4). `FmtWriteSink` is available without
+  `alloc`. `StringSink`, `ByteSink`, `to_string`, `to_vec`, `to_fmt`,
+  `to_string_pretty`, and `MapKeyOut` are unchanged and remain
+  `alloc`-gated.
 
 ### Tests
 - Fused integer paths (`parse_i64_value` / `parse_u64_value` /

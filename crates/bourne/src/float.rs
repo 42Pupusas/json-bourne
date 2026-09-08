@@ -26,6 +26,7 @@
 
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
 use alloc::string::String;
 use core::fmt;
 
@@ -766,6 +767,10 @@ unsafe fn write_exponent_ptr(dst: *mut u8, exp: i32) -> usize {
 // (digits, '.', 'e', '-', '+'). They guard a formatter-internal bug, not
 // user input. ASCII validation of ≤32 bytes is one SIMD compare.
 
+/// Append the shortest round-trip decimal form of a finite `f64` to a
+/// `String`. Alloc builds only — the `fmt::Write` and `Vec<u8>` variants
+/// below carry no such bound.
+#[cfg(feature = "alloc")]
 pub(crate) fn format_finite(f: f64, out: &mut String) {
     let mut buf = [0u8; FORMAT_BUF_LEN];
     let len = format_finite_to_buf(f, &mut buf);
@@ -782,6 +787,7 @@ pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> 
 
 /// Bit mask of the IEEE 754 exponent field; all-ones marks inf/NaN.
 /// Used by the serializer's finiteness checks.
+#[cfg(feature = "alloc")]
 pub(crate) const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
 
 /// `Vec<u8>` path used by `ByteSink::write_float_f64`. Renders to a 32-byte

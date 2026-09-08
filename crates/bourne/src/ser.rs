@@ -15,7 +15,9 @@
 //! the ryu shortest-round-trip algorithm. Non-float primitives, composites,
 //! and the std/alloc adapters are all in scope.
 
-use crate::escape::{write_escaped, write_escaped_body};
+use crate::escape::write_escaped;
+#[cfg(feature = "alloc")]
+use crate::escape::write_escaped_body;
 use crate::{Error, ErrorKind, Position};
 
 #[cfg(feature = "alloc")]
@@ -229,11 +231,9 @@ pub trait JsonWrite {
     /// `-inf`, `NaN`) have no JSON representation; sinks reject them
     /// via their `Self::Error` type.
     ///
-    /// The default routes through `core::fmt::Write` after stack-buffer
-    /// formatting via `format!` — this is the "good enough" path that
-    /// works for any sink. Sinks that want shortest-round-trip output
-    /// without fmt overhead override with a direct ryu call.
-    #[cfg(feature = "alloc")]
+    /// `crate::float::format_finite_fmt` is the allocation-free reference
+    /// route (32-byte stack buffer, `core::fmt::Write`); sinks with a
+    /// faster tail or a shortest-round-trip formatter override it.
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error>;
 
     /// Write a finite `f64` for which the caller has reserved
@@ -243,7 +243,6 @@ pub trait JsonWrite {
     /// `f` is non-finite — in which case nothing is emitted and the
     /// caller turns the `false` into a typed error. Sinks that cannot
     /// use a reservation forward to [`Self::write_float_f64`].
-    #[cfg(feature = "alloc")]
     #[inline]
     fn write_float_f64_hinted(&mut self, f: f64) -> Result<bool, Self::Error> {
         if f.is_finite() {
@@ -712,34 +711,28 @@ fn format_i128(n: i128, buf: &mut [u8; 40]) -> &str {
 // The bench in `bourne-bench/floats` pins this entry point by name.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "alloc")]
 pub mod float {
     //! Public so the head-to-head bench in `bourne-bench` can pin the
     //! production formatter by name; not part of the documented API
     //! surface.
 
+    #[cfg(feature = "alloc")]
     use super::{Error, ErrorKind, Position};
+    #[cfg(feature = "alloc")]
     use alloc::string::String;
-
-    /// Reject `inf` / `-inf` / `NaN` with a typed error. Position is
-    /// `START` because serializer errors don't have an input byte to
-    /// point at — symmetric with how the parse side reports
-    /// "byte offset" errors.
-    #[inline]
-    const fn reject_non_finite(f: f64) -> Result<(), Error> {
-        if f.is_finite() {
-            Ok(())
-        } else {
-            Err(Error::new(ErrorKind::NonFiniteFloat, Position::START))
-        }
-    }
 
     /// Production float formatter. Delegates correctness to the
     /// in-tree Grisu3 implementation (`crate::float`). Non-finite
-    /// inputs are rejected before any digit work happens.
+    /// inputs are rejected before any digit work happens; position is
+    /// `START` because serializer errors don't have an input byte to
+    /// point at — symmetric with how the parse side reports "byte
+    /// offset" errors.
+    #[cfg(feature = "alloc")]
     #[inline]
     pub fn format_f64_write(f: f64, out: &mut String) -> Result<(), Error> {
-        reject_non_finite(f)?;
+        if !f.is_finite() {
+            return Err(Error::new(ErrorKind::NonFiniteFloat, Position::START));
+        }
         crate::float::format_finite(f, out);
         Ok(())
     }
@@ -830,20 +823,17 @@ pub fn to_vec<T: ToJson + ?Sized>(value: &T) -> Result<alloc::vec::Vec<u8>, Erro
 /// [`Error`] for the float path; the unified sink-level error is
 /// [`Error`], with `core::fmt::Error` mapped to a generic write
 /// failure.
-#[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct FmtWriteSink<'a, W: ?Sized> {
     out: &'a mut W,
 }
 
-#[cfg(feature = "alloc")]
 impl<'a, W: core::fmt::Write + ?Sized> FmtWriteSink<'a, W> {
     pub const fn new(out: &'a mut W) -> Self {
         Self { out }
     }
 }
 
-#[cfg(feature = "alloc")]
 impl<W: core::fmt::Write + ?Sized> JsonWrite for FmtWriteSink<'_, W> {
     type Error = Error;
 
@@ -876,7 +866,6 @@ impl<W: core::fmt::Write + ?Sized> JsonWrite for FmtWriteSink<'_, W> {
 /// `fmt::Write` errors don't carry detail. Map to a typed parse-style
 /// error so callers can distinguish the failure mode without losing
 /// the trait's error contract.
-#[cfg(feature = "alloc")]
 #[inline]
 const fn fmt_write_error() -> Error {
     Error::new(ErrorKind::TypeMismatch, Position::START)
@@ -1387,6 +1376,46 @@ fn write_array_hinted<T: ToJson, W: JsonWrite + ?Sized>(
     w.end_array_hinted()
 }
 
+impl ToJson for f64 {
+    const MIN_SERIALIZED_LEN: usize = 1;
+    // Worst-case f64 string: sign + 17 digits + '.' + 'e' + sign +
+    // 3-digit exponent = 25 bytes. Round to 32 to match the
+    // formatter's stack-buffer size.
+    const MAX_SERIALIZED_LEN: usize = 32;
+    #[inline]
+    fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+        // The hinted path keeps `f` in xmm and writes straight into
+        // the sink's reserved tail when 32 bytes are available; on
+        // sinks without a tail it degrades to `write_float_f64`.
+        if w.write_float_f64_hinted(*self)? {
+            return Ok(());
+        }
+        // Non-finite: the hinted write emitted nothing. Hand the
+        // sink the actual value — its documented contract is to
+        // reject non-finite input through `Self::Error` — rather
+        // than a fabricated `NaN` a tolerant sink would happily
+        // serialize (audit 3.14).
+        w.write_float_f64(*self)
+    }
+}
+
+/// `f32` widens losslessly to `f64` for serialization. The decoded
+/// form on the parse side narrows via `as f32`, mirroring this.
+impl ToJson for f32 {
+    const MIN_SERIALIZED_LEN: usize = 1;
+    const MAX_SERIALIZED_LEN: usize = 32;
+    #[inline]
+    fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+        #[allow(clippy::cast_precision_loss)]
+        let widened = f64::from(*self);
+        if w.write_float_f64_hinted(widened)? {
+            return Ok(());
+        }
+        // See the `f64` impl: the real value, not a placeholder.
+        w.write_float_f64(widened)
+    }
+}
+
 impl<T: ToJson> ToJson for [T] {
     const MIN_SERIALIZED_LEN: usize = 2; // "[]"
     #[inline]
@@ -1509,46 +1538,6 @@ mod alloc_impls {
         #[inline]
         fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
             w.write_escaped_str(self.as_ref())
-        }
-    }
-
-    impl ToJson for f64 {
-        const MIN_SERIALIZED_LEN: usize = 1;
-        // Worst-case f64 string: sign + 17 digits + '.' + 'e' + sign +
-        // 3-digit exponent = 25 bytes. Round to 32 to match the
-        // formatter's stack-buffer size.
-        const MAX_SERIALIZED_LEN: usize = 32;
-        #[inline]
-        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
-            // The hinted path keeps `f` in xmm and writes straight into
-            // the sink's reserved tail when 32 bytes are available; on
-            // sinks without a tail it degrades to `write_float_f64`.
-            if w.write_float_f64_hinted(*self)? {
-                return Ok(());
-            }
-            // Non-finite: the hinted write emitted nothing. Hand the
-            // sink the actual value — its documented contract is to
-            // reject non-finite input through `Self::Error` — rather
-            // than a fabricated `NaN` a tolerant sink would happily
-            // serialize (audit 3.14).
-            w.write_float_f64(*self)
-        }
-    }
-
-    /// `f32` widens losslessly to `f64` for serialization. The decoded
-    /// form on the parse side narrows via `as f32`, mirroring this.
-    impl ToJson for f32 {
-        const MIN_SERIALIZED_LEN: usize = 1;
-        const MAX_SERIALIZED_LEN: usize = 32;
-        #[inline]
-        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
-            #[allow(clippy::cast_precision_loss)]
-            let widened = f64::from(*self);
-            if w.write_float_f64_hinted(widened)? {
-                return Ok(());
-            }
-            // See the `f64` impl: the real value, not a placeholder.
-            w.write_float_f64(widened)
         }
     }
 

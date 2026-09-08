@@ -509,6 +509,19 @@ Recommendation: un-gate `float.rs` (keep only the `Vec` helpers behind
 `alloc`), make `write_float_f64` unconditional, and replace the inline cfg
 blocks with thin wrapper methods (`fn flush_float_taint` with an `alloc` impl
 and a no-op twin).
+— *Landed 2026-07.* `float.rs` is un-gated (only `format_finite` /
+`format_finite_to_vec` keep `alloc` gates; the teju core, `POW10`,
+`EXP_MASK`, and `format_finite_fmt` are core-only), `write_float_f64` /
+`write_float_f64_hinted` are unconditional trait methods, and the `f64` /
+`f32` `ToJson` impls moved out of `alloc_impls`. The inline cfg blocks in
+`[T]::write_json` were already gone with the §4.5.2 windowing rewrite, so
+no wrapper method was needed there. `FmtWriteSink` and `to_fmt` are now
+the allocation-free escape hatch and ship in no-std builds. The bare
+`--no-default-features` build compiles and passes tests for the first
+time — it had been broken at the lexer (`crate::float::POW10`) and the
+feature-table rot the audit described; `serde_json` needs its `alloc`
+feature for the same reason (`f64`'s `impl` lives behind `alloc` there).
+The feature table note follows.
 
 ## 6. Structure (SRP) observations
 

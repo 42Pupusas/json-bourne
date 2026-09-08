@@ -118,7 +118,6 @@ pub(crate) mod display_scratch;
 mod error;
 mod escape;
 mod event;
-#[cfg(feature = "alloc")]
 mod float;
 mod lexer;
 mod parser;
@@ -135,10 +134,10 @@ pub use error::{Error, ErrorKind, LineColumn, Position};
 pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 pub use lexer::{Checkpoint, DEFAULT_MAX_DEPTH, Lexer, ValueKind};
 pub use parser::Parser;
+pub use ser::FmtWriteSink;
 #[cfg(feature = "alloc")]
 pub use ser::{
-    ByteSink, FmtWriteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string,
-    to_string_pretty, to_vec,
+    ByteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string, to_string_pretty, to_vec,
 };
 #[cfg(feature = "std")]
 pub use ser::{IoWriteSink, to_writer};
@@ -648,7 +647,7 @@ mod tests {
     /// accumulated as `i64`, so the unsigned magnitude (= `i64::MAX + 1`)
     /// overflowed before the negation step and the input was rejected as
     /// `NumberOutOfRange`. Pin both the value and the boundary +/- 1.
-    #[cfg(feature = "std")]
+    #[cfg(feature = "alloc")]
     #[test]
     fn duration_round_trips_fractional_seconds() {
         use std::time::Duration;
