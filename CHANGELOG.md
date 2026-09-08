@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- The default `JsonWrite::write_escaped_str` pushed every byte through the
+  byte-oriented `write_byte`, so sinks whose `write_byte` is char-oriented
+  mangled non-ASCII strings: `to_fmt("é")` produced `"Ã©"`. The default now
+  splits the string into literal runs and copies each through `write_str_raw`,
+  keeping multi-byte UTF-8 intact; all sinks now agree byte-for-byte on any
+  input (pinned by a cross-sink test over unicode/escape/control mixes).
 - `#[bourne(tag = "…", rename_all = "…")]` (internally tagged) and the adjacent
   `tag`/`content` form now apply `rename_all` (and per-variant `rename`) when
   parsing, matching the serialize side. Previously these enums emitted their

@@ -3225,4 +3225,70 @@ mod unsafe_boundary_tests {
         let r = to_fmt(&1.5_f64, &mut sink);
         assert!(r.is_err());
     }
+
+    /// Regression for audit 3.9: the default `write_escaped_str` pushed
+    /// every byte through `write_byte`, and `FmtWriteSink::write_byte`
+    /// is char-oriented (`write_char(b as char)`), so UTF-8 continuation
+    /// bytes became Latin-1 mojibake (`é` → `Ã©`). All sinks must agree
+    /// byte-for-byte on strings that mix escapes with non-ASCII.
+    #[test]
+    fn all_sinks_agree_on_non_ascii_and_escapes() {
+        let cases = [
+            "plain ascii",
+            "café ñ€𝄞",
+            "tab\tnewline\nquote\"backslash\\",
+            "é\"é\\é\né",
+            "100% ctrl-less unicode ✓ ✓ ✓",
+            "\u{7f}\u{1f}\u{0}",
+        ];
+        for case in cases {
+            let expected = to_string(case).expect("StringSink");
+            assert_eq!(expected, format!("\"{}\"", escaped_debug(case)));
+
+            let mut fmt_out = String::new();
+            to_fmt(case, &mut fmt_out).expect("FmtWriteSink");
+            assert_eq!(fmt_out, expected, "FmtWriteSink diverged for {case:?}");
+
+            let mut byte_out: Vec<u8> = Vec::new();
+            let mut sink = ByteSink::new(&mut byte_out);
+            case.write_json(&mut sink).expect("ByteSink");
+            assert_eq!(
+                core::str::from_utf8(&byte_out).unwrap(),
+                expected,
+                "ByteSink diverged for {case:?}"
+            );
+
+            let mut pretty_out = String::new();
+            let mut sink = PrettyStringSink::new(&mut pretty_out);
+            case.write_json(&mut sink).expect("PrettyStringSink");
+            assert_eq!(
+                pretty_out, expected,
+                "PrettyStringSink diverged for {case:?}"
+            );
+        }
+    }
+
+    /// Build the expected JSON string body the same way the doc example
+    /// does — via an independent escape walk over chars, not via the
+    /// code under test.
+    fn escaped_debug(s: &str) -> String {
+        let mut out = String::new();
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                '\u{8}' => out.push_str("\\b"),
+                '\u{c}' => out.push_str("\\f"),
+                c if (c as u32) < 0x20 => {
+                    use core::fmt::Write as _;
+                    let _ = write!(out, "\\u{:04x}", c as u32);
+                }
+                c => out.push(c),
+            }
+        }
+        out
+    }
 }

@@ -77,14 +77,37 @@ pub trait JsonWrite {
     fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error>;
 
     /// Append a JSON-quoted, escaped string (including the surrounding
-    /// `"` characters). The default impl escapes one byte at a time
-    /// through `write_byte`; sinks with bulk-write capability (like
-    /// [`StringSink`]) override with a literal-run fast path.
+    /// `"` characters).
+    ///
+    /// The default impl splits the input into literal runs — maximal
+    /// stretches needing no escape — and hands each run to
+    /// [`Self::write_str_raw`], so multi-byte UTF-8 stays a `&str` copy
+    /// and never crosses the byte-oriented [`Self::write_byte`]. Pushing
+    /// continuation bytes through `write_byte` used to mangle non-ASCII
+    /// strings on char-oriented sinks (audit 3.9: `"é"` came out as
+    /// `"Ã©"` through `FmtWriteSink`). Sinks with a faster native escape
+    /// path (`StringSink`, `ByteSink`, `PrettyStringSink`) still override
+    /// this; the run-splitting shape is the same.
     #[inline]
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
         self.write_byte(b'"')?;
-        for &b in s.as_bytes() {
-            write_escape_byte(self, b)?;
+        let bytes = s.as_bytes();
+        let mut start = 0;
+        for (i, &b) in bytes.iter().enumerate() {
+            if needs_escape(b) {
+                if start < i {
+                    // Escape bytes are all ASCII, so `start` and `i` sit
+                    // on char boundaries and the stretch between them is
+                    // valid UTF-8 — multi-byte sequences stay intact
+                    // inside one `write_str_raw` copy.
+                    self.write_str_raw(&s[start..i])?;
+                }
+                write_escape_byte(self, b)?;
+                start = i + 1;
+            }
+        }
+        if start < bytes.len() {
+            self.write_str_raw(&s[start..])?;
         }
         self.write_byte(b'"')
     }
@@ -204,9 +227,8 @@ fn write_escape_byte<W: JsonWrite + ?Sized>(w: &mut W, b: u8) -> Result<(), W::E
 /// body (quote, backslash, or any control byte `< 0x20`). Everything else —
 /// including high-bit UTF-8 continuation bytes — is safe to write verbatim.
 ///
-/// Only used by the escape-writing sinks (`StringSink`, `ByteSink`,
-/// `PrettyStringSink`), all of which are alloc-gated.
-#[cfg(feature = "alloc")]
+/// All matching bytes are ASCII, so run boundaries derived from this
+/// predicate are always `char` boundaries of the surrounding `&str`.
 #[inline]
 const fn needs_escape(b: u8) -> bool {
     b == b'"' || b == b'\\' || b < 0x20
