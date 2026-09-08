@@ -1737,21 +1737,22 @@ mod alloc_impls {
     // -----------------------------------------------------------------
 
     /// Display the value into a small scratch buffer, then write it as
-    /// a JSON string. The `fmt::Write` trait fills our scratch `String`;
-    /// from there we reuse `write_escaped_str` even though these types'
-    /// canonical text never contains characters that need escaping —
-    /// the cost is one SIMD scan that exits immediately, and using the
-    /// escape path keeps a single string-writing entry point.
+    /// a JSON string. The `fmt::Write` trait fills a stack buffer; the
+    /// accumulated text is then written with the same SIMD escape scan
+    /// every other string takes (the canonical forms of these types
+    /// never contain escapable characters, so the scan exits
+    /// immediately) — one string-writing entry point for the module.
     #[cfg(feature = "std")]
     fn write_display<T: ::core::fmt::Display, W: JsonWrite + ?Sized>(
         v: &T,
         w: &mut W,
     ) -> Result<(), W::Error> {
+        use crate::display_scratch::DisplayScratch;
         use ::core::fmt::Write as _;
-        let mut buf = String::new();
-        // fmt::Write into a String is infallible.
-        let _ = write!(&mut buf, "{v}");
-        w.write_escaped_str(&buf)
+        let mut buf = DisplayScratch::new();
+        // fmt::Write onto the stack buffer is infallible.
+        let _ = write!(buf, "{v}");
+        w.write_escaped_str(buf.as_str())
     }
 
     #[cfg(feature = "std")]

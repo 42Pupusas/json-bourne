@@ -455,6 +455,11 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    chunks.
 3. `write_display` (IP/socket addrs) allocates a `String` per value; a
    `[u8; 64]` `fmt::Write` adapter removes the allocation.
+   — *Landed 2026-07.* `DisplayScratch` (`crates/bourne/src/display_scratch.rs`)
+   is a 64-byte stack buffer with a `fmt::Write` impl (suffix dropped on
+   overflow — callers format canonical fixed-width types that fit); the
+   `write_display` adapters for the four `std::net` types now format into it.
+   std-only, like its consumers, so the no-std build is unchanged.
 4. Internally/adjacently tagged enums parse the payload twice (`skip_value`
    then real parse). When the tag key comes first (the common case for
    serialized output), the adjacent path can parse `content` directly without

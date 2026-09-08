@@ -113,6 +113,8 @@ extern crate self as json_bourne;
 
 mod casing;
 mod de;
+#[cfg(feature = "std")]
+pub(crate) mod display_scratch;
 mod error;
 mod escape;
 mod event;

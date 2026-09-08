@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `MAX_DEPTH` parameterizations — `Stack::new` asserts this at compile
   time for non-default choices (the default is 128), a breaking change
   for anyone who raised it past 128 (audit 4.4.4).
+- ser: `write_display` (the `std::net` `IpAddr`/`Ipv4Addr`/`Ipv6Addr`/
+  `SocketAddr` writers) formats into a 64-byte stack buffer
+  (`DisplayScratch`) instead of allocating a `String` per value
+  (audit 4.5.3).
 
 ### Tests
 - Fused integer paths (`parse_i64_value` / `parse_u64_value` /
