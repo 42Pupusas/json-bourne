@@ -51,6 +51,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `alloc`-gated.
 
 ### Tests
+- `lib.rs` shrank from 3 751 to 1 461 lines: its ~2 300 lines of inline
+  `#[cfg(test)]` modules moved to nine `src/tests/*.rs` modules (those
+  reaching crate internals) and three `tests/` integration files
+  (`ser_roundtrip`, `to_json_derive`, `derive_roundtrip` — public API
+  only, so running them out-of-crate also pins that the surface is
+  exported and the derives resolve for external consumers). No test was
+  added, removed, or changed: 281 before and after (audit 6).
 - Fused integer paths (`parse_i64_value` / `parse_u64_value` /
   `parse_i128_value`) now have direct lexer-level tests: 1–19 digit
   literals against `str::parse`, the 19/20-digit and i64/i128 range

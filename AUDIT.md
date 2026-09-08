@@ -634,6 +634,25 @@ Not defects, but they bear on how safely the fixes above can be made.
 - `crates/bourne/src/lib.rs` is 3 199 lines, ~3 000 of which are `#[cfg(test)]`
   unit tests. Move them to `tests/` (or `src/tests/*.rs` modules) so the public
   surface of the crate is readable in one screen.
+  — *Landed 2026-09* (it had grown to 3 751 lines by then; now **1 461**, a
+  61 % cut). The split follows what each test can actually reach, which is
+  the distinction the audit left open:
+    - Tests touching crate internals (`lexer::Stack`/`Frame`, `parse_f64_value`,
+      `decode_escapes`, `float::format_finite`, the miri-targeted unsafe
+      boundaries) became `src/tests/*.rs` — nine modules: `stack_frames`,
+      `float_fast_path`, `integer_paths`, `sink_adapter`, `sink_direct`,
+      `unsafe_boundary`, `vec_fast_path`, `escape_decode`, `float_uncentred`.
+      An integration test cannot see `pub(crate)`, so these had to stay in-crate.
+    - Tests using only the public API moved out to `tests/` — `ser_roundtrip`
+      (29), `to_json_derive` (26), `derive_roundtrip` (10). This is a strict
+      gain: out-of-crate they also pin that the surface is exported and that
+      the derives' `::json_bourne::` paths resolve for a real consumer, neither
+      of which the in-crate versions could catch.
+  The 900-line `unsafe_boundary_tests` module was itself five jobs, already
+  self-documented with banner comments; the split follows those seams rather
+  than a new grouping. Method throughout: gate the old block `#[cfg(any())]`,
+  confirm the suite still reports the same count with it excluded (proving the
+  new modules complete), then delete. 281 tests before and after, every step.
 - `ser.rs` (2 000 lines) holds the trait, five sinks, the integer formatter, the
   array/object writers, and all impls. Natural split: `sink/{string,bytes,fmt,
   io,pretty}.rs`, `int_format.rs` (`IntFormatter` owning `DIGIT_LUT` +
