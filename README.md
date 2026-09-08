@@ -53,14 +53,13 @@ The `bourne-bench` crate is workspace-internal and is not published.
 | Feature     | Default | Pulls in                                            |
 |-------------|---------|-----------------------------------------------------|
 | `std`       | yes     | `alloc`, `HashMap`, `std::net`, `std::path`, `io::Write` adapter |
-| `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, `BTreeMap`/`Set`, escape decoding, `to_string`, float serialization |
+| `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, `BTreeMap`/`Set`, escape decoding, `to_string`/`to_vec` |
 | `indexmap`  | no      | `FromJson`/`ToJson` for `indexmap::IndexMap`/`IndexSet` (insertion order) |
 | `derive`    | no      | `#[derive(FromJson, ToJson)]` via the companion `bourne-derive` crate |
 
 `json-bourne` builds in `no_std + alloc` with `default-features = false, features = ["alloc"]`.
-For pure `no_std` (streaming `Lexer` / `Parser` and stack-only typed parsing) build
-with `default-features = false`. Note that `f64`/`f32` round-trips need `alloc`
-(the float formatter's output helpers are alloc-gated).
+For pure `no_std` (streaming `Lexer` / `Parser`, stack-only typed parsing, and float
+serialization through `to_fmt` / `FmtWriteSink`) build with `default-features = false`.
 
 ## Status
 

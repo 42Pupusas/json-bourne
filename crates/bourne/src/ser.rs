@@ -977,7 +977,6 @@ pub fn to_writer<T: ToJson + ?Sized, W: std::io::Write>(
 /// Returns the underlying [`Error`] (typed) on failure — including
 /// non-finite floats. For `String` targets prefer [`to_string`]; this
 /// entry point is for arbitrary `fmt::Write` consumers.
-#[cfg(feature = "alloc")]
 pub fn to_fmt<T: ToJson + ?Sized, W: core::fmt::Write + ?Sized>(
     value: &T,
     writer: &mut W,

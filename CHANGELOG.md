@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailing fraction/exponent after full-length literals.
 
 ### Fixed
+- docs: the README and rustdoc feature tables still said `f64`/`f32`
+  round-trips need `alloc` after the float serializer was un-gated;
+  `to_fmt` is documented as the allocation-free float path and ships in
+  `no_std` builds (audit 5.2/5.4).
 - derive: `FromJson` field types written as `&'a str` with a lifetime name
   other than `'input` silently took the generic `FromJson` dispatch instead
   of the direct string read. `acquire_expr` now matches the type

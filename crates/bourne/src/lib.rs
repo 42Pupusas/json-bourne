@@ -80,13 +80,15 @@
 //! | Feature     | Default | Purpose                                     |
 //! |-------------|---------|---------------------------------------------|
 //! | `std`       | yes     | `HashMap`, `std::net`, `std::path`, `to_writer` |
-//! | `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, escape decoding |
+//! | `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, escape decoding, `to_string`/`to_vec` |
 //! | `indexmap`  | no      | `IndexMap` / `IndexSet` (insertion order)   |
+//! | `derive`    | yes     | `#[derive(FromJson, ToJson)]` via `bourne-derive` |
 //!
 //! `default-features = false` plus `["alloc"]` gives a `no_std + alloc`
-//! build. `default-features = false` alone gives pure `no_std`: only the
-//! streaming [`Lexer`] / [`Parser`] and typed APIs that don't need a
-//! heap (e.g. parsing into stack-allocated primitives) are available.
+//! build. `default-features = false` alone gives pure `no_std`: the
+//! streaming [`Lexer`] / [`Parser`], typed APIs that don't need a heap,
+//! and float serialization through [`to_fmt`] / [`FmtWriteSink`] are
+//! available.
 // Targeted uses of `unsafe` inside the streaming layer (lexer.rs / event.rs):
 //   1. `from_utf8_unchecked` after the lexer has validated every byte against
 //      the RFC 3629 byte ranges inline. The safe alternative re-walks the
@@ -134,11 +136,11 @@ pub use error::{Error, ErrorKind, LineColumn, Position};
 pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 pub use lexer::{Checkpoint, DEFAULT_MAX_DEPTH, Lexer, ValueKind};
 pub use parser::Parser;
-pub use ser::FmtWriteSink;
 #[cfg(feature = "alloc")]
 pub use ser::{
-    ByteSink, MapKeyOut, PrettyStringSink, StringSink, to_fmt, to_string, to_string_pretty, to_vec,
+    ByteSink, MapKeyOut, PrettyStringSink, StringSink, to_string, to_string_pretty, to_vec,
 };
+pub use ser::{FmtWriteSink, to_fmt};
 #[cfg(feature = "std")]
 pub use ser::{IoWriteSink, to_writer};
 pub use ser::{JsonWrite, ToJson};

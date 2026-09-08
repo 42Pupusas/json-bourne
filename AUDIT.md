@@ -496,6 +496,12 @@ It documents `from_json!` / `to_json!` declarative macros, states "No
 proc-macros" and "v0.1", none of which is true for 0.2.2 (derive crate, syn 3).
 The crate-level rustdoc in `lib.rs` is current; the README should be generated
 from or reconciled with it.
+— *Landed 2026-07, reconciled 2026-09.* The rewrite (derive feature, feature
+table, `scripts/ci.sh` pointer) predates the §5.4 float un-gating, whose
+stale claim — "`f64`/`f32` round-trips need `alloc`" — this pass removed
+from both the README and the rustdoc feature table (the rustdoc table was
+also missing the `derive` row). `to_fmt` / `FmtWriteSink` are the
+no-alloc float path and now ship ungated in both docs.
 
 ### 5.3 S3 — Repository hygiene
 
