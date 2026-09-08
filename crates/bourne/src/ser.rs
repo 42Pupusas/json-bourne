@@ -15,6 +15,7 @@
 //! the ryu shortest-round-trip algorithm. Non-float primitives, composites,
 //! and the std/alloc adapters are all in scope.
 
+use crate::escape::{write_escaped, write_escaped_body};
 use crate::{Error, ErrorKind, Position};
 
 #[cfg(feature = "alloc")]
@@ -79,37 +80,15 @@ pub trait JsonWrite {
     /// Append a JSON-quoted, escaped string (including the surrounding
     /// `"` characters).
     ///
-    /// The default impl splits the input into literal runs — maximal
-    /// stretches needing no escape — and hands each run to
-    /// [`Self::write_str_raw`], so multi-byte UTF-8 stays a `&str` copy
-    /// and never crosses the byte-oriented [`Self::write_byte`]. Pushing
-    /// continuation bytes through `write_byte` used to mangle non-ASCII
-    /// strings on char-oriented sinks (audit 3.9: `"é"` came out as
-    /// `"Ã©"` through `FmtWriteSink`). Sinks with a faster native escape
-    /// path (`StringSink`, `ByteSink`, `PrettyStringSink`) still override
-    /// this; the run-splitting shape is the same.
+    /// Default: open-quote, shared escape walk, close-quote, through
+    /// [`Self::write_byte`]/[`Self::write_str_raw`]. One implementation
+    /// ([`crate::escape`]) serves every sink; char-oriented `write_byte`
+    /// sinks cannot mangle non-ASCII because multi-byte runs only ever
+    /// cross [`Self::write_str_raw`] (audit 3.9). Sinks with a faster
+    /// native path override this.
     #[inline]
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
-        self.write_byte(b'"')?;
-        let bytes = s.as_bytes();
-        let mut start = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if needs_escape(b) {
-                if start < i {
-                    // Escape bytes are all ASCII, so `start` and `i` sit
-                    // on char boundaries and the stretch between them is
-                    // valid UTF-8 — multi-byte sequences stay intact
-                    // inside one `write_str_raw` copy.
-                    self.write_str_raw(&s[start..i])?;
-                }
-                write_escape_byte(self, b)?;
-                start = i + 1;
-            }
-        }
-        if start < bytes.len() {
-            self.write_str_raw(&s[start..])?;
-        }
-        self.write_byte(b'"')
+        write_escaped(self, s)
     }
 
     /// Append a byte slice whose contents are known-valid UTF-8.
@@ -266,52 +245,6 @@ pub trait JsonWrite {
     }
 }
 
-const HEX_LOWER: [u8; 16] = *b"0123456789abcdef";
-
-/// Escape sequences for bytes 0x00–0x1F plus `"` and `\`. `0` means
-/// the byte passes through verbatim; otherwise the value is the ASCII
-/// char after `\` (e.g. `b'n'` for `\n`).
-const ESCAPE_TABLE: [u8; 256] = {
-    let mut t = [0u8; 256];
-    t[b'"' as usize] = b'"';
-    t[b'\\' as usize] = b'\\';
-    t[b'\n' as usize] = b'n';
-    t[b'\r' as usize] = b'r';
-    t[b'\t' as usize] = b't';
-    t[0x08] = b'b';
-    t[0x0C] = b'f';
-    t
-};
-
-/// Write one byte of a string body, applying JSON escape rules.
-fn write_escape_byte<W: JsonWrite + ?Sized>(w: &mut W, b: u8) -> Result<(), W::Error> {
-    let esc = ESCAPE_TABLE[b as usize];
-    if esc != 0 {
-        w.write_byte(b'\\')?;
-        return w.write_byte(esc);
-    }
-    if b < 0x20 {
-        w.write_byte(b'\\')?;
-        w.write_byte(b'u')?;
-        w.write_byte(b'0')?;
-        w.write_byte(b'0')?;
-        w.write_byte(HEX_LOWER[(b >> 4) as usize])?;
-        return w.write_byte(HEX_LOWER[(b & 0x0F) as usize]);
-    }
-    w.write_byte(b)
-}
-
-/// Returns true for bytes that need an escape sequence inside a JSON string
-/// body (quote, backslash, or any control byte `< 0x20`). Everything else —
-/// including high-bit UTF-8 continuation bytes — is safe to write verbatim.
-///
-/// All matching bytes are ASCII, so run boundaries derived from this
-/// predicate are always `char` boundaries of the surrounding `&str`.
-#[inline]
-const fn needs_escape(b: u8) -> bool {
-    b == b'"' || b == b'\\' || b < 0x20
-}
-
 /// `JsonWrite` sink that appends to a `String`. Infallible.
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
@@ -350,35 +283,10 @@ impl JsonWrite for StringSink<'_> {
         Ok(())
     }
 
-    /// Literal-run fast path: scan for the next byte that needs escaping,
-    /// bulk-append the safe stretch, then emit one escape and resume.
-    /// Mirrors the `decode_escapes` strategy in `de.rs` in reverse.
+    /// Single shared escape walk ([`crate::escape`]); this sink keeps
+    /// the default quotes-via-`write_byte` shape.
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
-        self.out.push('"');
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        let mut start = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if needs_escape(b) {
-                if start < i {
-                    // Safe stretch: every byte in [start..i] is either ASCII
-                    // non-special or part of a valid UTF-8 multi-byte run
-                    // (since `s` is `&str`, the input is valid UTF-8 and
-                    // the only single-byte stop conditions are the ones
-                    // `needs_escape` flags).
-                    self.out.push_str(&s[start..i]);
-                }
-                write_escape_byte(self, b)?;
-                start = i + 1;
-            }
-            i += 1;
-        }
-        if start < bytes.len() {
-            self.out.push_str(&s[start..]);
-        }
-        self.out.push('"');
-        Ok(())
+        write_escaped(self, s)
     }
 
     /// Production float path. Currently dispatches to the `write!`-based
@@ -462,27 +370,10 @@ impl JsonWrite for ByteSink<'_> {
         Ok(())
     }
 
+    /// Single shared escape walk ([`crate::escape`]); byte-slice copies
+    /// instead of `&str` through the custom `write_str_raw`.
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
-        self.out.push(b'"');
-        let bytes = s.as_bytes();
-        let mut i = 0;
-        let mut start = 0;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if needs_escape(b) {
-                if start < i {
-                    self.out.extend_from_slice(&bytes[start..i]);
-                }
-                write_escape_byte(self, b)?;
-                start = i + 1;
-            }
-            i += 1;
-        }
-        if start < bytes.len() {
-            self.out.extend_from_slice(&bytes[start..]);
-        }
-        self.out.push(b'"');
-        Ok(())
+        write_escaped(self, s)
     }
 
     #[inline]
@@ -1209,8 +1100,12 @@ impl JsonWrite for PrettyStringSink<'_> {
 
     fn object_key(&mut self, key: &str) -> Result<(), Self::Error> {
         self.flush_pending_open();
-        let mut inner = StringSink::new(self.out);
-        inner.write_escaped_str(key)?;
+        self.write_byte(b'"')?;
+        // Quote is already open, so only the body goes through the
+        // shared walk — and through this sink, whose writes flush
+        // `pending_open` for nested containers.
+        write_escaped_body(self, key)?;
+        self.write_byte(b'"')?;
         self.out.push_str(": ");
         Ok(())
     }
@@ -1231,11 +1126,11 @@ impl JsonWrite for PrettyStringSink<'_> {
     }
 
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
-        self.flush_pending_open();
-        // Reuse the StringSink escape walk by constructing one
-        // transiently. The borrow lasts only for this call.
-        let mut inner = StringSink::new(self.out);
-        inner.write_escaped_str(s)
+        // Drive the shared walk through this sink so its own
+        // `write_byte`/`write_str_raw` flush `pending_open` on the
+        // first write — writing `self.out` directly would emit inside
+        // the still-open container line.
+        write_escaped(self, s)
     }
 
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {

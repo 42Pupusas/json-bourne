@@ -114,6 +114,7 @@ extern crate self as json_bourne;
 mod casing;
 mod de;
 mod error;
+mod escape;
 mod event;
 #[cfg(feature = "alloc")]
 mod float;
@@ -3257,6 +3258,17 @@ mod unsafe_boundary_tests {
                 expected,
                 "ByteSink diverged for {case:?}"
             );
+
+            #[cfg(feature = "std")]
+            {
+                let mut io_out = Vec::<u8>::new();
+                to_writer(case, &mut io_out).expect("IoWriteSink");
+                assert_eq!(
+                    String::from_utf8(io_out).unwrap(),
+                    expected,
+                    "IoWriteSink diverged for {case:?}"
+                );
+            }
 
             let mut pretty_out = String::new();
             let mut sink = PrettyStringSink::new(&mut pretty_out);

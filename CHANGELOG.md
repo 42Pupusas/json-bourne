@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+- The derive-vs-hand-written serialize gap closed (audit 4.1): generated
+  writers emit fused fast paths for `f64`, `f32`, and `bool` fields and go
+  through `Lexer::parse_u64_value` for unsigned fields, and the pretty-
+  print rework let the derive write `bool` via a branchless `true`/`false`
+  literal. `to_json_struct_metric` (the 18% deficit scenario) now runs
+  even with the hand impl; `to_json_struct_small` median 79.6 ns vs
+  hand 89.7 ns.
+
 ### Fixed
 - Variant tags in derived enums were written through the raw byte-literal
   writer, so a `#[bourne(rename = "a\"b")]` produced invalid JSON (`"a"b"`),
@@ -27,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. Keys inside skipped objects are now consumed as raw byte spans —
   still shape-validated, never decoded — so `InvalidEscape` surfaces only
   for keys and strings the caller actually receives.
+- The string-escape walk lives in one place (`ser::escape`) shared by every
+  sink through `JsonWrite`. Previously `StringSink`, `ByteSink` and
+  `PrettyStringSink` each carried their own copy of the same run-splitting
+  loop, and `PrettyStringSink::object_key` escaped keys by constructing a
+  transient `StringSink` around its own buffer. No behavior change; the
+  cross-sink agreement test now also covers `IoWriteSink`, the one sink
+  that uses the default walk.
 - `to_string_pretty` serialized derive-generated types compactly: the
   derive fused structural bytes (`,"id":`) into raw literals that the
   pretty sink treats as opaque text, so a derived struct printed on one
