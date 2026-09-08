@@ -444,6 +444,16 @@ fn teju(value: f64) -> DecimalF64 {
 /// + 3-digit exponent. Round up to 32 for a power-of-two stack buffer.
 pub(crate) const FORMAT_BUF_LEN: usize = 32;
 
+/// `10^k` as exact `f64` values, `k = 0..=22`. Exact because 5^22 < 2^53:
+/// each entry is a small-integer multiple of a power of two, so no entry
+/// needs rounding. Above 22, `10^23` falls between representable doubles
+/// and the table cannot be extended without losing the exactness that
+/// makes single-multiply scaling correctly rounded.
+pub(crate) const POW10: [f64; 23] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
 const DIGIT_LUT: &[u8; 200] = b"\
 0001020304050607080910111213141516171819\
 2021222324252627282930313233343536373839\

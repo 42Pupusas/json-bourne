@@ -118,6 +118,24 @@ pub fn string_array(n: usize) -> String {
     s
 }
 
+/// A flat array of N floats in plain decimal form — no exponent
+/// notation. The shape the fused parse fast path targets: sensor
+/// readings, percentages, coordinates.
+#[must_use]
+pub fn plain_float_array(n: usize) -> String {
+    const SAMPLES: [&str; 5] = ["3.14159", "-2.75", "0.5", "98.6", "-0.125"];
+    let mut s = String::with_capacity(n * 8);
+    s.push('[');
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(SAMPLES[i % SAMPLES.len()]);
+    }
+    s.push(']');
+    s
+}
+
 /// A flat array of N floats covering integer, fraction, and exponent forms
 /// — exercises the slowest number path.
 #[must_use]

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `parse_f64_value` gained a fused fast path for plain decimal literals
+  (no exponent) whose mantissa fits 2^53: the mantissa and `10^-k` are
+  both exact, so one IEEE divide is correctly rounded and bit-identical
+  to `str::parse` — no `JsonNum`, no `String`, no libcore Eisel-Lemire
+  machinery. 1.9× on a plain-decimal `Vec<f64>` array; exponent-heavy
+  payloads unchanged. Guarded by differential tests: every 3-digit
+  fraction shape, boundary mantissas at 2^53, and 20 000 seeded random
+  literals checked bit-for-bit against `str::parse` (audit 4.4.3).
 - The parse nesting stack packs one frame into a single bit (`u128`), so
   constructing a lexer clears 24 bytes instead of 136 and the struct is
   register-friendly. Nesting depth is now capped at 128 for *all* custom

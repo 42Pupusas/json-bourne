@@ -56,6 +56,19 @@ fn floats_decode(bencher: divan::Bencher) {
         });
 }
 
+// Plain decimal floats decoded via typed parse — the fast path's target
+// shape: no exponent, short fraction, exactly representable mantissa.
+#[divan::bench]
+fn plain_floats_decode(bencher: divan::Bencher) {
+    let floats = bourne_bench::plain_float_array(5_000);
+    bencher
+        .counter(divan::counter::BytesCount::new(floats.len()))
+        .bench(|| {
+            let v: Vec<f64> = parse(divan::black_box(floats.as_bytes())).unwrap();
+            divan::black_box(v);
+        });
+}
+
 // Escaped strings — exercises the validate_escapes path.
 #[divan::bench]
 fn escaped_strings_lex(bencher: divan::Bencher) {

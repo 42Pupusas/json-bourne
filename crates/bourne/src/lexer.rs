@@ -810,6 +810,15 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     /// decode to `±inf` from `str::parse::<f64>`, which JSON disallows).
     pub fn parse_f64_value(&mut self) -> Result<f64, Error> {
         let start = self.offset;
+        // Fast path: fit a plain decimal literal in a u64 mantissa and a
+        // table multiply. Covers the integer-valued and short-fraction
+        // floats that dominate real payloads (audit 4.4.3). Everything
+        // else — exponent forms, long fractions, subnormal-range
+        // literals — falls through to the grammar-walk + `str::parse`.
+        if let Some(v) = self.parse_f64_fast() {
+            return Ok(v);
+        }
+        self.offset = start;
         // Reuse the byte-walk of `read_number` (it already handles the
         // `-?` integer + optional `.frac` + optional `e[+-]?digits`
         // grammar correctly). Then slice the run we just walked and
@@ -828,6 +837,102 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         } else {
             Err(self.err(ErrorKind::NumberOutOfRange))
         }
+    }
+
+    /// Fast-path arm of [`Self::parse_f64_value`]. On success the cursor
+    /// sits after the literal; on failure (`None`) the cursor is
+    /// unspecified and the caller must reset to `start`.
+    ///
+    /// Accepts `-? digits [. digits]` (no exponent) with an integer-valued
+    /// mantissa ≤ 2^53. The mantissa and `10^-k` are then both exactly
+    /// representable, so the single IEEE divide is correctly rounded —
+    /// bit-identical to `str::parse`. Exponent forms, long literals, and
+    /// anything that keeps the terminator check from accepting go to
+    /// libcore, which rounds correctly for them.
+    fn parse_f64_fast(&mut self) -> Option<f64> {
+        let bytes = self.input;
+        let end = bytes.len();
+        let mut i = self.offset;
+
+        let negative = matches!(bytes.get(i), Some(&b'-'));
+        if negative {
+            i += 1;
+        }
+
+        // JSON grammar: a leading `0` completes the integer part (`05.5`
+        // is invalid), so a `0` start must not consume further digits —
+        // the terminator check then bails on `05.5` to the slow path.
+        let first = bytes.get(i).and_then(|&b| char::from(b).to_digit(10))?;
+        let mut mantissa: u64 = u64::from(first);
+        let mut digits: u32 = 1;
+        i += 1;
+        if first != 0 {
+            while i < end {
+                let Some(d) = (bytes[i] as char).to_digit(10) else {
+                    break;
+                };
+                if digits >= 19 {
+                    return None;
+                }
+                mantissa = mantissa * 10 + u64::from(d);
+                digits += 1;
+                i += 1;
+            }
+        }
+
+        let frac_len: u32 = if bytes.get(i) == Some(&b'.') {
+            i += 1;
+            let mut n: u32 = 0;
+            while i < end {
+                let Some(d) = (bytes[i] as char).to_digit(10) else {
+                    break;
+                };
+                if digits >= 19 {
+                    return None;
+                }
+                mantissa = mantissa * 10 + u64::from(d);
+                digits += 1;
+                n += 1;
+                i += 1;
+            }
+            if n == 0 {
+                return None; // `1.` and `1.e5` are the slow path's problem
+            }
+            n
+        } else {
+            0
+        };
+
+        // Reject the next byte if it extends the number: an exponent
+        // marker hands control to libcore, and a letter (`1x`) or a
+        // second `.` (`1.2.3`) is invalid JSON — also the slow path's
+        // problem to diagnose.
+        match bytes.get(i) {
+            None | Some(b',' | b']' | b'}' | b' ' | b'\t' | b'\n' | b'\r') => {}
+            _ => return None,
+        }
+
+        // The `≤ 2^53` gate (after all digits are folded in) makes the
+        // scaling a single correctly-rounded IEEE step: the mantissa and
+        // the power of ten are each exactly representable, so only the
+        // divide rounds. Without it the `as` conversion below would
+        // round and the divide would round again.
+        if mantissa > (1u64 << 53) {
+            return None;
+        }
+
+        self.offset = i;
+        // The conversion is exact, not lossy: the gate above caps the
+        // mantissa at 2^53, which fits a double's 53-bit significand.
+        #[allow(clippy::cast_precision_loss)]
+        let mut v = mantissa as f64;
+        if frac_len > 0 {
+            // IEEE division rounds the *exact* quotient once: mantissa
+            // and the power of ten are both exact, so the result is
+            // bit-identical to what libcore produces for the literal.
+            v /= crate::float::POW10[frac_len as usize];
+        }
+        if negative { Some(-v) } else { Some(v) }
     }
 
     /// Read a JSON string and return it as a borrowed `&'input str`. Errors
