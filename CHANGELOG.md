@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   boundaries, stop-at-first-non-digit cursor position, and rejection of
   trailing fraction/exponent after full-length literals.
 
+### Fixed
+- `to_string` returned `Err` for parser-visible failures but *panicked* on
+  non-UTF-8 bytes injected by a hand-written `ToJson` impl through the
+  unvalidated `ByteSink::write_raw_bytes` path. It now returns
+  `Err(ErrorKind::InvalidUtf8)`. Previously it panicked with an `expect`
+  whose message claimed the case was impossible (audit 4.4.5).
+
 ### Performance
 - Pretty-printed parse benches added (`pretty_*` fixtures and a
   `pretty_stream_vs_dom` group): arrays and a small object, one newline +

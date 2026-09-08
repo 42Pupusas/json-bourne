@@ -383,6 +383,11 @@ impl JsonWrite for ByteSink<'_> {
         Error::new(ErrorKind::InvalidUtf8, Position::START)
     }
 
+    /// Deliberately unvalidated override: `to_string` (the one sink path
+    /// whose output must be a `String`) is the UTF-8 gate, and the
+    /// `write_byte` structural hot path has no validation point at all.
+    /// Validating here would spend a second pass per raw write without
+    /// making `to_string` panic-free — only its `Result` can do that.
     #[inline]
     fn write_raw_bytes(&mut self, b: &[u8]) -> Result<(), Self::Error> {
         self.out.extend_from_slice(b);
@@ -783,10 +788,15 @@ pub trait ToJson {
 // emits valid UTF-8 by construction (see `ByteSink`'s impl). The check
 // guards against a serializer-internal bug, not a user-triggerable case.
 #[cfg(feature = "alloc")]
-#[allow(clippy::missing_panics_doc)]
 pub fn to_string<T: ToJson + ?Sized>(value: &T) -> Result<String, Error> {
     let bytes = to_vec(value)?;
-    Ok(String::from_utf8(bytes).expect("json-bourne emits only valid UTF-8"))
+    // The UTF-8 gate for the `String` API. `ByteSink` deliberately does
+    // not validate `write_raw_bytes` / `write_byte` input (they are the
+    // structural hot path), so a hand-written `ToJson` impl *can* feed
+    // non-UTF-8 bytes here — report that as `InvalidUtf8` rather than
+    // panicking (audit 3.15's rule, applied to the one place a `String`
+    // is promised).
+    String::from_utf8(bytes).map_err(|_| Error::new(ErrorKind::InvalidUtf8, Position::START))
 }
 
 /// Serialize `value` into a fresh `Vec<u8>`.

@@ -3577,6 +3577,26 @@ mod unsafe_boundary_tests {
         assert_eq!(sink.out, "ok");
     }
 
+    /// Audit 4.4.5: `ByteSink` does not validate `write_raw_bytes`, so a
+    /// hand-written `ToJson` impl can put non-UTF-8 bytes into `to_vec`.
+    /// `to_string` — the one API promising a `String` — must report that
+    /// as `Err(InvalidUtf8)` instead of panicking on the `expect`.
+    #[test]
+    fn to_string_reports_non_utf8_from_user_impl_as_err() {
+        struct RawBytes(u8);
+        impl ToJson for RawBytes {
+            const MIN_SERIALIZED_LEN: usize = 3;
+            fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+                w.write_raw_bytes(&[b'"', self.0, b'"'])
+            }
+        }
+
+        let err = to_string(&RawBytes(0x80)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidUtf8);
+        // The bytes are still intact in to_vec for byte-oriented callers.
+        assert_eq!(to_vec(&RawBytes(b'x')).unwrap(), b"\"x\"");
+    }
+
     /// Audit 3.15: the `InputTooLarge` kind carries a helpful message,
     /// and `try_new` accepts normal inputs through the `Result` API.
     #[test]

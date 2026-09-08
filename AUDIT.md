@@ -407,6 +407,15 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    `from_utf8_unchecked` behind a debug-mode check saves a full pass on large
    outputs. Only do this after §3.1 is fixed, since it widens the trust placed
    in sink invariants.
+   — *Rejected 2026-07: the invariant does not hold.* `ByteSink` (the sink
+   `to_string` uses via `to_vec`) overrides `write_raw_bytes` with an
+   unvalidated `extend_from_slice`, and hand-written `ToJson` impls are
+   documented as unverifiable inputs. A lone continuation byte fed through
+   such an impl reached the `expect` and panicked. Worse, `from_utf8_unchecked`
+   would have turned that panic into instantiating a `String` with invalid
+   contents. `to_string` is now the UTF-8 gate: it returns
+   `Err(ErrorKind::InvalidUtf8)` instead of panicking, with the unsafe
+   micro-opt dropped and a test pinning the behavior.
 
 ### 4.5 Serialize opportunities
 
