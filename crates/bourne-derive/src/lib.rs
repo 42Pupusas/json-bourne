@@ -672,11 +672,12 @@ fn name_span() -> proc_macro2::Span {
 /// `#[bourne(skip)]` fields take `Default::default()` and never match a
 /// key, `default` fields fall back to `Default` when absent, everything
 /// else is required. `tag_arm` extends the key match when the variant
-/// shares its object with the enum's tag (internal mode).
+/// shares its object with the enum's tag (internal mode); the walk
+/// declares `__bourne_tag_seen` for that arm's duplicate check.
 fn struct_variant_read(
     ctor: &proc_macro2::TokenStream,
     fields: &[VariantField<'_>],
-    tag_arm: proc_macro2::TokenStream,
+    tag_arm: Option<proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
     let mut decls = Vec::new();
     let mut arms = Vec::new();
@@ -714,15 +715,20 @@ fn struct_variant_read(
         };
         assigns.push(quote! { #fname: #fin, });
     }
+    let (tag_seen_decl, inner_tag_arm) = match tag_arm {
+        Some(arm) => (quote! { let mut __bourne_tag_seen = false; }, arm),
+        None => (quote!(), quote!()),
+    };
     quote! {{
         __lex.object_start()?;
         #(#decls)*
+        #tag_seen_decl
         let mut __maybe_key = __lex.object_first_key_lex()?;
         while let ::core::option::Option::Some(__key_js) = __maybe_key {
             let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
             match __key_cow.as_ref() {
                 #(#arms)*
-                #tag_arm
+                #inner_tag_arm
                 _ => {
                     return ::core::result::Result::Err(::json_bourne::Error::new(
                         ::json_bourne::ErrorKind::UnknownField, __lex.position()));
@@ -761,7 +767,7 @@ fn from_json_enum_external(
                 });
             }
             VShape::Struct(fields) => {
-                let body = struct_variant_read(&ctor, &fields, quote!());
+                let body = struct_variant_read(&ctor, &fields, None);
                 tagged_arms.push(quote! {
                     __bourne_t if __bourne_t == #key => #body,
                 });
@@ -829,12 +835,19 @@ fn from_json_enum_internal(
         match classify_variant(v, &container.rename_all)? {
             VShape::Unit => arms.push(quote! {
                 __t if __t == #key => {
-                    // Drain remaining keys; only the tag key is allowed.
+                    // Unit variant: the tag key may appear once; a
+                    // repeat is a duplicate, anything else is unknown.
                     __lex.object_start()?;
+                    let mut __seen_tag = false;
                     let mut __mk = __lex.object_first_key_lex()?;
                     while let ::core::option::Option::Some(__kjs) = __mk {
                         let __kc = ::json_bourne::key_to_cow(__kjs, __lex)?;
                         if __kc.as_ref() == #tag {
+                            if __seen_tag {
+                                return ::core::result::Result::Err(::json_bourne::Error::new(
+                                    ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
+                            }
+                            __seen_tag = true;
                             __lex.skip_value()?;
                         } else {
                             return ::core::result::Result::Err(::json_bourne::Error::new(
@@ -890,11 +903,20 @@ fn internal_struct_variant_read(
     fields: &[VariantField<'_>],
     tag: &str,
 ) -> proc_macro2::TokenStream {
-    // The tag key shares the variant's object; skip it when seen.
+    // The tag key shares the variant's object; it must appear exactly
+    // once — the walk's first occurrence is skipped, a second is a
+    // duplicate key, matching named structs.
     let tag_arm = quote! {
-        __bourne_k if __bourne_k == #tag => { __lex.skip_value()?; }
+        __bourne_k if __bourne_k == #tag => {
+            if __bourne_tag_seen {
+                return ::core::result::Result::Err(::json_bourne::Error::new(
+                    ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
+            }
+            __bourne_tag_seen = true;
+            __lex.skip_value()?;
+        }
     };
-    let body = struct_variant_read(ctor, fields, tag_arm);
+    let body = struct_variant_read(ctor, fields, Some(tag_arm));
     quote! { ::core::result::Result::Ok({ #body }) }
 }
 
@@ -947,7 +969,7 @@ fn from_json_enum_adjacent(
                 });
             }
             VShape::Struct(fields) => {
-                let body = struct_variant_read(&ctor, &fields, quote!());
+                let body = struct_variant_read(&ctor, &fields, None);
                 arms.push(quote! {
                     __t if __t == #key => match __content_cp {
                         ::core::option::Option::Some(__c) => {
@@ -1028,7 +1050,7 @@ fn from_json_enum_untagged(
                 quote! { ::core::result::Result::Ok({ #body }) }
             }
             VShape::Struct(fields) => {
-                let body = struct_variant_read(&ctor, &fields, quote!());
+                let body = struct_variant_read(&ctor, &fields, None);
                 quote! { ::core::result::Result::Ok(#body) }
             }
         };

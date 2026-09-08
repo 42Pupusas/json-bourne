@@ -480,6 +480,18 @@ fn internally_tagged_unit_rejects_extra_fields() {
     assert_eq!(err.kind, ErrorKind::UnknownField);
 }
 
+#[test]
+fn internally_tagged_rejects_duplicate_tag_key_unit() {
+    let err = parse_str::<Animal>(r#"{"type":"Dog","type":123}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DuplicateKey);
+}
+
+#[test]
+fn internally_tagged_rejects_duplicate_tag_key_struct() {
+    let err = parse_str::<Animal>(r#"{"type":"Cat","lives":9,"type":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DuplicateKey);
+}
+
 #[derive(Debug, PartialEq, FromJson)]
 #[bourne(tag = "kind")]
 enum Renamed {
