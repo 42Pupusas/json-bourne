@@ -1321,6 +1321,11 @@ impl<T: ToJson + ?Sized> ToJson for &T {
     }
 }
 
+/// Upper bound on a single `reserve_hint` from the slice writer. Bounds
+/// the sink's peak overshoot when serializing very large arrays of
+/// small elements (audit 4.5.2).
+const RESERVE_WINDOW: usize = 256 * 1024;
+
 // Slices and fixed-size arrays serialize as JSON arrays. The shared
 // helper writes the bracketed comma-separated body so impls for Vec,
 // slice, and [T; N] don't drift on punctuation.
@@ -1381,13 +1386,51 @@ impl<T: ToJson> ToJson for [T] {
         // the per-element max payload, so the delimited hot loop stays
         // on the sink's raw-tail write path. Under-reserving is safe —
         // the sink falls back to checked writes — just slower.
+        //
+        // The hint is bounded to RESERVE_WINDOW so a huge array reserves
+        // a bounded overshoot instead of `len * (MAX + 1)` up front: a
+        // 10M-element `Vec<i64>` of small numbers asked for ~210 MB
+        // against ~30 MB of output (audit 4.5.2). Each window ends on an
+        // element boundary where a fresh hint re-arms the sink's raw
+        // tail, so the fast path is preserved; only the per-window
+        // boundary elements fall back to the checked path.
         if T::MAX_SERIALIZED_LEN != 0 {
-            let hint = self
+            let full = self
                 .len()
                 .saturating_mul(T::MAX_SERIALIZED_LEN.saturating_add(1))
                 .saturating_add(2);
-            w.reserve_hint(hint);
-            return write_array_hinted(self, w);
+            if full <= RESERVE_WINDOW {
+                w.reserve_hint(full);
+                return write_array_hinted(self, w);
+            }
+            // Elements per ~RESERVE_WINDOW of output; the final partial
+            // window rides on the sink's normal growth.
+            let per_window = (RESERVE_WINDOW / (T::MAX_SERIALIZED_LEN + 1)).max(1);
+            let chunk = per_window.min(self.len());
+            w.reserve_hint(chunk * (T::MAX_SERIALIZED_LEN + 1) + 2);
+            let mut rest = self;
+            w.begin_array_hinted()?;
+            let mut first = true;
+            while rest.len() > chunk {
+                let (head, tail) = rest.split_at(chunk);
+                for v in head {
+                    if !first {
+                        w.separator_hinted()?;
+                    }
+                    first = false;
+                    v.write_json(w)?;
+                }
+                rest = tail;
+                w.reserve_hint(chunk * (T::MAX_SERIALIZED_LEN + 1));
+            }
+            for v in rest {
+                if !first {
+                    w.separator_hinted()?;
+                }
+                first = false;
+                v.write_json(w)?;
+            }
+            return w.end_array_hinted();
         }
         write_array(self.iter(), w)
     }

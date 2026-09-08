@@ -16,8 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The slice writer reserves in bounded 256 KiB windows and re-hints as it
   crosses each window, instead of reserving `len * (MAX + 1)` up front:
   a 10 M-element `Vec<i64>` reserved ~210 MB against ~30 MB of output;
-  peak extra reservation is now one window (audit 4.5.2). The delimited
-  loop stays on the sink's raw-tail write path inside each window.
+  peak extra reservation is now one window (audit 4.5.2). Same-run
+  medians on the float-array bench hold within noise of the previous
+  design (bourne 283 µs vs serde 255 µs at n=10 000, vs 250/227 before),
+  with the raw-tail write path preserved inside each window.
 - The derive-vs-hand-written serialize gap closed (audit 4.1): generated
   writers emit fused fast paths for `f64`, `f32`, and `bool` fields and go
   through `Lexer::parse_u64_value` for unsigned fields, and the pretty-
