@@ -380,7 +380,7 @@ mod alloc_impls {
             match lex.peek_value_kind()? {
                 ValueKind::String => {
                     let js = lex.read_string_no_validate()?;
-                    if let Some(borrowed) = js.as_str(lex.input()) {
+                    if let Some(borrowed) = js.as_str_in_input(lex.input()) {
                         return Ok(Cow::Borrowed(borrowed));
                     }
                     Ok(Cow::Owned(decode_owned(js, lex)?))
@@ -401,7 +401,7 @@ mod alloc_impls {
                     let js = lex.read_string_no_validate()?;
                     // Borrow path: no escapes — read the validated UTF-8
                     // directly and require exactly one scalar.
-                    if let Some(borrowed) = js.as_str(lex.input()) {
+                    if let Some(borrowed) = js.as_str_in_input(lex.input()) {
                         return single_char(borrowed)
                             .ok_or_else(|| type_error(lex, ErrorKind::TypeMismatch));
                     }
@@ -435,7 +435,7 @@ mod alloc_impls {
     /// Materialize an object key from a [`JsonStr`] span. Borrows when the
     /// key is escape-free; decodes into an owned `String` otherwise.
     pub fn key_to_cow<'input>(js: JsonStr, lex: &Lexer<'input>) -> Result<Cow<'input, str>, Error> {
-        if let Some(borrowed) = js.as_str(lex.input()) {
+        if let Some(borrowed) = js.as_str_in_input(lex.input()) {
             return Ok(Cow::Borrowed(borrowed));
         }
         Ok(Cow::Owned(decode_owned(js, lex)?))
@@ -839,7 +839,7 @@ mod alloc_impls {
     /// fresh `String`; the escape path goes through `decode_owned`.
     #[inline]
     fn decode_string(js: JsonStr, lex: &Lexer<'_>) -> Result<String, Error> {
-        if let Some(borrowed) = js.as_str(lex.input()) {
+        if let Some(borrowed) = js.as_str_in_input(lex.input()) {
             return Ok(String::from(borrowed));
         }
         decode_owned(js, lex)

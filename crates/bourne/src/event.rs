@@ -67,21 +67,35 @@ impl JsonStr {
         input.get(start..end)
     }
 
-    /// The string as `&str` when it contains no escapes. Skips re-validation:
-    /// the parser already ensured the bytes are valid UTF-8.
+    /// The string as `&str` when it contains no escapes.
     ///
     /// Returns `None` when the string had escapes (caller must decode into
-    /// a buffer) or when `input` doesn't cover the recorded range.
+    /// a buffer), when `input` doesn't cover the recorded range, or when
+    /// the span does not point at valid UTF-8 — the last being possible
+    /// only when `input` is not the buffer the span was produced from.
     #[must_use]
     pub fn as_str<'input>(&self, input: &'input [u8]) -> Option<&'input str> {
         if self.has_escapes() {
             return None;
         }
+        core::str::from_utf8(self.raw_bytes(input)?).ok()
+    }
+
+    /// Crate-internal borrow path. Callers must hold the `input` the span
+    /// was produced from; the lexer validated those bytes against the
+    /// RFC 3629 ranges inline (see the ASCII fast arm and
+    /// `consume_utf8_multibyte`), so the unchecked conversion is sound.
+    /// Only the alloc-gated escape-decoding impls in `de.rs` need this;
+    /// the escape-free borrow paths go through the checked [`as_str`](Self::as_str).
+    #[cfg(feature = "alloc")]
+    #[must_use]
+    pub(crate) fn as_str_in_input(self, input: &[u8]) -> Option<&str> {
+        if self.has_escapes() {
+            return None;
+        }
         let raw = self.raw_bytes(input)?;
-        // SAFETY: the lexer validates every byte against the RFC 3629 byte
-        // ranges as it scans (see `Parser::consume_utf8_multibyte` and the
-        // ASCII fast arm). The slice is therefore valid UTF-8 and
-        // `from_utf8_unchecked` is sound.
+        // SAFETY: see above — the establishing invariant is that `input`
+        // is the buffer this span was lexed from.
         Some(unsafe { core::str::from_utf8_unchecked(raw) })
     }
 }
@@ -131,13 +145,18 @@ impl JsonNum {
         input.get(self.start as usize..self.end as usize)
     }
 
-    /// The raw number text. Always ASCII (lexer guarantees this).
+    /// The raw number text, or `""` if the span is out of range for
+    /// `input`. Empty is not a valid JSON number literal, so callers can
+    /// distinguish a foreign/truncated buffer from real content.
+    ///
+    /// Prefer the decoding accessors ([`as_i64`](Self::as_i64),
+    /// [`as_f64`](Self::as_f64), …), which never consult `as_str` and are
+    /// unaffected by a buffer mismatch.
     #[must_use]
     pub fn as_str<'input>(&self, input: &'input [u8]) -> &'input str {
-        // SAFETY: lexer accepts only the ASCII subset RFC 8259 allows for
-        // numbers. Always valid UTF-8.
         self.raw_bytes(input)
-            .map_or("", |bytes| unsafe { core::str::from_utf8_unchecked(bytes) })
+            .and_then(|bytes| core::str::from_utf8(bytes).ok())
+            .unwrap_or("")
     }
 
     /// True if the literal contains `.`, `e`, or `E` — i.e. is not an integer.

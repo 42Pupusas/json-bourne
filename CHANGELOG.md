@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **(security)** The array serialization fast path treated
+  `ToJson::MAX_SERIALIZED_LEN` — a safe associated const on a public trait — as
+  a hard precondition for unchecked `ptr::write` appends, so a downstream impl
+  that under-declared its bound could trigger a heap buffer overflow from
+  entirely safe code. The bound is now a reservation hint only: hinted sink
+  writes take a raw tail write when capacity remains and fall back to the
+  checked path otherwise. The `write_byte_unchecked`,
+  `write_float_f64_unchecked{,_finite}`, `write_float_f64_taint`,
+  `write_json_in_reserved`, `NEEDS_VALIDATION`, `pre_validate_slice` and
+  `take_nonfinite_taint` APIs are removed; `JsonWrite::write_byte_hinted` and
+  `JsonWrite::write_float_f64_hinted` replace them and are safe.
+- **(security)** `JsonStr::as_str` and `JsonNum::as_str` built `&str` values
+  with `str::from_utf8_unchecked` on a caller-supplied buffer, so passing any
+  other byte slice of sufficient length produced a `&str` over unvalidated
+  bytes. Both are now fully safe (`from_utf8`); the unchecked borrow path
+  survives as `pub(crate) JsonStr::as_str_in_input` for the crate's own
+  escape-decoding impls, where the input invariant is established by the
+  lexer. `JsonNum` decoding accessors (`as_i64`/`as_u64`/…) are unaffected —
+  they never consult `as_str`.
 - CI no longer references the removed `bourne-core` package; the workflow and
   `scripts/ci.sh` (new — reproduces the CI job list locally) now target
   `json-bourne` / `bourne-derive`, and the bare-metal `no_std` job builds
