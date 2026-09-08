@@ -221,6 +221,15 @@ fn classify_variant<'a>(
     v: &'a syn::Variant,
     rename_all: &Option<String>,
 ) -> syn::Result<VShape<'a>> {
+    if let Fields::Unnamed(u) = &v.fields {
+        if u.unnamed.is_empty() {
+            return Err(syn::Error::new(
+                v.ident.span(),
+                "empty tuple variants are unsupported: they serialize as `[]` but \
+                 the tuple reader rejects an empty array",
+            ));
+        }
+    }
     Ok(match &v.fields {
         Fields::Unit => VShape::Unit,
         Fields::Unnamed(u) if u.unnamed.len() == 1 => VShape::Newtype(&u.unnamed[0].ty),
@@ -423,7 +432,16 @@ fn from_json_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> 
     let body = match &input.data {
         Data::Struct(s) => match &s.fields {
             Fields::Named(named) => from_json_named(&named.named, &container)?,
-            Fields::Unnamed(unnamed) => from_json_tuple(&unnamed.unnamed)?,
+            Fields::Unnamed(unnamed) if !unnamed.unnamed.is_empty() => {
+                from_json_tuple(&unnamed.unnamed)?
+            }
+            Fields::Unnamed(_) => {
+                return Err(syn::Error::new(
+                    input.span(),
+                    "empty tuple structs are unsupported: to_json emits `[]` but \
+                     the parser rejects an empty array for a zero-field tuple",
+                ));
+            }
             Fields::Unit => {
                 return Err(syn::Error::new(
                     input.span(),
@@ -1071,7 +1089,16 @@ fn to_json_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let body = match &input.data {
         Data::Struct(s) => match &s.fields {
             Fields::Named(named) => to_json_named(&named.named, &container)?,
-            Fields::Unnamed(unnamed) => to_json_tuple(unnamed.unnamed.len()),
+            Fields::Unnamed(unnamed) if !unnamed.unnamed.is_empty() => {
+                to_json_tuple(unnamed.unnamed.len())
+            }
+            Fields::Unnamed(_) => {
+                return Err(syn::Error::new(
+                    input.span(),
+                    "empty tuple structs are unsupported: to_json emits `[]` but \
+                     the parser rejects an empty array for a zero-field tuple",
+                ));
+            }
             Fields::Unit => {
                 return Err(syn::Error::new(input.span(), "unit structs unsupported"));
             }
@@ -1568,4 +1595,51 @@ fn tuple_payload_writes(binds: &[Ident]) -> proc_macro2::TokenStream {
     }
     stmts.push(quote! { __w.end_array()?; });
     quote! { #(#stmts)* }
+}
+
+#[cfg(test)]
+mod empty_tuple_rejection_tests {
+    use super::{from_json_impl, to_json_impl};
+    use syn::DeriveInput;
+
+    fn derive(src: &str) -> syn::Result<()> {
+        let input = syn::parse_str::<DeriveInput>(src).unwrap();
+        from_json_impl(&input)?;
+        to_json_impl(&input)?;
+        Ok(())
+    }
+
+    #[test]
+    fn empty_tuple_struct_is_rejected() {
+        let err = derive("struct Empty();").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("empty tuple structs are unsupported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_tuple_variant_is_rejected_in_every_mode() {
+        for src in [
+            "enum E { V() }",
+            "#[bourne(untagged)] enum E { V() }",
+            "#[bourne(tag = \"t\")] enum E { V() }",
+            "#[bourne(tag = \"t\", content = \"c\")] enum E { V() }",
+        ] {
+            let err = derive(src).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("empty tuple variants are unsupported"),
+                "{src}: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_empty_tuples_still_derive() {
+        derive("struct T(u8);").unwrap();
+        derive("struct T(u8, u16);").unwrap();
+        derive("enum E { V(u8, u16), U }").unwrap();
+    }
 }

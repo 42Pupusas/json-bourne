@@ -36,6 +36,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. Keys inside skipped objects are now consumed as raw byte spans —
   still shape-validated, never decoded — so `InvalidEscape` surfaces only
   for keys and strings the caller actually receives.
+- Empty tuple structs and empty tuple variants were rejected for the derive
+  in every mode: their writer emitted `[]` but the tuple reader reports
+  `TypeMismatch` on an empty array, so `to_json` output could never parse
+  back. They now fail at compile time with an explanation, matching the
+  existing unit-struct rejection (audit 3.10).
 - The string-escape walk lives in one place (`ser::escape`) shared by every
   sink through `JsonWrite`. Previously `StringSink`, `ByteSink` and
   `PrettyStringSink` each carried their own copy of the same run-splitting
