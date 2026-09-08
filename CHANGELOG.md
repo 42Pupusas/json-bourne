@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `alloc`-gated.
 
 ### Tests
+- Escape handling is one module (`src/escape/`): `Hex4` reads `\uXXXX`
+  digits for the decoder, the validator and the lexer, replacing the
+  `parse_hex4` that was copied into both `de.rs` and `lexer.rs`;
+  `EscapeDecoder` and `EscapeValidator` own the two walks. `de.rs` lost
+  ~200 lines (audit 3.15/6).
 - `bourne-derive/src/lib.rs` shrank from 1 902 to 101 lines, split into
   `attrs`, `field_plan`, `naming`, `acquire`, `generics`, `shape`, and
   the `from_json` / `to_json` codegen modules; every free function is now
@@ -70,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailing fraction/exponent after full-length literals.
 
 ### Fixed
+- `char` accepted some multi-character strings on the escape path.
+  `parse_str::<char>(r#""\u0041BCDE""#)` returned `Ok('A')` instead of
+  an error: the 4-byte stack buffer backing the no-allocation escape
+  decode discarded any run too large to fit, leaving exactly one scalar
+  for the "exactly one scalar" check to accept. Inputs whose tail only
+  partly fit (`"\u0041BC"`) were rejected, so the existing tests missed
+  it. The decode sink now reports overflow as `TypeMismatch`. Strings
+  with no escapes were never affected (audit 3.15/6).
 - derive: `#[bourne(skip_if_none)]` inside an enum struct variant emitted
   the field anyway (`{"Rec":{"a":1,"note":null,"b":2}}`), and
   `#[bourne(deny_unknown_fields = false)]` on an enum was ignored inside

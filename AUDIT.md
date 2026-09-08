@@ -325,11 +325,16 @@ to the pre-array length on the taint path.
 - `JsonWrite::write_raw_bytes` default `expect`s UTF-8 — a `pub` method that
   panics on user input from a custom `ToJson`. Make it `debug_assert` +
   document, or return `Err`.
-- `char::from_lex` allocates a `String` on the escape path for a value that is
-  at most 4 bytes; a stack `[u8; 8]` decode would avoid it.
+- ~~`char::from_lex` allocates a `String` on the escape path for a value that
+  is at most 4 bytes; a stack `[u8; 8]` decode would avoid it.~~ **Done** —
+  `EscapeScratch<4>`. Note the sequel: the first version of that buffer
+  dropped output it could not fit, which made `"\u0041BCDE"` parse as `'A'`;
+  fixed with the §6 escape split, where `EscapeSink` gained a `Result`.
 - `is_option` in the derive is textual: a `type Maybe<T> = Option<T>` field
   becomes required. Same limitation as serde; worth a doc line.
-- `parse_hex4` is duplicated in `lexer.rs` and `de.rs`.
+- ~~`parse_hex4` is duplicated in `lexer.rs` and `de.rs`.~~ **Done** — one
+  `Hex4` in `src/escape/hex.rs`, used by the decoder, the validator and the
+  lexer (§6).
 - `JsonNum::as_str` returns `""` for a mismatched buffer, which then parses as
   `InvalidNumber` — masks the programming error. Tie to §3.2.
 - Fuzz target `typed` does not cover `String`, maps, derived enums,
@@ -684,6 +689,21 @@ Not defects, but they bear on how safely the fixes above can be made.
   `decode_surrogate_pair`, `parse_hex4` are free functions with one obvious
   owner — an `EscapeDecoder` — and `parse_hex4` is duplicated in `lexer.rs`,
   where `validate_escapes` wants an `EscapeValidator`.
+  — *Landed 2026-09* as `src/escape/`: `hex.rs` (`Hex4`), `decoder.rs`
+  (`EscapeDecoder`, `EscapeSink`, `EscapeScratch`), `validator.rs`
+  (`EscapeValidator`), and the pre-existing sink-side `writer.rs`. `de.rs`
+  dropped to 941 lines and `lexer.rs` lost its two trailing free functions.
+  The four open-coded `0xDC00..=0xDFFF` range tests are now
+  `Hex4::is_low_surrogate`.
+  This one also turned up a **live bug** rather than only moving code:
+  `EscapeScratch<4>` (the `char` path's no-alloc buffer) silently dropped
+  any run that did not fit, so `"\u0041BCDE"` parsed as `'A'` — the
+  scratch kept one scalar and the exactly-one-scalar check then passed.
+  Only inputs whose tail *partly* fit were rejected, which is why the
+  existing `char` tests missed it. `EscapeSink` now returns `Result` and
+  the bounded sink reports overflow. Pinned by
+  `tests/char_escape_length.rs`. Decoding is `alloc`-gated at the module
+  since its only callers are the owned string readers.
 - `float.rs`: the teju port is free functions over shared tables; a `Teju`
   type with `decompose`/`to_decimal`/`format` methods would carry the
   `debug_assert!` preconditions as type-level state.
