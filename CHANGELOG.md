@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+- Fused integer paths (`parse_i64_value` / `parse_u64_value` /
+  `parse_i128_value`) now have direct lexer-level tests: 1–19 digit
+  literals against `str::parse`, the 19/20-digit and i64/i128 range
+  boundaries, stop-at-first-non-digit cursor position, and rejection of
+  trailing fraction/exponent after full-length literals.
+
 ### Performance
 - Pretty-printed parse benches added (`pretty_*` fixtures and a
   `pretty_stream_vs_dom` group): arrays and a small object, one newline +

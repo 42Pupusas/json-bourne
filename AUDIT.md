@@ -384,6 +384,17 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    `scan_digit_run`). `Vec<i64>` is at 660 MB/s; SWAR 8-digit chunks (one
    `u64` load, subtract `0x30…`, range check, multiply-add) typically give
    1.5–2× on integer arrays.
+   — *Measured 2026-07: 2.4× regression, reverted.* An 8-digit SWAR chunk
+   reader (nibble filter + range check + pairwise fold, exhaustively tested
+   against `str::parse`) was wired into all three fused integer paths and
+   interleaved-A/B'd against the scalar loop: 75.9 µs → 185.2 µs median on
+   `Vec<i64>` n=10 000 with serde_json flat as the control. The audit's
+   estimate assumes long literals; realistic integer arrays hold 1–5 digit
+   numbers, so every element pays a full failed SWAR probe (~10 ops) before
+   falling into the scalar loop that was already cheaper — and a parser
+   cannot know a literal's length before parsing it. SWAR would only pay on
+   ≥8-digit-dominated payloads (ids, timestamps); the scalar path keeps the
+   common case fast.
 3. **`parse_f64_value` walks the literal twice**: once in `read_number` for
    grammar, once in `str::parse::<f64>`. A fused fast path for "≤19 digits, no
    exponent, ≤ 2^53" that assembles mantissa/exponent while scanning and falls
