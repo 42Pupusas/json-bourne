@@ -30,6 +30,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailing fraction/exponent after full-length literals.
 
 ### Fixed
+- derive: `FromJson` field types written as `&'a str` with a lifetime name
+  other than `'input` silently took the generic `FromJson` dispatch instead
+  of the direct string read. `acquire_expr` now matches the type
+  structurally, so any borrowed-`str` field takes the fast path (audit
+  4.3.3/4.3.4).
 - `to_string` returned `Err` for parser-visible failures but *panicked* on
   non-UTF-8 bytes injected by a hand-written `ToJson` impl through the
   unvalidated `ByteSink::write_raw_bytes` path. It now returns

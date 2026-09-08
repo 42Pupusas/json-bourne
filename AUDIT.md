@@ -377,9 +377,20 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    those fields pay `peek_value_kind` + trait dispatch; add direct
    `parse_f64_value` / keyword arms. Three of the eight fields in the realistic
    struct are `f64`.
+   — *Landed 2026-07, with two corrections to the audit.* The scalar arms the
+   audit asked for already exist (`f64`, `f32`, `bool`, and `u64` direct — the
+   last closed by §3.3's `parse_u64_value`); the audit text predated them.
+   `Option<&str>` stays on the generic path by design: `Option<T>` must see
+   `Null` to produce `None`, and the generic impl already peeks exactly once.
+   Item 4 is folded in here: `acquire_expr` now matches `Type::Reference`
+   structurally, so `&'a str` with any lifetime name takes the direct
+   `parse_str_value` path; `&mut str`, `&String`, and `&[u8]` correctly do
+   not (unit-tested).
 4. `&'a str` (any lifetime name other than `'input`) misses the textual
    `"&'inputstr"` match and takes the generic path. Match on the type
    structure (`Type::Reference` to `str`) instead of the stringified type.
+   — *Landed 2026-07 with item 3* (structural `Type::Reference` matching in
+   `acquire_expr`, unit-tested for any lifetime and for near-miss types).
 5. `u64` → `parse_i64_value` + `try_from` — fixed by §3.3's `parse_u64_value`.
 
 ### 4.4 Parse hot-path opportunities (ordered by expected payoff)

@@ -270,6 +270,29 @@ mod key_arm_head_tests {
         assert!(decl.is_empty());
         assert_eq!(head.to_string(), "__b if __b == make_key (\"x\")");
     }
+
+    fn acquire(ty: &str) -> String {
+        let ty: syn::Type = syn::parse_str(ty).unwrap();
+        super::acquire_expr(&ty).to_string()
+    }
+
+    #[test]
+    fn borrowed_str_fast_path_accepts_any_lifetime() {
+        for ty in ["&str", "&'input str", "&'a str", "&'listener str"] {
+            assert_eq!(
+                acquire(ty),
+                "__lex . parse_str_value () ?",
+                "fast path for {ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_str_references_fall_through_to_generic() {
+        assert_ne!(acquire("&'a String"), "__lex . parse_str_value () ?");
+        assert_ne!(acquire("&'a mut str"), "__lex . parse_str_value () ?");
+        assert_ne!(acquire("&'a [u8]"), "__lex . parse_str_value () ?");
+    }
 }
 
 /// Parse a variant-level `#[bourne(rename = "...")]` (the only variant attr).
@@ -358,7 +381,21 @@ fn classify_variant<'a>(
 /// Reproduce `__from_json_acquire!`: the integer/`&str` fast paths that
 /// bypass the generic `FromJson::from_lex` dispatch. Fairness for benches
 /// depends on matching these exactly.
+/// Whether `ty` is exactly `str` — a last path segment named `str` with no
+/// further qualification.
+fn is_bare_str(ty: &Type) -> bool {
+    matches!(ty, Type::Path(tp) if tp.qself.is_none() && tp.path.get_ident().is_some_and(|i| i == "str"))
+}
+
 fn acquire_expr(ty: &Type) -> proc_macro2::TokenStream {
+    // `&str` and `&'a str` for any lifetime: match on type structure, not
+    // the stringified type, so a lifetime name other than `'input` still
+    // takes the direct string path (audit 4.3.4).
+    if let Type::Reference(tr) = ty {
+        if tr.mutability.is_none() && is_bare_str(&tr.elem) {
+            return quote! { __lex.parse_str_value()? };
+        }
+    }
     let ty_str = quote!(#ty).to_string().replace(' ', "");
     let int_narrow = |t: &str| {
         let t: proc_macro2::TokenStream = t.parse().unwrap();
@@ -383,7 +420,6 @@ fn acquire_expr(ty: &Type) -> proc_macro2::TokenStream {
         }
     };
     match ty_str.as_str() {
-        "&str" | "&'inputstr" => quote! { __lex.parse_str_value()? },
         "i64" => quote! { __lex.parse_i64_value()? },
         "u64" => quote! { __lex.parse_u64_value()? },
         "f64" => quote! { __lex.parse_f64_value()? },
