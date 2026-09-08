@@ -1187,10 +1187,17 @@ fn from_json_enum_adjacent(
         __lex.object_start()?;
         let mut __tag_value: ::core::option::Option<::json_bourne::KeyCow<'_>> =
             ::core::option::Option::None;
+        // Payload snapshot: taken at the content value's first byte and
+        // consumed by the arm directly (audit 4.5.4). Set only when the
+        // tag is already known, so a known-tag payload is never skipped.
         let mut __content_cp: ::core::option::Option<::json_bourne::Checkpoint> =
             ::core::option::Option::None;
+        let mut __early = false;
         let mut __maybe_key = __lex.object_first_key_lex()?;
-        while let ::core::option::Option::Some(__key_js) = __maybe_key {
+        'keys: loop {
+            let ::core::option::Option::Some(__key_js) = __maybe_key else {
+                break;
+            };
             let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
             if __key_cow.as_ref() == #tag {
                 if __tag_value.is_some() {
@@ -1205,6 +1212,10 @@ fn from_json_enum_adjacent(
                         ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
                 }
                 __content_cp = ::core::option::Option::Some(__lex.checkpoint());
+                if __tag_value.is_some() {
+                    __early = true;
+                    break 'keys;
+                }
                 __lex.skip_value()?;
             } else {
                 return ::core::result::Result::Err(::json_bourne::Error::new(
@@ -1215,14 +1226,38 @@ fn from_json_enum_adjacent(
         let __tag = __tag_value
             .ok_or_else(|| ::json_bourne::Error::new(
                 ::json_bourne::ErrorKind::MissingField, __lex.position()))?;
-        let __post_cp = __lex.checkpoint();
         #(#key_consts)*
+        let __post_cp = __lex.checkpoint();
         let __value = match __tag.as_ref() {
             #(#arms)*
             _ => ::core::result::Result::Err(::json_bourne::Error::new(
                 ::json_bourne::ErrorKind::UnknownField, __lex.position())),
         }?;
-        __lex.restore(__post_cp);
+        if __early {
+            // The arm read the payload forward and stopped at `,` or
+            // `}`. The tail walk rejects leftover keys — a leftover #tag
+            // is a duplicate (it was consumed before the content).
+            // `object_next_key_lex` consumes the closing brace on its
+            // `Ok(None)`, so the walk ends with the object closed.
+            loop {
+                match __lex.object_next_key_lex()? {
+                    ::core::option::Option::Some(__kjs) => {
+                        let __kc = ::json_bourne::key_to_cow(__kjs, __lex)?;
+                        if __kc.as_ref() == #tag {
+                            return ::core::result::Result::Err(::json_bourne::Error::new(
+                                ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
+                        }
+                        return ::core::result::Result::Err(::json_bourne::Error::new(
+                            ::json_bourne::ErrorKind::UnknownField, __lex.position()));
+                    }
+                    ::core::option::Option::None => break,
+                }
+            }
+        } else {
+            // The arm restored and re-read the skipped payload; rewind
+            // to the post-object cursor.
+            __lex.restore(__post_cp);
+        }
         ::core::result::Result::Ok(__value)
     }})
 }

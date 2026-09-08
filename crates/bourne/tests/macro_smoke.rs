@@ -612,6 +612,36 @@ fn adjacent_duplicate_tag_rejected() {
     assert_eq!(err.kind, ErrorKind::DuplicateKey);
 }
 
+/// On the early-exit path a repeated content key is trailing; the tail
+/// walk knows only the tag, so it rejects as unknown — still an error.
+#[test]
+fn adjacent_duplicate_content_rejected() {
+    let err = parse_str::<Msg>(r#"{"t":"Ping","c":1,"c":2}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
+/// Content first, duplicate content before the tag: the walk's
+/// `content` duplicate check must run on the tag-deferred path too.
+#[test]
+fn adjacent_duplicate_content_before_tag_rejected() {
+    let err = parse_str::<Msg>(r#"{"c":1,"c":2,"t":"Ping"}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DuplicateKey);
+}
+
+/// The early-exit path (tag known when content arrives): the tail walk
+/// must still reject a repeated tag and unknown keys after the payload.
+#[test]
+fn adjacent_duplicate_tag_after_early_content_rejected() {
+    let err = parse_str::<Msg>(r#"{"c":9,"t":"Echo","t":"Ping"}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DuplicateKey);
+}
+
+#[test]
+fn adjacent_unknown_key_after_early_content_rejected() {
+    let err = parse_str::<Msg>(r#"{"c":9,"t":"Echo","x":1}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::UnknownField);
+}
+
 // ---------------------------------------------------------------------------
 // Untagged enums (#[bourne(untagged)]).
 // ---------------------------------------------------------------------------

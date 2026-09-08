@@ -464,6 +464,18 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    then real parse). When the tag key comes first (the common case for
    serialized output), the adjacent path can parse `content` directly without
    the checkpoint round-trip.
+   — *Landed 2026-09.* When the tag is already known when `content` arrives,
+   the generated walk snapshots the payload start and exits; the arm reads
+   the payload forward from that checkpoint exactly once, then a tail walk
+   rejects leftover keys (a leftover tag is `DuplicateKey`, anything else
+   `UnknownField`) and consumes the closing brace. Content-first — the only
+   order where the old code had to skip — still skips and restores. All
+   original accept/reject behavior is preserved and pinned by new tests
+   (duplicate content on either side of the tag, duplicate and unknown keys
+   trailing an early-exit payload). Internally-tagged enums were out of the
+   audit's scope and keep their checkpoint round-trip: their payload
+   shares the tag's object, so keys after the tag are structurally required
+   before the variant can be chosen.
 
 ## 5. Process and repository findings
 
