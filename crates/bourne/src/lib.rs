@@ -99,8 +99,7 @@
 //      escape hatch. Non-x86_64 targets compile to the scalar path.
 //
 // Workspace lint is `deny` (not `forbid`) for exactly this kind of
-// localized, justified exception.
-#![allow(unsafe_code)]
+// localized, justified exception — granted per-site, never crate-wide.
 
 #[cfg(feature = "alloc")]
 extern crate alloc;

@@ -140,6 +140,15 @@ Also: `#![allow(unsafe_code)]` at crate level (`lib.rs` ~line 100) neutralises t
 workspace `unsafe_code = "deny"` lint for the whole crate, so the per-item
 `#[allow(unsafe_code)]` annotations are decorative. Remove the crate-level allow
 so each new `unsafe` needs an explicit opt-in.
+— *Landed 2026-09.* The crate-level allow is gone. Removing it surfaced
+exactly seven sites that were relying on it — `JsonStr::as_str_in_input`,
+`Lexer::parse_str_value`, `scan_ascii_string_run` and its `_sse2` callee,
+and `ByteSink`'s `write_byte_hinted` / `write_float_f64_hinted` — each of
+which already carried a `SAFETY:` comment but no attribute. Each now has
+its own `#[allow(unsafe_code)]`, so the workspace `deny` is live for the
+crate and any *new* `unsafe` fails the build until it is justified in
+place. Verified with clippy `-D warnings` under both `--all-features` and
+`--no-default-features` (the cfg gates select different unsafe sites).
 
 ### 3.3 S1 — Unsigned integers above `i64::MAX` are rejected on the fast paths
 
@@ -466,9 +475,22 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    grammar, once in `str::parse::<f64>`. A fused fast path for "≤19 digits, no
    exponent, ≤ 2^53" that assembles mantissa/exponent while scanning and falls
    back to `str::parse` otherwise would cover most telemetry floats.
+   — *Landed 2026-09.* Plain decimal literals (no exponent) whose mantissa
+   fits 2^53 assemble mantissa and `10^-k` during the grammar scan; both are
+   exactly representable, so a single IEEE divide is correctly rounded and
+   bit-identical to `str::parse` — no `JsonNum`, no `String`, no Eisel-Lemire
+   path. 1.9× on a plain-decimal `Vec<f64>`; exponent-heavy payloads fall
+   back unchanged. Differential tests cover every 3-digit fraction shape,
+   the 2^53 boundary mantissas, and 20 000 seeded random literals checked
+   bit-for-bit.
 4. **`Stack<128>` is a 128-byte array** initialised on every `Lexer::new`. A
    frame is one bit; a `u128` bitset (depth ≤ 128) makes `Lexer` ~40 bytes and
    removes the memset — visible on the 190 ns small-object case.
+   — *Landed 2026-09.* `Stack` is a `u128` bitset (`lexer.rs`); constructing
+   a lexer clears 24 bytes instead of 136. Depth is now capped at 128 for
+   *all* `MAX_DEPTH` parameterizations, with a compile-time assert in
+   `Stack::new` for non-default choices — a breaking change for anyone who
+   raised it past 128.
 5. `to_string` validates the whole output with `String::from_utf8`. The
    invariant is already argued in the doc comment; an `unsafe`
    `from_utf8_unchecked` behind a debug-mode check saves a full pass on large
@@ -489,11 +511,21 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
 1. **`write_escaped_str` is byte-at-a-time** in `StringSink` and `ByteSink`
    (`needs_escape` per byte). Reuse `find_backslash`'s SSE2 shape with three
    compares (`"`, `\`, `< 0x20`) — the same mask the lexer already computes.
+   — *Landed 2026-09.* `escape::find_escape` locates the next byte needing
+   an escape with a 16-byte SSE2 compare (same shape as `de.rs`'s
+   `find_backslash`), with a scalar `position` fallback for non-x86_64 and
+   `bourne_no_simd`. Escape-sparse strings — the common payload — now copy
+   as large literal runs instead of per-byte walks.
 2. **Over-reservation**: `[T]::write_json` reserves `len*(MAX+1)+2`; for
    `Vec<i64>` of small numbers that is 21 bytes per element against ~2 actual.
    A 10 M-element array reserves 210 MB for ~30 MB of output. Cap the hint
    (e.g. `min(hint, len * 8 + 2)` then let growth take over) or reserve in
    chunks.
+   — *Landed 2026-09.* The slice writer reserves in bounded 256 KiB windows
+   (`RESERVE_WINDOW`, `ser.rs`) and re-hints as it crosses each one, so peak
+   extra reservation is one window rather than `len * (MAX + 1)`. The
+   raw-tail write path is preserved inside each window; float-array medians
+   held within noise of the previous design.
 3. `write_display` (IP/socket addrs) allocates a `String` per value; a
    `[u8; 64]` `fmt::Write` adapter removes the allocation.
    — *Landed 2026-07.* `DisplayScratch` (`crates/bourne/src/display_scratch.rs`)
@@ -639,7 +671,8 @@ alloc`, default, `--features derive`, `--all-features`; tests + clippy
    add the lying-`MAX_SERIALIZED_LEN` regression test under miri. (§3.1)
 4. Make `JsonStr::as_str` / `JsonNum::as_str` checked, or replace them with
    `Lexer`-anchored accessors; keep unchecked variants `pub(crate)`. (§3.2)
-5. Remove the crate-level `#![allow(unsafe_code)]`. (§3.2)
+5. ~~Remove the crate-level `#![allow(unsafe_code)]`.~~ **Done** — seven sites
+   now carry their own justified allow; workspace `deny` is live. (§3.2)
 6. Extend fuzz `typed` to `String`, `BTreeMap<String,_>`, a derived struct
    with `deny_unknown_fields = false`, and one enum per tagging mode. (§3.15)
 
@@ -664,9 +697,16 @@ alloc`, default, `--features derive`, `--all-features`; tests + clippy
     `perf` attributes the gap to branch misprediction (8.4× serde's rate),
     not cache pressure. Any future work here targets the data-dependent
     shape-selection branches. (§4.2)
-18. SIMD whitespace skip; SIMD escape scan in serializer. (§4.4.1, §4.5.1)
-19. SWAR digit parsing; fused simple-float path. (§4.4.2, §4.4.3)
-20. Bitset `Stack`; reservation cap. (§4.4.4, §4.5.2)
+18. ~~SIMD whitespace skip; SIMD escape scan in serializer.~~ **Done** — the
+    whitespace skipper was implemented and measured with *no detectable win*
+    (scalar already cheaper on realistic 1–7 byte runs) and reverted, fixtures
+    kept; the escape scan landed as `escape::find_escape`. (§4.4.1, §4.5.1)
+19. ~~SWAR digit parsing; fused simple-float path.~~ **Partly done** — SWAR
+    measured at a *2.4x regression* and reverted; the fused plain-decimal
+    float path landed (1.9x, bit-identical to `str::parse`). (§4.4.2, §4.4.3)
+20. ~~Bitset `Stack`; reservation cap.~~ **Done** — `Stack` is a `u128` bitset
+    (breaking: depth capped at 128 for all `MAX_DEPTH`); the slice writer
+    reserves in 256 KiB windows. (§4.4.4, §4.5.2)
 
 **Phase 4 — structure**
 21. Un-gate `float.rs`; cfg wrappers instead of inline cfg blocks. (§5.4)

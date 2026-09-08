@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The crate-level `#![allow(unsafe_code)]` is gone; the workspace
+  `unsafe_code = "deny"` lint is now live for `json-bourne`. The seven
+  existing `unsafe` sites each carry their own `#[allow(unsafe_code)]`
+  next to the `SAFETY:` comment that justifies them, so a *new* `unsafe`
+  fails the build until it is justified in place (audit 3.2).
 - `parse_f64_value` gained a fused fast path for plain decimal literals
   (no exponent) whose mantissa fits 2^53: the mantissa and `10^-k` are
   both exact, so one IEEE divide is correctly rounded and bit-identical

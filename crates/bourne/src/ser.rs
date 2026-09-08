@@ -356,6 +356,7 @@ impl JsonWrite for ByteSink<'_> {
     /// under-reserves only costs the normal amortized growth, never
     /// memory safety.
     #[inline]
+    #[allow(unsafe_code)]
     fn write_byte_hinted(&mut self, b: u8) -> Result<(), Self::Error> {
         if self.out.len() < self.out.capacity() {
             // SAFETY: `len < capacity` checked above; write in place and
@@ -451,6 +452,7 @@ impl JsonWrite for ByteSink<'_> {
     /// Returns `false` for non-finite input without emitting anything,
     /// which the array writer converts to `NonFiniteFloat`.
     #[inline]
+    #[allow(unsafe_code)]
     fn write_float_f64_hinted(&mut self, f: f64) -> Result<bool, Self::Error> {
         if f.to_bits() & crate::float::EXP_MASK != crate::float::EXP_MASK
             && self.out.capacity() - self.out.len() >= crate::float::FORMAT_BUF_LEN

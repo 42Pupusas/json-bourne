@@ -942,6 +942,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     /// Caller must position the lexer at the opening `"`. On return the
     /// cursor is past the closing `"`. The returned slice points into the
     /// original input — zero copy.
+    #[allow(unsafe_code)]
     pub fn parse_str_value(&mut self) -> Result<&'input str, Error> {
         match self.peek() {
             Some(b'"') => self.bump(),
@@ -1351,6 +1352,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     // -------------------------------------------------------------------
 
     #[inline]
+    #[allow(unsafe_code)]
     fn scan_ascii_string_run(&mut self) {
         // x86_64 ABI guarantees SSE2 — no runtime detection needed.
         // The `bourne_no_simd` cfg disables the SIMD path; used by miri
@@ -1405,7 +1407,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     /// ABI baseline; the cfg gate at the call site enforces this.
     #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
     #[target_feature(enable = "sse2")]
-    #[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
     unsafe fn scan_ascii_string_run_sse2(&mut self) {
         use core::arch::x86_64::{
             _mm_cmpeq_epi8, _mm_cmplt_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128,

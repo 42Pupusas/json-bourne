@@ -89,6 +89,7 @@ impl JsonStr {
     /// the escape-free borrow paths go through the checked [`as_str`](Self::as_str).
     #[cfg(feature = "alloc")]
     #[must_use]
+    #[allow(unsafe_code)]
     pub(crate) fn as_str_in_input(self, input: &[u8]) -> Option<&str> {
         if self.has_escapes() {
             return None;
