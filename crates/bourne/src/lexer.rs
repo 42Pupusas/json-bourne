@@ -1113,14 +1113,25 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         Ok(())
     }
 
-    /// Drive `object_first_key` / `object_next_key` until the matching
-    /// `}` closes the frame. The keys themselves are consumed (we
-    /// don't need them); only the values need explicit skipping.
+    /// Drive the `_lex` key walkers until the matching `}` closes the
+    /// frame. The keys themselves are consumed (we don't need them); only
+    /// the values need explicit skipping.
+    ///
+    /// Keys use the raw-span walkers rather than `object_first_key` so an
+    /// escape-bearing key inside a discarded object is skipped instead of
+    /// rejected with `InvalidEscape` — the key is never materialised, so
+    /// no decode is needed, and the byte-level shape (quote, escapes,
+    /// control chars, colon) is still validated.
+    ///
+    /// The one gap this leaves: an unpaired surrogate escape in a *key*
+    /// of a skipped object is accepted, because surrogate pairing is only
+    /// checked when a string is decoded and the key never is. Values are
+    /// unaffected — `skip_value` fully validates every string it walks.
     fn skip_object_body(&mut self) -> Result<(), Error> {
-        let mut key = self.object_first_key()?;
+        let mut key = self.object_first_key_lex()?;
         while key.is_some() {
             self.skip_value()?;
-            key = self.object_next_key()?;
+            key = self.object_next_key_lex()?;
         }
         Ok(())
     }

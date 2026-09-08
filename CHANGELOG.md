@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now resolve keys exactly like plain structs — explicit `rename` wins,
   then the enum's `rename_all`, then the field name — and honor `skip` and
   `default` in all four tagging modes.
+- Lenient structs (`deny_unknown_fields = false`) failed on unknown values
+  containing escape-bearing keys: the skip path decoded every key it walked
+  and rejected the escape, discarding a value the caller never asked to
+  read. Keys inside skipped objects are now consumed as raw byte spans —
+  still shape-validated, never decoded — so `InvalidEscape` surfaces only
+  for keys and strings the caller actually receives.
 - The default `JsonWrite::write_escaped_str` pushed every byte through the
   byte-oriented `write_byte`, so sinks whose `write_byte` is char-oriented
   mangled non-ASCII strings: `to_fmt("é")` produced `"Ã©"`. The default now

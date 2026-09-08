@@ -73,3 +73,37 @@ fn strict_json_still_rejects_unknown() {
     let err = parse_str::<Strict>(r#"{"id":1,"extra":2}"#).unwrap_err();
     assert_eq!(err.kind, ErrorKind::UnknownField);
 }
+
+// Audit 3.7: a skipped value may contain escape-bearing keys. The skip
+// path consumes key bytes without decoding, so an escape in a key of a
+// discarded object must not fail the parse.
+#[test]
+fn lenient_skips_escaped_keys_inside_unknown_values() {
+    let src = r#"{"id":1,"name":"a","unknown":{"a\u0062":1},"list":[{"x\n":2}]}"#;
+    let v: Lenient = parse_str(src).unwrap();
+    assert_eq!(
+        v,
+        Lenient {
+            id: 1,
+            name: String::from("a"),
+        }
+    );
+}
+
+#[test]
+fn lenient_skipped_key_still_rejects_control_chars() {
+    // Skipping discards the value's bytes, not its validation: a raw
+    // control character inside a skipped key is still a parse error.
+    let src = "{\"id\":1,\"name\":\"a\",\"extra\":{\"a\n b\":1}}";
+    let r = parse_str::<Lenient>(src);
+    assert!(r.is_err());
+}
+
+#[test]
+fn lenient_top_level_escaped_key_is_still_an_error() {
+    // Only keys *inside* skipped values get the raw-span treatment; a
+    // key the struct itself must decode still rejects invalid escapes.
+    let src = r#"{"id":1,"na\me":"a"}"#;
+    let r = parse_str::<Lenient>(src);
+    assert_eq!(r.unwrap_err().kind, ErrorKind::InvalidEscape);
+}
