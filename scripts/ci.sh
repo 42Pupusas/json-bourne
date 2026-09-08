@@ -44,8 +44,11 @@ run_miri() {
 }
 
 run_fuzz() {
-  (cd fuzz && cargo +nightly fuzz run stream -- -max_total_time=60 -runs=10000)
-  (cd fuzz && cargo +nightly fuzz run typed -- -max_total_time=60 -runs=10000)
+  local targets=(stream typed derived)
+  local t
+  for t in "${targets[@]}"; do
+    (cd fuzz && cargo +nightly fuzz run "$t" -- -max_total_time=60 -runs=10000)
+  done
 }
 
 case "${1:-all}" in

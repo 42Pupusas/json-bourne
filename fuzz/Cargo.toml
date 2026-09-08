@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-json-bourne = { path = "../crates/bourne" }
+json-bourne = { path = "../crates/bourne", features = ["derive"] }
 
 [[bin]]
 name = "stream"
@@ -21,6 +21,13 @@ bench = false
 [[bin]]
 name = "typed"
 path = "fuzz_targets/typed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "derived"
+path = "fuzz_targets/derived.rs"
 test = false
 doc = false
 bench = false
