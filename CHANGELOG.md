@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Err(ErrorKind::InvalidUtf8)`. Previously it panicked with an `expect`
   whose message claimed the case was impossible (audit 4.4.5).
 
+- derive: `FromJson` key dispatch on structs and enum variants now compiles
+  to literal-pattern matches (length-switch + memcmp) instead of sequential
+  string-guard evaluation; `rename_all` keys are hoisted into `const` items
+  computed at compile time. Derived deserialize closes from 1.145× to 1.107×
+  of the hand-written impl on the `metric_events` fixture (audit 4.3.1).
+
 ### Performance
 - Pretty-printed parse benches added (`pretty_*` fixtures and a
   `pretty_stream_vs_dom` group): arrays and a small object, one newline +

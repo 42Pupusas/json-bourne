@@ -354,6 +354,13 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    with literal patterns lets rustc switch on length first and memcmp once.
    The hand-written bench impl uses the literal-pattern form. For `rename_all`
    keys, emit `const` items and use them as patterns (allowed for `&str`).
+   — *Landed 2026-07, with a smaller payoff than estimated.* All five derive
+   dispatch sites (named structs, struct variants, and the external/internal/
+   adjacent enum tag matches) now take literal patterns; `rename_all` keys are
+   hoisted into uniquely named `const` items (the cased string is computed by
+   `const fn` at compile time) used as patterns. Gap to the hand-written impl
+   on `metric_events_1000`: 1.145× → 1.107× in declaration order; reversed-key
+   order unchanged within noise. The remaining ~10% is dominated by item 2.
 2. **Every key goes through `object_first_key_lex` + `key_to_cow`** (read span,
    check `has_escapes`, build `Cow`) instead of `object_first_key` →
    `parse_str_value`. Escaped keys are rare; try the borrowed path first and

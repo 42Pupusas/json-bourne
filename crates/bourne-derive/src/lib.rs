@@ -176,6 +176,102 @@ fn key_expr(
     }
 }
 
+/// Match-arm head for a JSON key, literal when possible so rustc builds a
+/// length-switched byte compare instead of evaluating guards one by one
+/// (audit 4.3.1).
+///
+/// Plain and explicitly renamed keys are string-literal patterns
+/// directly. `rename_all` keys are not known textually at expansion time,
+/// but `Casing::convert` is a `const fn`: the renamed key is hoisted into
+/// a named `const` (unique per owner so several cased keys can share one
+/// match) and the const name is the pattern. Returns the const
+/// declaration to emit beside the match — empty for literal keys — and
+/// the arm head. Anything that cannot be constant falls back to a guard
+/// arm, which stays correct.
+fn key_arm_head(
+    key: &proc_macro2::TokenStream,
+    owner: &Ident,
+    binder: &str,
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    let text = key.to_string();
+    let is_literal = syn::parse_str::<syn::Expr>(&text)
+        .ok()
+        .is_some_and(|e| matches!(e, syn::Expr::Lit(_)));
+    if is_literal {
+        return (quote!(), quote! { #key });
+    }
+
+    // key_expr's rename_all shape: `{ const __BOURNE_KEY: &str = <expr>;
+    // __BOURNE_KEY }`. Recover `<expr>` and re-emit it as a uniquely
+    // named const item beside the match.
+    let cased = syn::parse_str::<syn::Block>(&text).ok().and_then(|b| {
+        let Some(syn::Stmt::Item(syn::Item::Const(item))) = b.stmts.into_iter().next() else {
+            return None;
+        };
+        let syn::ItemConst { expr, .. } = &item;
+        let cname = Ident::new(
+            &format!("__BOURNE_KEY_{}", owner.to_string().to_ascii_uppercase()),
+            proc_macro2::Span::call_site(),
+        );
+        Some((quote! { const #cname: &str = #expr; }, cname))
+    });
+    if let Some((decl, cname)) = cased {
+        return (decl, quote! { #cname });
+    }
+
+    let b = Ident::new(binder, proc_macro2::Span::call_site());
+    (quote!(), quote! { #b if #b == #key })
+}
+
+#[cfg(test)]
+mod key_arm_head_tests {
+    use super::*;
+    use proc_macro2::Span;
+
+    fn block(text: &str) -> proc_macro2::TokenStream {
+        text.parse().unwrap()
+    }
+
+    #[test]
+    fn string_literal_yields_pattern_no_decl() {
+        let key = quote! { "userId" };
+        let (decl, head) = key_arm_head(&key, &Ident::new("user_id", Span::call_site()), "__b");
+        assert!(decl.is_empty());
+        assert_eq!(head.to_string(), "\"userId\"");
+    }
+
+    #[test]
+    fn rename_all_const_is_hoisted_with_owner_name() {
+        let key = block(
+            "{ const __BOURNE_KEY: &str = ::json_bourne::__Casing::rename(\"user_id\", \"camelCase\").as_str(); __BOURNE_KEY }",
+        );
+        let (decl, head) = key_arm_head(&key, &Ident::new("user_id", Span::call_site()), "__b");
+        assert_eq!(
+            decl.to_string(),
+            "const __BOURNE_KEY_USER_ID : & str = :: json_bourne :: __Casing :: rename (\"user_id\" , \"camelCase\") . as_str () ;"
+        );
+        assert_eq!(head.to_string(), "__BOURNE_KEY_USER_ID");
+    }
+
+    #[test]
+    fn different_owners_get_different_consts() {
+        let key = block("{ const __BOURNE_KEY: &str = \"x\"; __BOURNE_KEY }");
+        let (_, h1) = key_arm_head(&key, &Ident::new("ab", Span::call_site()), "__b");
+        let (_, h2) = key_arm_head(&key, &Ident::new("cd", Span::call_site()), "__b");
+        assert_ne!(h1.to_string(), h2.to_string());
+        assert_eq!(h1.to_string(), "__BOURNE_KEY_AB");
+        assert_eq!(h2.to_string(), "__BOURNE_KEY_CD");
+    }
+
+    #[test]
+    fn unexpected_shape_falls_back_to_guard() {
+        let key = quote! { make_key("x") };
+        let (decl, head) = key_arm_head(&key, &Ident::new("f", Span::call_site()), "__b");
+        assert!(decl.is_empty());
+        assert_eq!(head.to_string(), "__b if __b == make_key (\"x\")");
+    }
+}
+
 /// Parse a variant-level `#[bourne(rename = "...")]` (the only variant attr).
 fn parse_variant_rename(attrs: &[syn::Attribute]) -> syn::Result<Option<String>> {
     let mut rename = None;
@@ -476,6 +572,7 @@ fn from_json_named(
     container: &ContainerAttrs,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut decls = Vec::new();
+    let mut key_consts = Vec::new();
     let mut arms = Vec::new();
     let mut assigns = Vec::new();
 
@@ -495,8 +592,10 @@ fn from_json_named(
 
         let key = key_expr(name, &fa.rename, &container.rename_all);
         let acquire = acquire_expr(ty);
+        let (kc, head) = key_arm_head(&key, name, "__bourne_k");
+        key_consts.push(kc);
         arms.push(quote! {
-            __bourne_k if __bourne_k == #key => {
+            #head => {
                 if #name.is_some() {
                     return ::core::result::Result::Err(::json_bourne::Error::new(
                         ::json_bourne::ErrorKind::DuplicateKey,
@@ -540,10 +639,12 @@ fn from_json_named(
     Ok(quote! {
         __lex.object_start()?;
         #(#decls)*
+        #(#key_consts)*
         let mut __maybe_key = __lex.object_first_key_lex()?;
         while let ::core::option::Option::Some(__key_js) = __maybe_key {
             let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
-            match __key_cow.as_ref() {
+            let __key: &str = __key_cow.as_ref();
+            match __key {
                 #(#arms)*
                 #unknown_arm
             }
@@ -683,6 +784,7 @@ fn struct_variant_read(
     tag_arm: Option<proc_macro2::TokenStream>,
 ) -> proc_macro2::TokenStream {
     let mut decls = Vec::new();
+    let mut key_consts = Vec::new();
     let mut arms = Vec::new();
     let mut assigns = Vec::new();
     for f in fields {
@@ -697,8 +799,10 @@ fn struct_variant_read(
         decls.push(quote! {
             let mut #fname: ::core::option::Option<#ty> = ::core::option::Option::None;
         });
+        let (kc, head) = key_arm_head(key, fname, "__bourne_k");
+        key_consts.push(kc);
         arms.push(quote! {
-            __bourne_k if __bourne_k == #key => {
+            #head => {
                 if #fname.is_some() {
                     return ::core::result::Result::Err(::json_bourne::Error::new(
                         ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
@@ -725,11 +829,13 @@ fn struct_variant_read(
     quote! {{
         __lex.object_start()?;
         #(#decls)*
+        #(#key_consts)*
         #tag_seen_decl
         let mut __maybe_key = __lex.object_first_key_lex()?;
         while let ::core::option::Option::Some(__key_js) = __maybe_key {
             let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
-            match __key_cow.as_ref() {
+            let __key: &str = __key_cow.as_ref();
+            match __key {
                 #(#arms)*
                 #inner_tag_arm
                 _ => {
@@ -750,29 +856,32 @@ fn from_json_enum_external(
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut unit_arms = Vec::new();
     let mut tagged_arms = Vec::new();
+    let mut key_consts = Vec::new();
     for v in variants {
         let vname = &v.ident;
         let rename = parse_variant_rename(&v.attrs)?;
         let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
+        let (kc, head) = key_arm_head(&key, vname, "__bourne_k");
+        key_consts.push(kc);
         match classify_variant(v, &container.rename_all)? {
             VShape::Unit => unit_arms.push(quote! {
-                __bourne_t if __bourne_t == #key => ::core::result::Result::Ok(#ctor),
+                #head => ::core::result::Result::Ok(#ctor),
             }),
             VShape::Newtype(ty) => tagged_arms.push(quote! {
-                __bourne_t if __bourne_t == #key =>
+                #head =>
                     #ctor(<#ty as ::json_bourne::FromJson<'_>>::from_lex(__lex)?),
             }),
             VShape::Tuple(tys) => {
                 let body = tuple_variant_read(&ctor, &tys);
                 tagged_arms.push(quote! {
-                    __bourne_t if __bourne_t == #key => { #body },
+                    #head => { #body },
                 });
             }
             VShape::Struct(fields) => {
                 let body = struct_variant_read(&ctor, &fields, None);
                 tagged_arms.push(quote! {
-                    __bourne_t if __bourne_t == #key => #body,
+                    #head => #body,
                 });
             }
         }
@@ -788,6 +897,7 @@ fn from_json_enum_external(
                     ::json_bourne::Error::new(::json_bourne::ErrorKind::UnknownField, __lex.position())
                 })?;
                 let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
+                #(#key_consts)*
                 let __value = match __key_cow.as_ref() {
                     #(#tagged_arms)*
                     _ => return ::core::result::Result::Err(::json_bourne::Error::new(
@@ -810,6 +920,7 @@ fn from_json_enum_external(
                 // matches; `parse_str_value` would reject the escapes.
                 let __key_js = __lex.read_string_no_validate()?;
                 let __tag_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
+                #(#key_consts)*
                 match __tag_cow.as_ref() {
                     #(#unit_arms)*
                     _ => ::core::result::Result::Err(::json_bourne::Error::new(
@@ -830,17 +941,20 @@ fn from_json_enum_internal(
     tag: &str,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut arms = Vec::new();
+    let mut key_consts = Vec::new();
     for v in variants {
         let vname = &v.ident;
         let rename = parse_variant_rename(&v.attrs)?;
         let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
+        let (kc, head) = key_arm_head(&key, vname, "__bourne_t");
+        key_consts.push(kc);
         match classify_variant(v, &container.rename_all)? {
             VShape::Unit => arms.push(quote! {
-                __t if __t == #key => {
+                #head => {
                     // Unit variant: the tag key may appear once; a
                     // repeat is a duplicate, anything else is unknown.
-                    __lex.object_start()?;
+                    __lex.object_start()?;;
                     let mut __seen_tag = false;
                     let mut __mk = __lex.object_first_key_lex()?;
                     while let ::core::option::Option::Some(__kjs) = __mk {
@@ -863,7 +977,7 @@ fn from_json_enum_internal(
             }),
             VShape::Struct(fields) => {
                 let body = internal_struct_variant_read(&ctor, &fields, tag);
-                arms.push(quote! { __t if __t == #key => #body, });
+                arms.push(quote! { #head => #body, });
             }
             _ => {
                 return Err(syn::Error::new(
@@ -891,7 +1005,8 @@ fn from_json_enum_internal(
             __maybe_key = __lex.object_next_key_lex()?;
         };
         __lex.restore(__cp);
-        match __tag_value {
+        #(#key_consts)*
+        match __tag_value.as_ref() {
             #(#arms)*
             _ => ::core::result::Result::Err(::json_bourne::Error::new(
                 ::json_bourne::ErrorKind::UnknownField, __lex.position())),
@@ -910,7 +1025,7 @@ fn internal_struct_variant_read(
     // once — the walk's first occurrence is skipped, a second is a
     // duplicate key, matching named structs.
     let tag_arm = quote! {
-        __bourne_k if __bourne_k == #tag => {
+        #tag => {
             if __bourne_tag_seen {
                 return ::core::result::Result::Err(::json_bourne::Error::new(
                     ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
@@ -931,14 +1046,17 @@ fn from_json_enum_adjacent(
     content: &str,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut arms = Vec::new();
+    let mut key_consts = Vec::new();
     for v in variants {
         let vname = &v.ident;
         let rename = parse_variant_rename(&v.attrs)?;
         let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
+        let (kc, head) = key_arm_head(&key, vname, "__bourne_t");
+        key_consts.push(kc);
         match classify_variant(v, &container.rename_all)? {
             VShape::Unit => arms.push(quote! {
-                __t if __t == #key => {
+                #head => {
                     if __content_cp.is_some() {
                         ::core::result::Result::Err(::json_bourne::Error::new(
                             ::json_bourne::ErrorKind::UnknownField, __lex.position()))
@@ -948,7 +1066,7 @@ fn from_json_enum_adjacent(
                 }
             }),
             VShape::Newtype(ty) => arms.push(quote! {
-                __t if __t == #key => match __content_cp {
+                #head => match __content_cp {
                     ::core::option::Option::Some(__c) => {
                         __lex.restore(__c);
                         ::core::result::Result::Ok(#ctor(
@@ -961,7 +1079,7 @@ fn from_json_enum_adjacent(
             VShape::Tuple(tys) => {
                 let body = tuple_variant_read(&ctor, &tys);
                 arms.push(quote! {
-                    __t if __t == #key => match __content_cp {
+                    #head => match __content_cp {
                         ::core::option::Option::Some(__c) => {
                             __lex.restore(__c);
                             ::core::result::Result::Ok({ #body })
@@ -974,7 +1092,7 @@ fn from_json_enum_adjacent(
             VShape::Struct(fields) => {
                 let body = struct_variant_read(&ctor, &fields, None);
                 arms.push(quote! {
-                    __t if __t == #key => match __content_cp {
+                    #head => match __content_cp {
                         ::core::option::Option::Some(__c) => {
                             __lex.restore(__c);
                             ::core::result::Result::Ok(#body)
@@ -1020,6 +1138,7 @@ fn from_json_enum_adjacent(
             .ok_or_else(|| ::json_bourne::Error::new(
                 ::json_bourne::ErrorKind::MissingField, __lex.position()))?;
         let __post_cp = __lex.checkpoint();
+        #(#key_consts)*
         let __value = match __tag.as_ref() {
             #(#arms)*
             _ => ::core::result::Result::Err(::json_bourne::Error::new(
