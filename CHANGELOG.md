@@ -43,6 +43,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the hand-written impl on the `metric_events` fixture (audit 4.3.1).
 
 ### Performance
+- derive: key acquisition is now borrowed-first. Escape-free keys — the
+  overwhelming majority — are borrowed with a single string walk; an
+  escape-bearing key is decoded by one retry through the existing
+  `key_to_cow` path. Combined with the literal-pattern dispatch, the derived
+  struct impl now parses `metric_events_1000` slightly *faster* than the
+  hand-written bench impl (156.5 µs vs 164.1 µs median), closing the audit's
+  ~18 % derive gap entirely (audit 4.3.2).
 - Pretty-printed parse benches added (`pretty_*` fixtures and a
   `pretty_stream_vs_dom` group): arrays and a small object, one newline +
   indentation per member. Baseline shows bourne's streaming parser ahead

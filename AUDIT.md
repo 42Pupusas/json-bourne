@@ -365,6 +365,14 @@ hand-written. Causes visible in the generated code (`bourne-derive/src/lib.rs`):
    check `has_escapes`, build `Cow`) instead of `object_first_key` →
    `parse_str_value`. Escaped keys are rare; try the borrowed path first and
    fall back to the `_lex` path only on `InvalidEscape`.
+   — *Landed 2026-07.* New `object_first_key_str` / `object_next_key_str` read
+   keys with the borrowing string walk and rewind on `InvalidEscape`;
+   generated code retries the rejected key once with `object_key_cow`, which
+   decodes exactly like the old path. The derived struct impl overtook the
+   hand-written bench impl: 156.5 µs vs 164.1 µs on `metric_events_1000`
+   (0.95×) — the audit's §4.3 headline ("derive is ~18 % slower") is now a
+   4 % win. A `key_to_cow` missing `#[inline]` turned out to be half the
+   original key-path cost; the borrowed-first codegen removed the rest.
 3. **`acquire_expr` has no arms for `f64`, `f32`, `bool`, `Option<&str>`**, so
    those fields pay `peek_value_kind` + trait dispatch; add direct
    `parse_f64_value` / keyword arms. Three of the eight fields in the realistic

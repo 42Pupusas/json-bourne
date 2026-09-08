@@ -168,6 +168,23 @@ struct MetricEventDerived<'input> {
     throughput_rps: f64,
 }
 
+/// Hand-written impl that acquires keys the way the derive does
+/// (`object_first_key_lex` + `key_to_cow`) but dispatches with literal
+/// patterns on the borrowed `&str`. The delta against `MetricEventBourne`
+/// isolates the key-acquisition path from every other difference.
+#[derive(Debug)]
+#[allow(dead_code)]
+struct MetricEventKeyLex<'input> {
+    ts: u64,
+    host: &'input str,
+    metric: &'input str,
+    count: u64,
+    bytes: u64,
+    latency_ms: f64,
+    cpu: f64,
+    throughput_rps: f64,
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct MetricEventSerde<'a> {
@@ -225,6 +242,66 @@ impl<'input> FromJson<'input> for MetricEventBourne<'input> {
                 _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
             }
             maybe_key = lex.object_next_key()?;
+        }
+
+        Ok(Self {
+            ts: ts.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            host: host.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            metric: metric.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            count: count.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            bytes: bytes.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            latency_ms: latency_ms
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            cpu: cpu.ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+            throughput_rps: throughput_rps
+                .ok_or_else(|| Error::new(ErrorKind::MissingField, lex.position()))?,
+        })
+    }
+}
+
+impl<'input> FromJson<'input> for MetricEventKeyLex<'input> {
+    fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
+        lex.object_start()?;
+
+        let mut ts: Option<u64> = None;
+        let mut host: Option<&'input str> = None;
+        let mut metric: Option<&'input str> = None;
+        let mut count: Option<u64> = None;
+        let mut bytes: Option<u64> = None;
+        let mut latency_ms: Option<f64> = None;
+        let mut cpu: Option<f64> = None;
+        let mut throughput_rps: Option<f64> = None;
+
+        let mut maybe_key = lex.object_first_key_lex()?;
+        while let Some(key_js) = maybe_key {
+            let key_cow = json_bourne::key_to_cow(key_js, lex)?;
+            match key_cow.as_ref() {
+                "ts" => {
+                    ts =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
+                }
+                "host" => host = Some(lex.parse_str_value()?),
+                "metric" => metric = Some(lex.parse_str_value()?),
+                "count" => {
+                    count =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
+                }
+                "bytes" => {
+                    bytes =
+                        Some(u64::try_from(lex.parse_i64_value()?).map_err(|_| {
+                            Error::new(ErrorKind::NumberOutOfRange, lex.position())
+                        })?);
+                }
+                "latency_ms" => latency_ms = Some(f64::from_lex(lex)?),
+                "cpu" => cpu = Some(f64::from_lex(lex)?),
+                "throughput_rps" => throughput_rps = Some(f64::from_lex(lex)?),
+                _ => return Err(Error::new(ErrorKind::UnknownField, lex.position())),
+            }
+            maybe_key = lex.object_next_key_lex()?;
         }
 
         Ok(Self {
@@ -376,8 +453,9 @@ mod pretty_stream_vs_dom {
 
 mod typed_struct {
     use super::{
-        MetricEventBourne, MetricEventDerived, MetricEventSerde, SMALL_OBJECT, UserBourne,
-        UserDerived, UserSerde, metric_event_array, metric_event_array_reversed_keys, parse,
+        MetricEventBourne, MetricEventDerived, MetricEventKeyLex, MetricEventSerde, SMALL_OBJECT,
+        UserBourne, UserDerived, UserSerde, metric_event_array, metric_event_array_reversed_keys,
+        parse,
     };
 
     // Original small fixture — kept for the per-call-overhead floor.
@@ -445,6 +523,21 @@ mod typed_struct {
             .counter(divan::counter::BytesCount::new(metrics.len()))
             .bench(|| {
                 let v: Vec<MetricEventDerived<'_>> =
+                    parse(divan::black_box(metrics.as_bytes())).unwrap();
+                divan::black_box(v);
+            });
+    }
+
+    // Key acquisition via the `_lex` + `key_to_cow` route (what the
+    // derive emits) in an otherwise hand-written impl. The gap to the
+    // `bourne` row above is the cost of the key path itself.
+    #[divan::bench]
+    fn metric_events_1000_bourne_key_lex(bencher: divan::Bencher) {
+        let metrics = metric_event_array(1_000);
+        bencher
+            .counter(divan::counter::BytesCount::new(metrics.len()))
+            .bench(|| {
+                let v: Vec<MetricEventKeyLex<'_>> =
                     parse(divan::black_box(metrics.as_bytes())).unwrap();
                 divan::black_box(v);
             });

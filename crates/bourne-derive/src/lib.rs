@@ -519,6 +519,57 @@ pub fn derive_from_json(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Object-walk loop for derive-generated `FromJson`: borrowed-first key
+/// acquisition. Escape-free keys come back as `KeyCow::Borrowed` straight
+/// from the borrowing read (`object_first_key_str` /
+/// `object_next_key_str`); an escape-bearing key rejects with
+/// `InvalidEscape` and the cursor rewound, which the advance loop turns
+/// into a decoding retry via `object_key_cow`. Equivalent to the `_lex` +
+/// `key_to_cow` sequence for every input, without the span round-trip on
+/// the common path (audit 4.3.2).
+fn object_key_walk(
+    arms: &[proc_macro2::TokenStream],
+    unknown_arm: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    quote! {
+        let mut __maybe_key = __lex.object_first_key_str()?;
+        '__bourne_walk: loop {
+            let __key_cow: ::json_bourne::KeyCow<'_> = match __maybe_key {
+                ::core::option::Option::Some(__k) => {
+                    ::json_bourne::KeyCow::Borrowed(__k)
+                }
+                ::core::option::Option::None => break,
+            };
+            let __key: &str = __key_cow.as_ref();
+            match __key {
+                #(#arms)*
+                #unknown_arm
+            }
+            loop {
+                match __lex.object_next_key_str() {
+                    ::core::result::Result::Ok(__k) => {
+                        __maybe_key = __k;
+                        continue '__bourne_walk;
+                    }
+                    ::core::result::Result::Err(__e)
+                        if __e.kind == ::json_bourne::ErrorKind::InvalidEscape =>
+                    {
+                        let __decoded = __lex.object_key_cow()?;
+                        let __key: &str = __decoded.as_ref();
+                        match __key {
+                            #(#arms)*
+                            #unknown_arm
+                        }
+                    }
+                    ::core::result::Result::Err(__e) => {
+                        return ::core::result::Result::Err(__e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn from_json_impl(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let name = &input.ident;
     let container = parse_container_attrs(&input.attrs)?;
@@ -636,20 +687,12 @@ fn from_json_named(
         }
     };
 
+    let walk = object_key_walk(&arms, &unknown_arm);
     Ok(quote! {
         __lex.object_start()?;
         #(#decls)*
         #(#key_consts)*
-        let mut __maybe_key = __lex.object_first_key_lex()?;
-        while let ::core::option::Option::Some(__key_js) = __maybe_key {
-            let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
-            let __key: &str = __key_cow.as_ref();
-            match __key {
-                #(#arms)*
-                #unknown_arm
-            }
-            __maybe_key = __lex.object_next_key_lex()?;
-        }
+        #walk
         ::core::result::Result::Ok(Self { #(#assigns)* })
     })
 }
@@ -822,29 +865,28 @@ fn struct_variant_read(
         };
         assigns.push(quote! { #fname: #fin, });
     }
-    let (tag_seen_decl, inner_tag_arm) = match tag_arm {
-        Some(arm) => (quote! { let mut __bourne_tag_seen = false; }, arm),
-        None => (quote!(), quote!()),
+    let tag_seen_decl = if tag_arm.is_some() {
+        quote! { let mut __bourne_tag_seen = false; }
+    } else {
+        quote!()
     };
+    let fallback_arm = quote! {
+        _ => {
+            return ::core::result::Result::Err(::json_bourne::Error::new(
+                ::json_bourne::ErrorKind::UnknownField, __lex.position()));
+        }
+    };
+    let mut walk_arms = arms.to_vec();
+    if let Some(arm) = tag_arm {
+        walk_arms.push(arm);
+    }
+    let walk = object_key_walk(&walk_arms, &fallback_arm);
     quote! {{
         __lex.object_start()?;
         #(#decls)*
         #(#key_consts)*
         #tag_seen_decl
-        let mut __maybe_key = __lex.object_first_key_lex()?;
-        while let ::core::option::Option::Some(__key_js) = __maybe_key {
-            let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
-            let __key: &str = __key_cow.as_ref();
-            match __key {
-                #(#arms)*
-                #inner_tag_arm
-                _ => {
-                    return ::core::result::Result::Err(::json_bourne::Error::new(
-                        ::json_bourne::ErrorKind::UnknownField, __lex.position()));
-                }
-            }
-            __maybe_key = __lex.object_next_key_lex()?;
-        }
+        #walk
         #ctor { #(#assigns)* }
     }}
 }

@@ -1123,6 +1123,86 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         }
     }
 
+    /// Borrowed-first variant of [`object_first_key`]: read a key and the
+    /// following colon as `&'input str`. An escape-bearing key fails with
+    /// [`ErrorKind::InvalidEscape`] and the cursor rewound to the key's
+    /// opening quote, so a caller can retry via [`Self::object_key_cow`],
+    /// which decodes instead of borrowing.
+    ///
+    /// [`object_first_key`]: Self::object_first_key
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn object_first_key_str(&mut self) -> Result<Option<&'input str>, Error> {
+        self.skip_whitespace();
+        match self.peek_object() {
+            ObjectPeek::Close => {
+                self.close_object()?;
+                Ok(None)
+            }
+            ObjectPeek::Quote => {
+                let key_start = self.offset;
+                match self.parse_str_value() {
+                    Ok(key) => {
+                        self.expect_colon()?;
+                        Ok(Some(key))
+                    }
+                    Err(e) => {
+                        self.offset = key_start;
+                        Err(e)
+                    }
+                }
+            }
+            ObjectPeek::Comma | ObjectPeek::Other => Err(self.unexpected_or_eof()),
+        }
+    }
+
+    /// Borrowed-first variant of [`object_next_key`], with the same
+    /// rewind-on-escape contract as [`Self::object_first_key_str`].
+    ///
+    /// [`object_next_key`]: Self::object_next_key
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn object_next_key_str(&mut self) -> Result<Option<&'input str>, Error> {
+        self.skip_whitespace();
+        match self.peek_object() {
+            ObjectPeek::Close => {
+                self.close_object()?;
+                Ok(None)
+            }
+            ObjectPeek::Comma => {
+                self.advance_comma_to_quote()?;
+                let key_start = self.offset;
+                match self.parse_str_value() {
+                    Ok(key) => {
+                        self.expect_colon()?;
+                        Ok(Some(key))
+                    }
+                    Err(e) => {
+                        self.offset = key_start;
+                        Err(e)
+                    }
+                }
+            }
+            ObjectPeek::Quote | ObjectPeek::Other => Err(self.unexpected_or_eof()),
+        }
+    }
+
+    /// Read a key and the following colon as a [`Cow`] `str` — borrowed
+    /// when the key is escape-free, decoded otherwise. The decode
+    /// fallback for [`Self::object_first_key_str`] and
+    /// [`Self::object_next_key_str`]: their escape rejection rewinds to
+    /// a key's opening quote, which is exactly where this method starts
+    /// reading.
+    ///
+    /// [`Cow`]: alloc::borrow::Cow
+    #[cfg(feature = "alloc")]
+    #[inline]
+    pub fn object_key_cow(&mut self) -> Result<::alloc::borrow::Cow<'input, str>, Error> {
+        let js = self.read_string_no_validate()?;
+        self.expect_colon()?;
+        crate::key_to_cow(js, self)
+    }
+
     fn unexpected_or_eof(&self) -> Error {
         self.peek().map_or_else(
             || self.err(ErrorKind::UnexpectedEof),
@@ -1431,6 +1511,125 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 
     pub(crate) const fn err(&self, kind: ErrorKind) -> Error {
         Error::new(kind, compute_position(self.input, self.offset))
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod object_key_tests {
+    use super::*;
+
+    use alloc::vec::Vec;
+
+    /// Walk the keys of `input` with the borrowed-first trio, recording
+    /// (`key`, `value_tail`) pairs. The tail is a `parse_i64` read when the
+    /// next value is a number, else `None`.
+    fn walk_keys(input: &[u8]) -> Vec<(Option<String>, Option<i64>)> {
+        let mut lex: Lexer<'_> = Lexer::new(input);
+        lex.object_start().expect("object");
+        let mut out = Vec::new();
+        let mut maybe_key = lex.object_first_key_str().expect("first key");
+        while let Some(k) = maybe_key {
+            let v = if lex.peek_value_kind().unwrap() == ValueKind::Number {
+                Some(lex.parse_i64_value().unwrap())
+            } else {
+                lex.skip_value().unwrap();
+                None
+            };
+            out.push((Some(k.to_owned()), v));
+            maybe_key = match lex.object_next_key_str() {
+                Ok(k) => k,
+                Err(e) if e.kind == ErrorKind::InvalidEscape => {
+                    let decoded = lex.object_key_cow().expect("decode fallback");
+                    out.push((Some(decoded.into_owned()), None));
+                    break;
+                }
+                Err(e) => panic!("unexpected error: {e}"),
+            };
+        }
+        out
+    }
+
+    #[test]
+    fn borrowed_keys_match_object_first_key() {
+        let cases = [
+            r#"{"a":1,"bb":2,"ccc":3}"#,
+            "{ \"a\" : 1 , \"bb\" : 2 }",
+            "{}",
+            r#"{"a":{"b":[1]},"c":null}"#,
+        ];
+        for case in cases {
+            let got = walk_keys(case.as_bytes());
+            let mut want_lex: Lexer<'_> = Lexer::new(case.as_bytes());
+            want_lex.object_start().unwrap();
+            let mut want: Vec<(Option<String>, Option<i64>)> = Vec::new();
+            let mut k = want_lex.object_first_key().unwrap();
+            while let Some(key) = k {
+                let v = if want_lex.peek_value_kind().unwrap() == ValueKind::Number {
+                    Some(want_lex.parse_i64_value().unwrap())
+                } else {
+                    want_lex.skip_value().unwrap();
+                    None
+                };
+                want.push((Some(key.to_owned()), v));
+                k = want_lex.object_next_key().unwrap();
+            }
+            assert_eq!(got, want, "key sequence for {case}");
+        }
+    }
+
+    #[test]
+    fn integer_values_still_parse_after_borrowed_keys() {
+        let got = walk_keys(b"{\"a\":1,\"bb\":-22,\"ccc\":333}");
+        assert_eq!(
+            got,
+            vec![
+                (Some("a".to_owned()), Some(1)),
+                (Some("bb".to_owned()), Some(-22)),
+                (Some("ccc".to_owned()), Some(333))
+            ]
+        );
+    }
+
+    #[test]
+    fn escape_key_rejects_then_decodes() {
+        let input: &[u8] = b"{\"a\"\x3A 1,\"a\\tb\":2}";
+        let mut lex: Lexer<'_> = Lexer::new(input);
+        lex.object_start().unwrap();
+        let first = lex.object_first_key_str().unwrap();
+        assert_eq!(first, Some("a"));
+        assert_eq!(lex.parse_i64_value().unwrap(), 1);
+
+        let err = lex
+            .object_next_key_str()
+            .expect_err("escape-bearing key must not borrow");
+        assert_eq!(err.kind, ErrorKind::InvalidEscape);
+
+        let decoded = lex.object_key_cow().expect("decode fallback");
+        assert_eq!(decoded.as_ref(), "a\tb");
+        assert_eq!(lex.parse_i64_value().unwrap(), 2);
+        assert!(lex.object_next_key_str().unwrap().is_none());
+    }
+
+    #[test]
+    fn first_key_escape_rejects_then_decodes() {
+        let mut lex: Lexer<'_> = Lexer::new(b"{\"a\\nb\":7}");
+        lex.object_start().unwrap();
+        let err = lex
+            .object_first_key_str()
+            .expect_err("escape-bearing key must not borrow");
+        assert_eq!(err.kind, ErrorKind::InvalidEscape);
+        let decoded = lex.object_key_cow().expect("decode fallback");
+        assert_eq!(decoded.as_ref(), "a\nb");
+        assert_eq!(lex.parse_i64_value().unwrap(), 7);
+    }
+
+    #[test]
+    fn borrowed_keys_work_at_non_default_depth() {
+        let mut lex: Lexer<'_, 8> = Lexer::new(b"{\"k\":1}");
+        lex.object_start().unwrap();
+        assert_eq!(lex.object_first_key_str().unwrap(), Some("k"));
+        assert_eq!(lex.parse_i64_value().unwrap(), 1);
+        assert!(lex.object_next_key_str().unwrap().is_none());
     }
 }
 

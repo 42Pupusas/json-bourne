@@ -491,7 +491,11 @@ mod alloc_impls {
 
     /// Materialize an object key from a [`JsonStr`] span. Borrows when the
     /// key is escape-free; decodes into an owned `String` otherwise.
-    pub fn key_to_cow<'input>(js: JsonStr, lex: &Lexer<'input>) -> Result<Cow<'input, str>, Error> {
+    #[inline]
+    pub fn key_to_cow<'input, const MAX_DEPTH: usize>(
+        js: JsonStr,
+        lex: &Lexer<'input, MAX_DEPTH>,
+    ) -> Result<Cow<'input, str>, Error> {
         if let Some(borrowed) = js.as_str_in_input(lex.input()) {
             return Ok(Cow::Borrowed(borrowed));
         }
@@ -915,7 +919,10 @@ mod alloc_impls {
     /// Shared owned-decode path for `String` and `Cow::Owned`. Pulled out
     /// so the two impls cannot drift on capacity hint, error mapping, or
     /// the (subtle) raw-bytes-missing case.
-    fn decode_owned(s: JsonStr, lex: &Lexer<'_>) -> Result<String, Error> {
+    fn decode_owned<const MAX_DEPTH: usize>(
+        s: JsonStr,
+        lex: &Lexer<'_, MAX_DEPTH>,
+    ) -> Result<String, Error> {
         // Capacity hint is the raw byte length: the decoded form is never
         // longer than the encoded form (every escape sequence produces at
         // most as many UTF-8 bytes as it occupies on the wire).
