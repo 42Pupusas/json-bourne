@@ -54,7 +54,7 @@ performance.
 | `cargo test -p json-bourne` (default = std) | pass |
 | `cargo test -p json-bourne --no-default-features --features alloc` | pass (247 unit; std-only tests compiled out) |
 | `cargo check -p json-bourne --no-default-features` | pass |
-| `cargo check -p json-bourne --no-default-features --features alloc,indexmap,derive` | pass |
+| `cargo check -p json-bourne --no-default-features --features alloc,derive` | pass (re-run post-indexmap-removal) |
 | `cargo clippy -p json-bourne --all-features --all-targets -- -D warnings` | clean |
 | `cargo clippy -p json-bourne --no-default-features -- -D warnings` | clean |
 | `cargo clippy --workspace --all-targets -- -D warnings` (default features) | clean |
@@ -496,7 +496,8 @@ CI — add one).
 — *Landed 2026-07.* `ci.yml` names `json-bourne`/`bourne-derive`; the test
 job's matrix runs `scripts/ci.sh`, which carries the exact command list
 (all-features deliberately excluded from the workspace run) and covers the
-bare `--no-default-features`, `alloc`, and `alloc,indexmap,derive` combos;
+bare `--no-default-features`, `alloc`, and `alloc,derive` combos (the combo originally included `indexmap`, since
+removed);
 `bourne-bench/src/feature_guard.rs` has the `compile_error!`. The bare
 no-std build the script exercises was itself broken until 5.4 (the lexer
 reached alloc-gated `crate::float::POW10`); CI would have caught it had
@@ -583,7 +584,7 @@ Not defects, but they bear on how safely the fixes above can be made.
 ## 7. Recommended action plan
 
 Each phase ends with the full matrix: `--no-default-features`, `--features
-alloc`, default, `--features derive,indexmap`, `--all-features`; tests + clippy
+alloc`, default, `--features derive`, `--all-features`; tests + clippy
 `-D warnings` in each; `cargo miri test -p json-bourne --lib` with
 `--cfg bourne_no_simd`; fuzz smoke on both targets.
 

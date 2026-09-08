@@ -14,7 +14,7 @@ test_suite() {
   cargo test -p json-bourne --all-features
   cargo test -p json-bourne --no-default-features
   cargo test -p json-bourne --no-default-features --features alloc
-  cargo test -p json-bourne --no-default-features --features alloc,indexmap,derive
+  cargo test -p json-bourne --no-default-features --features alloc,derive
 }
 
 run_test() {

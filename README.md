@@ -54,8 +54,14 @@ The `bourne-bench` crate is workspace-internal and is not published.
 |-------------|---------|-----------------------------------------------------|
 | `std`       | yes     | `alloc`, `HashMap`, `std::net`, `std::path`, `io::Write` adapter |
 | `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, `BTreeMap`/`Set`, escape decoding, `to_string`/`to_vec` |
-| `indexmap`  | no      | `FromJson`/`ToJson` for `indexmap::IndexMap`/`IndexSet` (insertion order) |
 | `derive`    | no      | `#[derive(FromJson, ToJson)]` via the companion `bourne-derive` crate |
+
+`json-bourne` has **zero dependencies** in its default build. With the `derive`
+feature on, `bourne-derive` (and its `syn`/`quote` build stack) joins the graph,
+but only at compile time — generated code stays dependency-free. The old
+optional `indexmap` integration (insertion-order maps) was removed; if you
+need that, wrap your own `IndexMap` in a newtype and implement `FromJson`/`ToJson` for the newtype, or use the
+streaming `Lexer` to feed one directly.
 
 `json-bourne` builds in `no_std + alloc` with `default-features = false, features = ["alloc"]`.
 For pure `no_std` (streaming `Lexer` / `Parser`, stack-only typed parsing, and float

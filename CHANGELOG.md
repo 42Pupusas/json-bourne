@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Breaking:** the optional `indexmap` feature and its `FromJson`/`ToJson`
+  impls for `IndexMap`/`IndexSet` (present since 0.1.0). If you relied on
+  insertion-order maps, wrap your own `IndexMap` in a newtype and implement
+  the traits on the newtype, or feed one from the streaming `Lexer`.
+
+### Changed
+
 - `parse_f64_value` gained a fused fast path for plain decimal literals
   (no exponent) whose mantissa fits 2^53: the mantissa and `10^-k` are
   both exact, so one IEEE divide is correctly rounded and bit-identical

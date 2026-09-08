@@ -1795,38 +1795,6 @@ mod alloc_impls {
             w.write_escaped_str(&self.to_string_lossy())
         }
     }
-
-    // -----------------------------------------------------------------
-    // IndexMap / IndexSet (optional `indexmap` feature).
-    //
-    // Insertion-order iteration is the differentiator from
-    // HashMap/BTreeMap; the wire shape is the same.
-    // -----------------------------------------------------------------
-
-    #[cfg(feature = "indexmap")]
-    impl<K, V, S> ToJson for indexmap::IndexMap<K, V, S>
-    where
-        K: super::MapKeyOut + ::core::hash::Hash + Eq,
-        V: ToJson,
-        S: ::core::hash::BuildHasher,
-    {
-        #[inline]
-        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
-            write_object(self.iter(), w)
-        }
-    }
-
-    #[cfg(feature = "indexmap")]
-    impl<T, S> ToJson for indexmap::IndexSet<T, S>
-    where
-        T: ToJson + ::core::hash::Hash + Eq,
-        S: ::core::hash::BuildHasher,
-    {
-        #[inline]
-        fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
-            super::write_array(self.iter(), w)
-        }
-    }
 }
 
 #[cfg(feature = "alloc")]

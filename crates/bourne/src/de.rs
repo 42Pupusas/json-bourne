@@ -580,20 +580,6 @@ mod alloc_impls {
         }
     }
 
-    #[cfg(feature = "indexmap")]
-    impl<K, V, S> DupMap<K, V> for indexmap::IndexMap<K, V, S>
-    where
-        K: ::core::hash::Hash + Eq,
-        S: ::core::hash::BuildHasher + Default,
-    {
-        fn new_empty() -> Self {
-            Self::with_hasher(S::default())
-        }
-        fn try_insert(&mut self, k: K, v: V) -> bool {
-            self.insert(k, v).is_none()
-        }
-    }
-
     fn parse_map<'input, K, V, M>(lex: &mut Lexer<'input>) -> Result<M, Error>
     where
         K: MapKey<'input>,
@@ -656,20 +642,6 @@ mod alloc_impls {
 
     #[cfg(feature = "std")]
     impl<T, S> SetInsert<T> for std::collections::HashSet<T, S>
-    where
-        T: ::core::hash::Hash + Eq,
-        S: ::core::hash::BuildHasher + Default,
-    {
-        fn new_empty() -> Self {
-            Self::with_hasher(S::default())
-        }
-        fn push(&mut self, v: T) {
-            self.insert(v);
-        }
-    }
-
-    #[cfg(feature = "indexmap")]
-    impl<T, S> SetInsert<T> for indexmap::IndexSet<T, S>
     where
         T: ::core::hash::Hash + Eq,
         S: ::core::hash::BuildHasher + Default,
@@ -1209,37 +1181,4 @@ mod alloc_impls {
     // direct reference. The trait impl above uses it transitively.
     #[allow(dead_code)]
     type _UseJsonStr = JsonStr;
-
-    // -----------------------------------------------------------------
-    // IndexMap / IndexSet (optional `indexmap` feature).
-    //
-    // Mirror image of the BTreeMap / HashMap impls. The novel property
-    // here is *insertion-order preservation*: the parsed map iterates
-    // in the order keys appeared in the JSON input, which downstream
-    // consumers depend on for stable output (canonical JSON, log
-    // round-trips, golden-file tests).
-    // -----------------------------------------------------------------
-
-    #[cfg(feature = "indexmap")]
-    impl<'input, K, V, S> FromJson<'input> for indexmap::IndexMap<K, V, S>
-    where
-        K: MapKey<'input> + ::core::hash::Hash + Eq,
-        V: FromJson<'input>,
-        S: ::core::hash::BuildHasher + Default,
-    {
-        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            parse_map(lex)
-        }
-    }
-
-    #[cfg(feature = "indexmap")]
-    impl<'input, T, S> FromJson<'input> for indexmap::IndexSet<T, S>
-    where
-        T: FromJson<'input> + ::core::hash::Hash + Eq,
-        S: ::core::hash::BuildHasher + Default,
-    {
-        fn from_lex(lex: &mut Lexer<'input>) -> Result<Self, Error> {
-            parse_set(lex)
-        }
-    }
 }

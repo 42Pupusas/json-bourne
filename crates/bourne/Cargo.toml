@@ -10,21 +10,14 @@ exclude = ["tests/", "fuzz/", "*.svg"]
 
 [features]
 default = ["std"]
-std = ["alloc", "indexmap?/std"]
+std = ["alloc"]
 alloc = []
 # Provides `#[derive(FromJson, ToJson)]`, re-exported from this crate.
 # Pulls in the proc-macro stack (syn/quote/proc-macro2) at build time;
 # the generated code itself stays no_std.
 derive = ["dep:bourne-derive"]
-# Optional: FromJson/ToJson impls for `indexmap::{IndexMap, IndexSet}`
-# preserving insertion order. Pulls in the `indexmap` crate. With our
-# `std` feature on, indexmap's `std` is also enabled, which provides
-# `RandomState` as the default hasher. Without `std`, users must
-# specify a hasher explicitly.
-indexmap = ["dep:indexmap", "alloc"]
 
 [dependencies]
-indexmap = { version = "2", default-features = false, optional = true }
 bourne-derive = { path = "../bourne-derive", version = "=0.2.2", optional = true }
 
 [dev-dependencies]

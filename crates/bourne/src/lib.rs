@@ -81,7 +81,6 @@
 //! |-------------|---------|---------------------------------------------|
 //! | `std`       | yes     | `HashMap`, `std::net`, `std::path`, `to_writer` |
 //! | `alloc`     | yes     | `String`, `Vec`, `Box`/`Rc`/`Arc`, escape decoding, `to_string`/`to_vec` |
-//! | `indexmap`  | no      | `IndexMap` / `IndexSet` (insertion order)   |
 //! | `derive`    | yes     | `#[derive(FromJson, ToJson)]` via `bourne-derive` |
 //!
 //! `default-features = false` plus `["alloc"]` gives a `no_std + alloc`
@@ -2577,63 +2576,6 @@ mod sink_adapter_tests {
             to_string_pretty(&v).unwrap(),
             "[\n  [\n    1,\n    2\n  ],\n  [\n    3\n  ]\n]",
         );
-    }
-
-    #[cfg(feature = "indexmap")]
-    #[test]
-    fn indexmap_preserves_insertion_order_on_parse() {
-        use crate::parse_str;
-        // Distinct, non-alphabetical order so a hash-bucket walk
-        // would visibly reshuffle. IndexMap must yield the keys in
-        // the order they appeared in the JSON.
-        let json = r#"{"zebra":1,"alpha":2,"mango":3}"#;
-        let m: indexmap::IndexMap<String, i32> = parse_str(json).unwrap();
-        let keys: Vec<&str> = m.keys().map(String::as_str).collect();
-        assert_eq!(keys, ["zebra", "alpha", "mango"]);
-        assert_eq!(m["alpha"], 2);
-    }
-
-    #[cfg(feature = "indexmap")]
-    #[test]
-    fn indexmap_round_trips_preserving_order() {
-        use super::to_string;
-        use crate::parse_str;
-        let mut m = indexmap::IndexMap::<String, i32>::new();
-        m.insert("z".into(), 1);
-        m.insert("a".into(), 2);
-        m.insert("m".into(), 3);
-        let s = to_string(&m).unwrap();
-        // Wire shape should preserve declaration order.
-        assert_eq!(s, r#"{"z":1,"a":2,"m":3}"#);
-        // Round-trip back into IndexMap must keep that order.
-        let back: indexmap::IndexMap<String, i32> = parse_str(&s).unwrap();
-        assert_eq!(
-            back.keys().map(String::as_str).collect::<Vec<_>>(),
-            ["z", "a", "m"],
-        );
-    }
-
-    #[cfg(feature = "indexmap")]
-    #[test]
-    fn indexmap_rejects_duplicate_keys() {
-        use crate::parse_str;
-        let r: Result<indexmap::IndexMap<String, i32>, _> = parse_str(r#"{"a":1,"a":2}"#);
-        assert_eq!(r.unwrap_err().kind, crate::ErrorKind::DuplicateKey);
-    }
-
-    #[cfg(feature = "indexmap")]
-    #[test]
-    fn indexset_round_trips() {
-        use super::to_string;
-        use crate::parse_str;
-        let mut s = indexmap::IndexSet::<i32>::new();
-        s.insert(3);
-        s.insert(1);
-        s.insert(2);
-        let json = to_string(&s).unwrap();
-        assert_eq!(json, "[3,1,2]");
-        let back: indexmap::IndexSet<i32> = parse_str(&json).unwrap();
-        assert_eq!(back.iter().copied().collect::<Vec<_>>(), [3, 1, 2]);
     }
 
     #[test]
