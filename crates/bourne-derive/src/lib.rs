@@ -199,21 +199,52 @@ enum VShape<'a> {
     Unit,
     Newtype(&'a Type),
     Tuple(Vec<&'a Type>),
-    Struct(Vec<(&'a Ident, &'a Type)>),
+    Struct(Vec<VariantField<'a>>),
 }
 
-fn classify_variant(v: &syn::Variant) -> VShape<'_> {
-    match &v.fields {
+/// A struct-variant field with its parsed attributes and resolved JSON
+/// key expression (explicit `rename` wins, else the enum's `rename_all`,
+/// else the verbatim name).
+struct VariantField<'a> {
+    ident: &'a Ident,
+    ty: &'a Type,
+    /// Fresh binding for the writer's destructuring pattern.
+    bind: Ident,
+    key: proc_macro2::TokenStream,
+    /// No rename and no container `rename_all`: the JSON key equals the
+    /// Rust field name, so the writer can fuse it into byte literals.
+    plain: bool,
+    attrs: FieldAttrs,
+}
+
+fn classify_variant<'a>(
+    v: &'a syn::Variant,
+    rename_all: &Option<String>,
+) -> syn::Result<VShape<'a>> {
+    Ok(match &v.fields {
         Fields::Unit => VShape::Unit,
         Fields::Unnamed(u) if u.unnamed.len() == 1 => VShape::Newtype(&u.unnamed[0].ty),
         Fields::Unnamed(u) => VShape::Tuple(u.unnamed.iter().map(|f| &f.ty).collect()),
-        Fields::Named(n) => VShape::Struct(
-            n.named
-                .iter()
-                .map(|f| (f.ident.as_ref().unwrap(), &f.ty))
-                .collect(),
-        ),
-    }
+        Fields::Named(n) => {
+            let mut fields = Vec::new();
+            for (i, f) in n.named.iter().enumerate() {
+                let ident = f.ident.as_ref().unwrap();
+                let attrs = parse_field_attrs(&f.attrs)?;
+                let plain = attrs.rename.is_none() && rename_all.is_none();
+                let key = key_expr(ident, &attrs.rename, rename_all);
+                let bind = Ident::new(&format!("__f{i}"), ident.span());
+                fields.push(VariantField {
+                    ident,
+                    ty: &f.ty,
+                    bind,
+                    key,
+                    plain,
+                    attrs,
+                });
+            }
+            VShape::Struct(fields)
+        }
+    })
 }
 
 /// Reproduce `__from_json_acquire!`: the integer/`&str` fast paths that
@@ -572,7 +603,7 @@ fn from_json_enum(
         EnumMode::Adjacent(tag, content) => {
             from_json_enum_adjacent(name, variants, container, &tag, &content)
         }
-        EnumMode::Untagged => from_json_enum_untagged(name, variants),
+        EnumMode::Untagged => from_json_enum_untagged(name, variants, container),
     }
 }
 
@@ -618,16 +649,29 @@ fn name_span() -> proc_macro2::Span {
 
 /// Emit the named-object body parse for a struct variant, constructing
 /// `ctor { .. }`. Reuses the same object-walk shape as plain structs.
+/// Read a struct-variant's object body into `ctor { .. }`. Field handling
+/// mirrors `from_json_named`: `rename`d keys match by their JSON key,
+/// `#[bourne(skip)]` fields take `Default::default()` and never match a
+/// key, `default` fields fall back to `Default` when absent, everything
+/// else is required. `tag_arm` extends the key match when the variant
+/// shares its object with the enum's tag (internal mode).
 fn struct_variant_read(
     ctor: &proc_macro2::TokenStream,
-    fields: &[(&Ident, &Type)],
+    fields: &[VariantField<'_>],
+    tag_arm: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let mut decls = Vec::new();
     let mut arms = Vec::new();
     let mut assigns = Vec::new();
-    for (fname, ty) in fields {
-        let key = fname.to_string();
+    for f in fields {
+        let fname = f.ident;
+        let ty = f.ty;
+        if f.attrs.skip {
+            assigns.push(quote! { #fname: ::core::default::Default::default(), });
+            continue;
+        }
         let acquire = acquire_expr(ty);
+        let key = &f.key;
         decls.push(quote! {
             let mut #fname: ::core::option::Option<#ty> = ::core::option::Option::None;
         });
@@ -640,7 +684,9 @@ fn struct_variant_read(
                 #fname = ::core::option::Option::Some(#acquire);
             }
         });
-        let fin = if is_option(ty) {
+        let fin = if f.attrs.default {
+            quote! { #fname.unwrap_or_else(::core::default::Default::default) }
+        } else if is_option(ty) {
             quote! { #fname.unwrap_or(::core::option::Option::None) }
         } else {
             quote! {
@@ -658,6 +704,7 @@ fn struct_variant_read(
             let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
             match __key_cow.as_ref() {
                 #(#arms)*
+                #tag_arm
                 _ => {
                     return ::core::result::Result::Err(::json_bourne::Error::new(
                         ::json_bourne::ErrorKind::UnknownField, __lex.position()));
@@ -681,7 +728,7 @@ fn from_json_enum_external(
         let rename = parse_variant_rename(&v.attrs)?;
         let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
-        match classify_variant(v) {
+        match classify_variant(v, &container.rename_all)? {
             VShape::Unit => unit_arms.push(quote! {
                 __bourne_t if __bourne_t == #key => ::core::result::Result::Ok(#ctor),
             }),
@@ -696,7 +743,7 @@ fn from_json_enum_external(
                 });
             }
             VShape::Struct(fields) => {
-                let body = struct_variant_read(&ctor, &fields);
+                let body = struct_variant_read(&ctor, &fields, quote!());
                 tagged_arms.push(quote! {
                     __bourne_t if __bourne_t == #key => #body,
                 });
@@ -761,7 +808,7 @@ fn from_json_enum_internal(
         let rename = parse_variant_rename(&v.attrs)?;
         let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
-        match classify_variant(v) {
+        match classify_variant(v, &container.rename_all)? {
             VShape::Unit => arms.push(quote! {
                 __t if __t == #key => {
                     // Drain remaining keys; only the tag key is allowed.
@@ -822,55 +869,15 @@ fn from_json_enum_internal(
 /// and must be skipped (not treated as unknown).
 fn internal_struct_variant_read(
     ctor: &proc_macro2::TokenStream,
-    fields: &[(&Ident, &Type)],
+    fields: &[VariantField<'_>],
     tag: &str,
 ) -> proc_macro2::TokenStream {
-    let mut decls = Vec::new();
-    let mut arms = Vec::new();
-    let mut assigns = Vec::new();
-    for (fname, ty) in fields {
-        let key = fname.to_string();
-        let acquire = acquire_expr(ty);
-        decls.push(quote! {
-            let mut #fname: ::core::option::Option<#ty> = ::core::option::Option::None;
-        });
-        arms.push(quote! {
-            __bourne_k if __bourne_k == #key => {
-                if #fname.is_some() {
-                    return ::core::result::Result::Err(::json_bourne::Error::new(
-                        ::json_bourne::ErrorKind::DuplicateKey, __lex.position()));
-                }
-                #fname = ::core::option::Option::Some(#acquire);
-            }
-        });
-        let fin = if is_option(ty) {
-            quote! { #fname.unwrap_or(::core::option::Option::None) }
-        } else {
-            quote! {
-                #fname.ok_or_else(|| ::json_bourne::Error::new(
-                    ::json_bourne::ErrorKind::MissingField, __lex.position()))?
-            }
-        };
-        assigns.push(quote! { #fname: #fin, });
-    }
-    quote! {{
-        __lex.object_start()?;
-        #(#decls)*
-        let mut __maybe_key = __lex.object_first_key_lex()?;
-        while let ::core::option::Option::Some(__key_js) = __maybe_key {
-            let __key_cow = ::json_bourne::key_to_cow(__key_js, __lex)?;
-            match __key_cow.as_ref() {
-                #(#arms)*
-                __bourne_k if __bourne_k == #tag => { __lex.skip_value()?; }
-                _ => {
-                    return ::core::result::Result::Err(::json_bourne::Error::new(
-                        ::json_bourne::ErrorKind::UnknownField, __lex.position()));
-                }
-            }
-            __maybe_key = __lex.object_next_key_lex()?;
-        }
-        ::core::result::Result::Ok(#ctor { #(#assigns)* })
-    }}
+    // The tag key shares the variant's object; skip it when seen.
+    let tag_arm = quote! {
+        __bourne_k if __bourne_k == #tag => { __lex.skip_value()?; }
+    };
+    let body = struct_variant_read(ctor, fields, tag_arm);
+    quote! { ::core::result::Result::Ok({ #body }) }
 }
 
 fn from_json_enum_adjacent(
@@ -886,7 +893,7 @@ fn from_json_enum_adjacent(
         let rename = parse_variant_rename(&v.attrs)?;
         let key = key_expr(vname, &rename, &container.rename_all);
         let ctor = quote!( #name::#vname );
-        match classify_variant(v) {
+        match classify_variant(v, &container.rename_all)? {
             VShape::Unit => arms.push(quote! {
                 __t if __t == #key => {
                     if __content_cp.is_some() {
@@ -922,7 +929,7 @@ fn from_json_enum_adjacent(
                 });
             }
             VShape::Struct(fields) => {
-                let body = struct_variant_read(&ctor, &fields);
+                let body = struct_variant_read(&ctor, &fields, quote!());
                 arms.push(quote! {
                     __t if __t == #key => match __content_cp {
                         ::core::option::Option::Some(__c) => {
@@ -983,12 +990,13 @@ fn from_json_enum_adjacent(
 fn from_json_enum_untagged(
     name: &Ident,
     variants: &syn::punctuated::Punctuated<syn::Variant, syn::Token![,]>,
+    container: &ContainerAttrs,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut attempts = Vec::new();
     for v in variants {
         let vname = &v.ident;
         let ctor = quote!( #name::#vname );
-        let try_body = match classify_variant(v) {
+        let try_body = match classify_variant(v, &container.rename_all)? {
             VShape::Unit => quote! {
                 <() as ::json_bourne::FromJson<'_>>::from_lex(__lex)?;
                 ::core::result::Result::Ok(#ctor)
@@ -1002,7 +1010,7 @@ fn from_json_enum_untagged(
                 quote! { ::core::result::Result::Ok({ #body }) }
             }
             VShape::Struct(fields) => {
-                let body = struct_variant_read(&ctor, &fields);
+                let body = struct_variant_read(&ctor, &fields, quote!());
                 quote! { ::core::result::Result::Ok(#body) }
             }
         };
@@ -1237,7 +1245,14 @@ fn to_json_enum(
         let vname = &v.ident;
         let rename = parse_variant_rename(&v.attrs)?;
         let tagkey = key_expr(vname, &rename, &container.rename_all);
-        arms.push(to_json_variant_arm(name, v, vname, &tagkey, &mode)?);
+        arms.push(to_json_variant_arm(
+            name,
+            v,
+            vname,
+            &tagkey,
+            &mode,
+            &container.rename_all,
+        )?);
     }
     Ok(quote! {
         match self {
@@ -1247,25 +1262,55 @@ fn to_json_enum(
 }
 
 /// Write a struct-variant's fields as `"k":v,...` (no surrounding braces).
-fn write_named_fields(fields: &[(&Ident, Ident)]) -> proc_macro2::TokenStream {
-    // fields: (json_key_ident_for_stringify, binding_ident)
+/// Plain fields fuse `(comma)?key:` into compile-time literals; renamed
+/// fields write their key through the escaping writer. `skip` fields are
+/// never emitted. `emitted`: whether something (the internal-mode tag) is
+/// already on the wire, making the first field's comma mandatory.
+fn write_variant_fields(fields: &[VariantField<'_>], emitted: bool) -> proc_macro2::TokenStream {
     let mut stmts = Vec::new();
-    stmts.push(quote! { let mut __first = true; });
-    for (key_ident, bind) in fields {
-        let key = key_ident.to_string();
-        let lit = format!("\"{key}\":");
-        let lit_comma = format!(",\"{key}\":");
-        stmts.push(quote! {
-            if __first {
-                __w.write_raw_bytes(#lit.as_bytes())?;
+    stmts.push(quote! { let mut __first = !(#emitted); });
+    for f in fields {
+        if f.attrs.skip {
+            continue;
+        }
+        let bind = &f.bind;
+        if f.plain {
+            let name_str = f.ident.to_string();
+            let lit = format!("\"{name_str}\":");
+            let lit_comma = format!(",\"{name_str}\":");
+            stmts.push(quote! {
+                if __first {
+                    __w.write_raw_bytes(#lit.as_bytes())?;
+                    __first = false;
+                } else {
+                    __w.write_raw_bytes(#lit_comma.as_bytes())?;
+                }
+                ::json_bourne::ToJson::write_json(#bind, __w)?;
+            });
+        } else {
+            let key = &f.key;
+            stmts.push(quote! {
+                if !__first {
+                    __w.write_raw_bytes(b",")?;
+                }
                 __first = false;
-            } else {
-                __w.write_raw_bytes(#lit_comma.as_bytes())?;
-            }
-            ::json_bourne::ToJson::write_json(#bind, __w)?;
-        });
+                __w.write_escaped_str(#key)?;
+                __w.write_raw_bytes(b":")?;
+                ::json_bourne::ToJson::write_json(#bind, __w)?;
+            });
+        }
     }
     quote! { #(#stmts)* }
+}
+
+/// Destructuring pattern `field: __fN, ...` for a struct variant.
+fn variant_field_pat(fields: &[VariantField<'_>]) -> proc_macro2::TokenStream {
+    let pat = fields.iter().map(|f| {
+        let fname = f.ident;
+        let bind = &f.bind;
+        quote! { #fname: #bind }
+    });
+    quote! { #(#pat),* }
 }
 
 fn to_json_variant_arm(
@@ -1274,8 +1319,9 @@ fn to_json_variant_arm(
     vname: &Ident,
     tagkey: &proc_macro2::TokenStream,
     mode: &EnumMode,
+    rename_all: &Option<String>,
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let shape = classify_variant(v);
+    let shape = classify_variant(v, rename_all)?;
     // Build pattern + payload writer generically, then frame per mode.
     Ok(match (mode, &shape) {
         // ---- Untagged ----
@@ -1296,8 +1342,8 @@ fn to_json_variant_arm(
             }
         }
         (EnumMode::Untagged, VShape::Struct(fields)) => {
-            let (pat, pairs) = struct_pat_and_pairs(fields);
-            let body = write_named_fields(&pairs);
+            let pat = variant_field_pat(fields);
+            let body = write_variant_fields(fields, false);
             quote! {
                 #name::#vname { #pat } => {
                     __w.write_raw_bytes(b"{")?;
@@ -1340,8 +1386,8 @@ fn to_json_variant_arm(
             }
         }
         (EnumMode::External, VShape::Struct(fields)) => {
-            let (pat, pairs) = struct_pat_and_pairs(fields);
-            let body = write_named_fields(&pairs);
+            let pat = variant_field_pat(fields);
+            let body = write_variant_fields(fields, false);
             quote! {
                 #name::#vname { #pat } => {
                     __w.write_raw_bytes(b"{")?;
@@ -1366,17 +1412,31 @@ fn to_json_variant_arm(
             }
         },
         (EnumMode::Internal(tag), VShape::Struct(fields)) => {
-            let (pat, pairs) = struct_pat_and_pairs(fields);
+            let pat = variant_field_pat(fields);
             // Internal mode always has the tag first, so fields use the
             // comma-leading form unconditionally.
             let mut stmts = Vec::new();
-            for (key_ident, bind) in &pairs {
-                let key = key_ident.to_string();
-                let lit = format!(",\"{key}\":");
-                stmts.push(quote! {
-                    __w.write_raw_bytes(#lit.as_bytes())?;
-                    ::json_bourne::ToJson::write_json(#bind, __w)?;
-                });
+            for f in fields {
+                if f.attrs.skip {
+                    continue;
+                }
+                let bind = &f.bind;
+                if f.plain {
+                    let key = f.ident.to_string();
+                    let lit = format!(",\"{key}\":");
+                    stmts.push(quote! {
+                        __w.write_raw_bytes(#lit.as_bytes())?;
+                        ::json_bourne::ToJson::write_json(#bind, __w)?;
+                    });
+                } else {
+                    let key = &f.key;
+                    stmts.push(quote! {
+                        __w.write_raw_bytes(b",")?;
+                        __w.write_escaped_str(#key)?;
+                        __w.write_raw_bytes(b":")?;
+                        ::json_bourne::ToJson::write_json(#bind, __w)?;
+                    });
+                }
             }
             quote! {
                 #name::#vname { #pat } => {
@@ -1441,8 +1501,8 @@ fn to_json_variant_arm(
             }
         }
         (EnumMode::Adjacent(tag, content), VShape::Struct(fields)) => {
-            let (pat, pairs) = struct_pat_and_pairs(fields);
-            let body = write_named_fields(&pairs);
+            let pat = variant_field_pat(fields);
+            let body = write_variant_fields(fields, false);
             quote! {
                 #name::#vname { #pat } => {
                     __w.write_raw_bytes(b"{")?;
@@ -1473,19 +1533,4 @@ fn tuple_payload_writes(binds: &[Ident]) -> proc_macro2::TokenStream {
     }
     stmts.push(quote! { __w.write_raw_bytes(b"]")?; });
     quote! { #(#stmts)* }
-}
-
-/// Build a struct-variant binding pattern `field: __fN, ...` and the pairs
-/// `(field_ident_for_key, binding_ident)`.
-fn struct_pat_and_pairs<'a>(
-    fields: &'a [(&'a Ident, &'a Type)],
-) -> (proc_macro2::TokenStream, Vec<(&'a Ident, Ident)>) {
-    let mut pat = Vec::new();
-    let mut pairs = Vec::new();
-    for (i, (fname, _ty)) in fields.iter().enumerate() {
-        let bind = Ident::new(&format!("__f{i}"), name_span());
-        pat.push(quote! { #fname: #bind });
-        pairs.push((*fname, bind));
-    }
-    (quote! { #(#pat),* }, pairs)
 }

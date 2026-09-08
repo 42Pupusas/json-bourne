@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   borrow-or-decode key path used for object keys; escape-bearing renames
   round-trip in all three tagging modes. `json_bourne::KeyCow` is a new
   public alias for the decoded tag type the derive emits.
+- Field attributes (`rename`, `skip`, `default`) inside enum struct variants
+  were silently ignored: the generated code matched the verbatim Rust field
+  name on parse and fused it into the output on serialize. Variant fields
+  now resolve keys exactly like plain structs — explicit `rename` wins,
+  then the enum's `rename_all`, then the field name — and honor `skip` and
+  `default` in all four tagging modes.
 - The default `JsonWrite::write_escaped_str` pushed every byte through the
   byte-oriented `write_byte`, so sinks whose `write_byte` is char-oriented
   mangled non-ASCII strings: `to_fmt("é")` produced `"Ã©"`. The default now
