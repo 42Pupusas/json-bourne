@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `Lexer::new` / `Lexer::try_new` and `Parser::new` /
+  `Parser::try_new` now exist only at the default depth and work with no
+  type annotation. Previously they lived in the generic impl block, which
+  defeated the struct's `= DEFAULT_MAX_DEPTH` const default: the bare
+  `Parser::new(b"{}")` shape failed to compile with E0284, and every call
+  site had to carry a `Parser<'_>`-style annotation (audit 2026-09 F1).
+  Custom depths now go through the new `Lexer::with_depth` /
+  `Parser::with_depth`, which keep the depth choice visible at the call
+  site (the depth is also the inline stack's size) and panic like before
+  on depth > 128. Code that built custom-depth lexers with `new` — e.g.
+  `let l: Lexer<'_, 8> = Lexer::new(..)` or `Lexer::<8>::new(..)` — must
+  switch to `with_depth`.
+
 ### Removed
 
 - **Breaking:** the optional `indexmap` feature and its `FromJson`/`ToJson`

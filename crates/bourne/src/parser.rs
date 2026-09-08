@@ -42,36 +42,61 @@ enum State {
 /// `MAX_DEPTH` is the maximum nesting depth of containers the parser will
 /// accept. It is also the size of the inline nesting stack, so picking a
 /// small value reduces the parser's stack footprint as well as bounding
-/// untrusted input. The default is [`DEFAULT_MAX_DEPTH`].
+/// untrusted input. [`Parser::new`] uses [`DEFAULT_MAX_DEPTH`]; custom
+/// depths go through [`Parser::with_depth`].
 #[derive(Debug)]
 pub struct Parser<'input, const MAX_DEPTH: usize = DEFAULT_MAX_DEPTH> {
     lex: Lexer<'input, MAX_DEPTH>,
     state: State,
 }
 
-impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
-    /// Construct a parser over `input`.
+impl<'input> Parser<'input> {
+    /// Construct a parser with the [`DEFAULT_MAX_DEPTH`] nesting limit.
+    ///
+    /// This constructor lives in a non-generic impl block on purpose: a
+    /// `new` inside the generic `impl<'input, const MAX_DEPTH: usize>`
+    /// block forces every call site to name `MAX_DEPTH`, because the
+    /// struct's `= DEFAULT_MAX_DEPTH` default does not flow through
+    /// `impl` generic lists. Custom depths go through [`Self::with_depth`].
     ///
     /// # Panics
     ///
-    /// Panics if `input.len()` exceeds `MAX_INPUT_LEN`. See
+    /// Panics if `input.len()` exceeds [`crate::MAX_INPUT_LEN`]. See
     /// [`Lexer::new`]; [`Self::try_new`] returns `Err` instead.
     #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
-        Self {
-            lex: Lexer::new(input),
-            state: State::Start,
-        }
+        Self::with_depth(input)
     }
 
-    /// Construct a parser over `input`, returning
-    /// [`ErrorKind::InputTooLarge`] instead of panicking when the input
-    /// exceeds [`crate::MAX_INPUT_LEN`].
+    /// Construct a parser with the [`DEFAULT_MAX_DEPTH`] nesting limit,
+    /// returning [`ErrorKind::InputTooLarge`] instead of panicking when
+    /// the input exceeds [`crate::MAX_INPUT_LEN`].
     pub fn try_new(input: &'input [u8]) -> Result<Self, Error> {
         Ok(Self {
             lex: Lexer::try_new(input)?,
             state: State::Start,
         })
+    }
+}
+
+impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
+    /// Construct a parser over `input` with a custom [`MAX_DEPTH`].
+    ///
+    /// The depth is also the size of the inline nesting stack, so the
+    /// choice stays visible at the call site; [`Parser::new`] is the
+    /// default-depth constructor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input.len()` exceeds [`crate::MAX_INPUT_LEN`] (see
+    /// [`Parser::new`]) or if `MAX_DEPTH` exceeds 128, the capacity of
+    /// the packed nesting stack.
+    #[must_use]
+    pub const fn with_depth(input: &'input [u8]) -> Self {
+        Self {
+            lex: Lexer::with_depth(input),
+            state: State::Start,
+        }
     }
 
     /// Borrow the underlying lexer mutably. Typed consumers use this to

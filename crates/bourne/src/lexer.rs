@@ -60,9 +60,10 @@ const U128_FAST_DIGITS: u32 = 38;
 /// Default maximum container nesting depth.
 ///
 /// Guards against pathological inputs (e.g. millions of `[`s) that would
-/// otherwise drive recursive consumers into stack overflow. Override at
-/// compile time by parameterizing [`Lexer`] (and [`Parser`](crate::Parser))
-/// with a different `MAX_DEPTH`.
+/// otherwise drive recursive consumers into stack overflow.
+/// [`Lexer::new`](crate::Lexer::new) and [`Parser::new`](crate::Parser::new)
+/// build with this limit; parameterize with [`Lexer::with_depth`] /
+/// [`Parser::with_depth`] to override it.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
 /// `u64::MAX` has 20 decimal digits: up to 19, `acc * 10 + d` cannot
@@ -204,34 +205,70 @@ pub enum ValueKind {
     Null,
 }
 
-impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
-    /// Construct a lexer over `input`.
+impl<'input> Lexer<'input> {
+    /// Construct a lexer with the [`DEFAULT_MAX_DEPTH`] nesting limit.
+    ///
+    /// This constructor lives in a non-generic impl block on purpose: a
+    /// `new` inside the generic `impl<'input, const MAX_DEPTH: usize>`
+    /// block forces every call site to name `MAX_DEPTH`, because the
+    /// struct's `= DEFAULT_MAX_DEPTH` default does not flow through
+    /// `impl` generic lists. Custom depths go through [`Self::with_depth`].
     ///
     /// # Panics
     ///
-    /// Panics if `input.len() > MAX_INPUT_LEN` (~2 GB). The packed offset
-    /// representation in `JsonStr`/`JsonNum` reserves the top bit of a `u32`
-    /// for `has_escapes`, so positions are limited to 31 bits. Real-world
-    /// JSON documents are far smaller than this; consumers needing larger
-    /// streams should chunk and parse incrementally. Use [`Self::try_new`]
-    /// for a `Result`-returning constructor.
+    /// Panics if `input.len()` exceeds [`MAX_INPUT_LEN`] (~2 GB). The
+    /// packed offset representation in `JsonStr`/`JsonNum` reserves the
+    /// top bit of a `u32` for `has_escapes`, so positions are limited to
+    /// 31 bits. Real-world JSON documents are far smaller than this;
+    /// consumers needing larger streams should chunk and parse
+    /// incrementally. Use [`Self::try_new`] for a `Result`-returning
+    /// constructor.
     #[must_use]
     pub const fn new(input: &'input [u8]) -> Self {
+        Self::with_depth(input)
+    }
+
+    /// Construct a lexer with the [`DEFAULT_MAX_DEPTH`] nesting limit,
+    /// returning [`ErrorKind::InputTooLarge`] instead of panicking when
+    /// the input exceeds [`MAX_INPUT_LEN`].
+    pub const fn try_new(input: &'input [u8]) -> Result<Self, Error> {
+        if input.len() > MAX_INPUT_LEN {
+            return Err(Error::new(ErrorKind::InputTooLarge, Position::START));
+        }
+        Ok(Self::new(input))
+    }
+}
+
+impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
+    /// Construct a lexer over `input` with a custom [`MAX_DEPTH`].
+    ///
+    /// The depth is also the size of the inline nesting stack, so the
+    /// choice stays visible at the call site; [`Lexer::new`] is the
+    /// default-depth constructor.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `input.len()` exceeds [`MAX_INPUT_LEN`] (see
+    /// [`Lexer::new`]) or if `MAX_DEPTH` exceeds 128, the capacity of
+    /// the packed nesting stack.
+    ///
+    /// ```
+    /// use json_bourne::{ErrorKind, Lexer};
+    ///
+    /// let mut lex: Lexer<'_, 2> = Lexer::with_depth(br"[[[1]]]");
+    /// assert_eq!(
+    ///     lex.skip_value().unwrap_err().kind,
+    ///     ErrorKind::DepthLimitExceeded,
+    /// );
+    /// ```
+    #[must_use]
+    pub const fn with_depth(input: &'input [u8]) -> Self {
         assert!(input.len() <= MAX_INPUT_LEN, "input exceeds MAX_INPUT_LEN");
         Self {
             input,
             offset: 0,
             stack: Stack::new(),
         }
-    }
-
-    /// Construct a lexer over `input`, returning [`ErrorKind::InputTooLarge`]
-    /// instead of panicking when the input exceeds [`MAX_INPUT_LEN`].
-    pub const fn try_new(input: &'input [u8]) -> Result<Self, Error> {
-        if input.len() > MAX_INPUT_LEN {
-            return Err(Error::new(ErrorKind::InputTooLarge, Position::START));
-        }
-        Ok(Self::new(input))
     }
 
     #[must_use]
@@ -1628,7 +1665,7 @@ mod object_key_tests {
 
     #[test]
     fn borrowed_keys_work_at_non_default_depth() {
-        let mut lex: Lexer<'_, 8> = Lexer::new(b"{\"k\":1}");
+        let mut lex: Lexer<'_, 8> = Lexer::with_depth(b"{\"k\":1}");
         lex.object_start().unwrap();
         assert_eq!(lex.object_first_key_str().unwrap(), Some("k"));
         assert_eq!(lex.parse_i64_value().unwrap(), 1);
