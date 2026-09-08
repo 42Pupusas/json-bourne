@@ -2529,13 +2529,13 @@ mod json_macro_tests {
     }
 }
 
-/// Unsafe-boundary tests for the public surface — pinned at the safety
-/// contracts of the `_unchecked` Vec-tail writers in `ByteSink` and the
+/// Boundary tests for the public surface — pinned at the raw-tail write
+/// in `ByteSink` (guarded by a live capacity check) and the
 /// `from_utf8_unchecked` site in `decode_escapes`. These are designed to
 /// run under miri (CI: `MIRIFLAGS=-Zmiri-disable-isolation
 /// RUSTFLAGS=--cfg bourne_no_simd cargo +nightly miri test -p json-bourne --lib`).
 /// Each one targets a specific invariant; if a future refactor breaks the
-/// caller-side capacity reservation or the UTF-8 boundary, miri here trips
+/// capacity check or the UTF-8 boundary, miri here trips
 /// on the precise unsafe before any user code does.
 #[cfg(all(test, feature = "std"))]
 mod unsafe_boundary_tests {
@@ -2547,8 +2547,11 @@ mod unsafe_boundary_tests {
     /// writer's `reserve_hint` computes
     ///   `2 + n * (MAX_SERIALIZED_LEN + 1) = 2 + n * 33`.
     /// We pre-reserve exactly that, so the per-element
-    /// `write_float_f64_taint` (which assumes ≥ 32 bytes headroom)
-    /// runs against the tightest legal Vec capacity.
+    /// `write_float_f64_hinted` tail-write path (which needs ≥ 32 spare
+    /// bytes) runs against the tightest legal Vec capacity — under-reserving
+    /// by even one byte would degrade to the checked path, which these
+    /// round-trips would not detect, so the boundary itself is what miri
+    /// verifies.
     #[test]
     fn bytesink_slice_floats_exact_capacity() {
         for n in [0usize, 1, 2, 3, 7, 16, 17, 32, 33] {
@@ -2569,7 +2572,8 @@ mod unsafe_boundary_tests {
     }
 
     /// Same as above but for `Vec<f32>`. f32 widens to f64 in the writer
-    /// but uses the same taint path, so the capacity boundary is identical.
+    /// and shares the hinted tail-write path, so the capacity boundary is
+    /// identical.
     #[test]
     fn bytesink_slice_f32_exact_capacity() {
         for n in [0usize, 1, 2, 16, 17] {
@@ -2588,11 +2592,11 @@ mod unsafe_boundary_tests {
         }
     }
 
-    /// Slice of f64 containing non-finite values — exercises the taint
-    /// accumulator path and verifies the slice writer surfaces a
-    /// `NonFiniteFloat` error rather than emitting garbage bytes.
+    /// Slice of f64 containing non-finite values — verifies the per-element
+    /// hinted float write surfaces `NonFiniteFloat` through the sink and
+    /// emits nothing for the offending element.
     #[test]
-    fn bytesink_slice_nonfinite_taint_path() {
+    fn bytesink_slice_nonfinite_errors_without_partial_element() {
         // The non-finite path writes substitute bytes into the Vec before
         // reporting the error. Miri ensures those substitute writes stay
         // within the reserved capacity.
@@ -2608,9 +2612,9 @@ mod unsafe_boundary_tests {
         }
     }
 
-    /// Slice of i64 — exercises `write_byte_unchecked` for both `[`/`,`/`]`
-    /// at exact capacity. Integers don't use the float taint path but they
-    /// do use `write_array_reserved`'s `write_byte_unchecked` for delimiters.
+    /// Slice of i64 — exercises `write_byte_hinted` for `[`/`,`/`]` at
+    /// exact capacity. The hint math is the same as the float case; this
+    /// pins the integer shape (20-byte worst case) of the same path.
     #[test]
     fn bytesink_slice_ints_exact_capacity() {
         // MAX_SERIALIZED_LEN for i64 = 20 ("-9223372036854775808"), so
@@ -2660,8 +2664,8 @@ mod unsafe_boundary_tests {
         }
     }
 
-    /// Empty slice / array — `write_array_reserved`'s `split_first` is None,
-    /// no `write_byte_unchecked` for elements. Just `[` and `]`.
+    /// Empty slice / array — `write_array_hinted`'s `split_first` is None,
+    /// no per-element writes. Just `[` and `]`.
     #[test]
     fn bytesink_empty_slice_writes_brackets_only() {
         let empty: Vec<i64> = Vec::new();
@@ -2738,6 +2742,35 @@ mod unsafe_boundary_tests {
     // it to skip the per-element Event detour. These overrides have
     // independent code paths from the default and need their own tests.
     // -----------------------------------------------------------------
+
+    /// Regression for the §3.1 audit finding: the slice writer used to
+    /// take `T::MAX_SERIALIZED_LEN` (a safe const any impl could lie
+    /// about) as a hard precondition for raw unchecked tail writes, so a
+    /// lying impl caused a heap overflow. The hinted path now falls back
+    /// to checked writes when the tail is exhausted — a wrong bound costs
+    /// a reallocation, never memory safety.
+    #[test]
+    fn slice_writer_survives_lying_max_serialized_len() {
+        #[derive(Debug, PartialEq)]
+        struct Liar(i64);
+        impl ToJson for Liar {
+            const MIN_SERIALIZED_LEN: usize = 1;
+            // Deliberately wrong: elements emit up to 20 bytes.
+            const MAX_SERIALIZED_LEN: usize = 1;
+            fn write_json<W: JsonWrite + ?Sized>(&self, w: &mut W) -> Result<(), W::Error> {
+                self.0.write_json(w)
+            }
+        }
+        let data: Vec<Liar> = (0..500)
+            .map(|i| Liar(i64::from(i) * 1_000_000_000 - 250_000_000_000))
+            .collect();
+        let s = to_string(data.as_slice()).expect("serialize despite lying bound");
+        let back: Vec<i64> = parse_str(&s).expect("round-trip");
+        let expected: Vec<i64> = (0..500)
+            .map(|i| i64::from(i) * 1_000_000_000 - 250_000_000_000)
+            .collect();
+        assert_eq!(back, expected);
+    }
 
     /// `Vec<&str>::vec_from_lex` — borrowed strings, fused fast path.
     #[test]
@@ -3038,7 +3071,7 @@ mod unsafe_boundary_tests {
 
     // -----------------------------------------------------------------
     // Direct-sink coverage. Every public sink type (StringSink,
-    // PrettyStringSink, ByteSink unchecked methods) needs at least one
+    // PrettyStringSink, ByteSink hinted methods) needs at least one
     // call so the CRAP gate's zero-coverage trigger doesn't fire.
     // -----------------------------------------------------------------
 
@@ -3085,33 +3118,29 @@ mod unsafe_boundary_tests {
         assert!(s.contains("3.0"));
     }
 
-    /// `ByteSink::write_float_f64_unchecked` — non-finite triggers the
-    /// outlined `cold_nonfinite_byte_sink` error. Exercises the cold path.
+    /// `ByteSink::write_float_f64` — non-finite returns the typed error
+    /// without touching the buffer.
     #[test]
-    fn bytesink_unchecked_float_nonfinite_returns_error() {
+    fn bytesink_float_nonfinite_returns_error() {
         let mut out: Vec<u8> = Vec::with_capacity(64);
         let mut sink = ByteSink::new(&mut out);
-        // SAFETY: ample reserved capacity (≥32 bytes).
-        #[allow(unsafe_code)]
-        let r = unsafe { sink.write_float_f64_unchecked(f64::INFINITY) };
-        assert!(r.is_err(), "non-finite must error through cold arm");
+        let r = sink.write_float_f64(f64::INFINITY);
+        assert!(r.is_err(), "non-finite must error");
+        assert!(out.is_empty(), "failed write must not emit bytes");
     }
 
-    /// `ByteSink::write_float_f64_unchecked_finite` — direct call with
-    /// a finite value. The slice fast path calls this internally.
+    /// `JsonWrite::write_float_f64_hinted` — with reserved capacity the
+    /// write goes through the hinted path and round-trips exactly.
     #[test]
-    fn bytesink_unchecked_finite_writes_value() {
+    fn bytesink_hinted_finite_writes_value() {
         let mut out: Vec<u8> = Vec::with_capacity(64);
         let mut sink = ByteSink::new(&mut out);
         // Pick a finite value that round-trips exactly through the formatter
         // and `f64::parse`. 2.5 is exact in binary; avoiding 3.14 also dodges
         // clippy's approx_constant warning about PI.
         let value = 2.5_f64;
-        // SAFETY: reserved 64 bytes, value is finite.
-        #[allow(unsafe_code)]
-        unsafe {
-            sink.write_float_f64_unchecked_finite(value).unwrap();
-        }
+        sink.reserve_hint(32);
+        assert!(sink.write_float_f64_hinted(value).unwrap());
         let s = core::str::from_utf8(&out).unwrap();
         let parsed: f64 = s.parse().unwrap();
         // Bit-pattern compare: write→parse must round-trip exactly.
@@ -3142,15 +3171,15 @@ mod unsafe_boundary_tests {
         assert!(s.contains(r#""b":2"#));
     }
 
-    /// `f64::pre_validate_slice` — the post-taint stub returns Ok(()).
-    /// Direct call to ensure the function is exercised.
+    /// The f64 `NEEDS_VALIDATION` machinery was removed with the reserved-
+    /// write path; keep a marker test so the behavior stays pinned: slice
+    /// writes succeed for finite input and error (not corrupt) on non-finite.
     #[test]
-    fn f64_pre_validate_slice_is_noop() {
-        let slice: &[f64] = &[1.0, 2.0, f64::INFINITY];
-        // The fn body just returns Ok; calling it through the trait
-        // exercises both the dispatch and the body.
-        let r = <f64 as ToJson>::pre_validate_slice(slice);
-        assert!(r.is_ok());
+    fn f64_slice_writes_and_errors_on_nonfinite() {
+        let slice: &[f64] = &[1.0, 2.0, 3.0];
+        assert_eq!(to_string(slice).unwrap(), "[1.0,2.0,3.0]");
+        let bad: &[f64] = &[1.0, f64::INFINITY];
+        assert!(to_string(bad).is_err());
     }
 
     /// `crate::ser::float::format_f64_write` and `reject_non_finite`

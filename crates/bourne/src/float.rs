@@ -770,6 +770,10 @@ pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> 
     out.write_str(s)
 }
 
+/// Bit mask of the IEEE 754 exponent field; all-ones marks inf/NaN.
+/// Used by the serializer's finiteness checks.
+pub(crate) const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
+
 /// `Vec<u8>` path used by `ByteSink::write_float_f64`. Renders to a 32-byte
 /// stack buffer, then `extend_from_slice`s into the output Vec.
 ///
@@ -791,9 +795,6 @@ pub(crate) fn format_finite_fmt<W: fmt::Write + ?Sized>(f: f64, out: &mut W) -> 
 #[allow(unsafe_code)]
 #[inline]
 pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) -> bool {
-    // Cheap bit-pattern finiteness test: the exponent field is all-ones only
-    // for ±inf and NaN.
-    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
     if f.to_bits() & EXP_MASK == EXP_MASK {
         return false;
     }
@@ -802,115 +803,6 @@ pub(crate) fn format_finite_to_vec(f: f64, out: &mut alloc::vec::Vec<u8>) -> boo
     let len = unsafe { format_finite_to_ptr(f, buf.as_mut_ptr()) };
     out.extend_from_slice(&buf[..len]);
     true
-}
-
-/// `Vec<u8>` path used by `ByteSink::write_float_f64` when the caller has
-/// pre-reserved enough capacity. Skips `Vec::extend_from_slice`'s
-/// per-call capacity check + grow path (the second-biggest mispredict
-/// source after the comma `Vec::push`). Writes through a raw pointer
-/// straight into the reserved tail, then bumps `set_len`.
-///
-/// Returns `true` for finite `f`, `false` otherwise (no bytes written
-/// in that case — `out`'s length is untouched).
-///
-/// # Safety
-/// `out.capacity() - out.len()` must be ≥ `FORMAT_BUF_LEN` (32) bytes.
-/// The array-write path in `ser.rs` ensures this via `reserve_hint`.
-#[cfg(feature = "alloc")]
-#[allow(unsafe_code)]
-#[inline]
-pub(crate) unsafe fn format_finite_to_vec_unchecked(f: f64, out: &mut alloc::vec::Vec<u8>) -> bool {
-    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
-    if f.to_bits() & EXP_MASK == EXP_MASK {
-        return false;
-    }
-    // SAFETY:
-    //   - caller guarantees `cap - len >= FORMAT_BUF_LEN`, so writing up
-    //     to 32 bytes at `out.as_mut_ptr().add(out.len())` is in-bounds;
-    //   - `format_finite_to_ptr` returns the actual byte count
-    //     (`≤ FORMAT_BUF_LEN`), which we use for `set_len`;
-    //   - the written bytes are ASCII (digits, '.', 'e', '-'), keeping
-    //     `Vec<u8>` validity intact.
-    unsafe {
-        let len = out.len();
-        let dst = out.as_mut_ptr().add(len);
-        let written = format_finite_to_ptr(f, dst);
-        out.set_len(len + written);
-    }
-    true
-}
-
-/// `Vec<u8>` path that branchlessly tolerates non-finite input. Always
-/// writes 24-byte-bounded output; for non-finite values, the bytes are
-/// garbage (but valid ASCII) and the caller is expected to discard the
-/// `Vec` via the returned taint bit.
-///
-/// Returns a `u64` that is non-zero iff `f` was non-finite. The caller
-/// accumulates these bits across a slice's worth of writes and checks
-/// once at the end — no per-element branch.
-///
-/// Why: `pre_validate_slice` adds an entire scan pass over the input,
-/// which `perf record -c cycles` showed costing ~20% of total cycles
-/// at n=10000 (the SIMD-vectorised pand/pcmpeqd loop). Folding the
-/// finiteness check into the per-element work eliminates that pass.
-///
-/// # Safety
-/// `out.capacity() - out.len()` must be ≥ `FORMAT_BUF_LEN` (32) bytes.
-#[cfg(feature = "alloc")]
-#[allow(unsafe_code)]
-#[inline]
-pub(crate) unsafe fn format_finite_to_vec_taint(f: f64, out: &mut alloc::vec::Vec<u8>) -> u64 {
-    const EXP_MASK: u64 = 0x7ff0_0000_0000_0000;
-    let bits = f.to_bits();
-    let is_nonfinite = (bits & EXP_MASK) == EXP_MASK;
-    // Branchless substitute: if non-finite, replace `f` with `1.0` so
-    // the teju math never indexes out of MULTIPLIERS. The substitute
-    // value's ASCII output goes into `out` but is junk; the caller's
-    // taint check rejects the whole call, so the bytes are never
-    // observed.
-    let safe = if is_nonfinite { 1.0_f64 } else { f };
-    // SAFETY: caller-reserved ≥ 32 bytes; `safe` is finite by
-    // construction so `format_finite_to_ptr` does not OOB-read
-    // `MULTIPLIERS`.
-    unsafe {
-        let len = out.len();
-        let dst = out.as_mut_ptr().add(len);
-        let written = format_finite_to_ptr(safe, dst);
-        out.set_len(len + written);
-    }
-    u64::from(is_nonfinite)
-}
-
-/// Like [`format_finite_to_vec_unchecked`] but the caller PROMISES `f`
-/// is finite — no per-call finiteness branch. The slice path
-/// `[f64]::write_json` calls this after a one-shot pre-scan of the
-/// whole slice for non-finite inputs.
-///
-/// The finiteness branch was the single dominant remaining mispredict
-/// in the bench's per-element loop (`perf record -e branch-misses`
-/// showed 13.43% of all mispredicts attributed to it). Eliminating it
-/// removes the structural data-dependent cliff at large N.
-///
-/// # Safety
-///   - `out.capacity() - out.len()` must be ≥ `FORMAT_BUF_LEN` (32).
-///   - `f` must be finite (`is_finite() == true`). Passing inf or NaN
-///     is undefined behaviour: `teju` uses the IEEE exponent bits to
-///     index `MULTIPLIERS`, and non-finite exponents fall outside the
-///     valid index range.
-#[cfg(feature = "alloc")]
-#[allow(unsafe_code)]
-#[inline]
-pub(crate) unsafe fn format_finite_to_vec_unchecked_finite(f: f64, out: &mut alloc::vec::Vec<u8>) {
-    debug_assert!(f.is_finite(), "caller violated finite-input precondition");
-    // SAFETY: see `format_finite_to_vec_unchecked`. Additionally, the
-    // caller's finiteness precondition makes `format_finite_to_ptr`'s
-    // teju-table indexing well-defined.
-    unsafe {
-        let len = out.len();
-        let dst = out.as_mut_ptr().add(len);
-        let written = format_finite_to_ptr(f, dst);
-        out.set_len(len + written);
-    }
 }
 
 // ===========================================================================
@@ -1074,23 +966,16 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Unsafe-boundary tests — these specifically exercise the caller-side
-    // capacity contract of the `_unchecked` Vec-tail writers under miri,
-    // including the exact-fit case `cap == len + FORMAT_BUF_LEN`.
-    //
-    // The full ser path always pre-reserves plenty of headroom via
-    // `reserve_hint`, so these are the only places that hit the boundary
-    // precisely. A regression that miscomputed `cap - len` would slip past
-    // the round-trip tests but blow up here under miri's strict pointer
-    // tracking.
+    // Sink-boundary tests — these exercise the safe `format_finite_to_vec`
+    // path that `ByteSink::write_float_f64` uses, including the output-shape
+    // branches (zero, fixed, scientific) and non-finite rejection without
+    // buffer side effects.
     // ---------------------------------------------------------------------
 
-    /// `format_finite_to_vec_unchecked` at exact `cap == len + 32`. Covers
-    /// every output form (zero, fixed, scientific) so each branch's worst-
-    /// case write lands at the boundary.
+    /// `format_finite_to_vec` writes ≤ FORMAT_BUF_LEN bytes and stays ASCII
+    /// across every output form (zero, fixed, scientific).
     #[test]
-    fn vec_unchecked_at_exact_capacity() {
-        // (input, output form name)
+    fn vec_format_at_boundary() {
         let cases: &[f64] = &[
             0.0,
             -0.0,
@@ -1105,67 +990,36 @@ mod tests {
             5e-324,
         ];
         for &v in cases {
-            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
-            // SAFETY: capacity is exactly FORMAT_BUF_LEN, contract met.
-            #[allow(unsafe_code)]
-            let ok = unsafe { format_finite_to_vec_unchecked(v, &mut out) };
-            assert!(ok, "finite input rejected: {v}");
+            let mut out = alloc::vec::Vec::new();
+            assert!(format_finite_to_vec(v, &mut out), "finite rejected: {v}");
             assert!(
                 out.len() <= FORMAT_BUF_LEN,
                 "len={} > 32 for {v}",
                 out.len()
             );
             assert!(!out.is_empty(), "empty output for {v}");
-            // Output must be valid ASCII.
             for &b in &out {
                 assert!(b.is_ascii(), "non-ASCII byte {b:#x} in output for {v}");
             }
         }
     }
 
-    /// `format_finite_to_vec_unchecked` returns `false` for non-finite,
-    /// writing zero bytes. Exercises the early-return arm where `out.len`
-    /// is left untouched.
+    /// `format_finite_to_vec` returns `false` for non-finite and writes
+    /// zero bytes.
     #[test]
-    fn vec_unchecked_rejects_nonfinite_without_touching_buf() {
+    fn vec_format_rejects_nonfinite_without_touching_buf() {
         for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
-            #[allow(unsafe_code)]
-            let ok = unsafe { format_finite_to_vec_unchecked(v, &mut out) };
-            assert!(!ok, "non-finite accepted: {v}");
+            let mut out = alloc::vec::Vec::new();
+            assert!(!format_finite_to_vec(v, &mut out), "non-finite accepted");
             assert!(out.is_empty(), "buffer touched for non-finite {v}: {out:?}");
         }
     }
 
-    /// `format_finite_to_vec_taint` at exact capacity. The taint path
-    /// always writes — even for non-finite, where it substitutes 1.0 and
-    /// flags via the returned bit. Verify the substitute path under miri.
+    /// Hit every digit-count branch in `mantissa_digit_count` (so
+    /// `write_digits_at_ptr` exercises both its >32-bit and 32-bit-tail
+    /// paths) through the Vec path.
     #[test]
-    fn vec_taint_at_exact_capacity() {
-        // Finite case: returns 0, writes real ASCII.
-        let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
-        #[allow(unsafe_code)]
-        let taint = unsafe { format_finite_to_vec_taint(1.5_f64, &mut out) };
-        assert_eq!(taint, 0);
-        assert_eq!(&out[..], b"1.5");
-
-        // Non-finite: returns non-zero, writes the substitute's ASCII.
-        for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
-            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
-            #[allow(unsafe_code)]
-            let taint = unsafe { format_finite_to_vec_taint(v, &mut out) };
-            assert_ne!(taint, 0, "taint not set for {v}");
-            assert!(!out.is_empty(), "substitute did not write for {v}");
-            assert!(out.len() <= FORMAT_BUF_LEN);
-        }
-    }
-
-    /// `format_finite_to_vec_unchecked_finite` — caller-promised finite,
-    /// no per-call check. Hit every digit-count branch in
-    /// `mantissa_digit_count` so `write_digits_at_ptr` exercises both its
-    /// >32-bit and 32-bit-tail paths.
-    #[test]
-    fn vec_unchecked_finite_covers_digit_counts() {
+    fn vec_format_covers_digit_counts() {
         // Values picked to hit different digit counts (1..=17) and both
         // fixed-point and scientific output forms.
         let cases: &[f64] = &[
@@ -1191,11 +1045,8 @@ mod tests {
         ];
         for &v in cases {
             assert!(v.is_finite(), "test bug: non-finite case {v}");
-            let mut out = alloc::vec::Vec::with_capacity(FORMAT_BUF_LEN);
-            #[allow(unsafe_code)]
-            unsafe {
-                format_finite_to_vec_unchecked_finite(v, &mut out);
-            }
+            let mut out = alloc::vec::Vec::new();
+            assert!(format_finite_to_vec(v, &mut out));
             assert!(!out.is_empty(), "no output for {v}");
             assert!(out.len() <= FORMAT_BUF_LEN);
             for &b in &out {
@@ -1204,28 +1055,17 @@ mod tests {
         }
     }
 
-    /// All three Vec-tail writers, called repeatedly on the same Vec so
-    /// the ASCII bytes accumulate. Catches off-by-one in `len + written`.
+    /// Repeated Vec-path writes accumulate correctly — catches off-by-one
+    /// in the length bookkeeping across a whole serialized array.
     #[test]
-    fn vec_unchecked_repeated_writes_accumulate() {
-        // u32 because we widen losslessly to f64 below; the loop bound also
-        // makes it fit u8, but u32 keeps the conversion site obvious.
+    fn vec_format_repeated_writes_accumulate() {
+        let mut out = alloc::vec::Vec::new();
         let n: u32 = 50;
-        let cap = 2 + (n as usize) * (FORMAT_BUF_LEN + 1);
-        let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(cap);
         for i in 0..n {
             let v = f64::from(i) + 0.5;
-            #[allow(unsafe_code)]
-            unsafe {
-                format_finite_to_vec_unchecked_finite(v, &mut out);
-                if i + 1 < n {
-                    // Comma between elements — same unchecked-write pattern
-                    // the slice writer uses.
-                    let len = out.len();
-                    let dst = out.as_mut_ptr().add(len);
-                    core::ptr::write(dst, b',');
-                    out.set_len(len + 1);
-                }
+            assert!(format_finite_to_vec(v, &mut out));
+            if i + 1 < n {
+                out.push(b',');
             }
         }
         // Parse it back as a CSV of floats.
