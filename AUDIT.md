@@ -204,6 +204,29 @@ Fix: route variant fields through the same `FieldAttrs` model as named structs
 (this is also the SRP cue to extract a `FieldPlan` type shared by both paths —
 see §6).
 
+— *Landed 2026-09, in two stages, and the second stage is the lesson.* The
+first fix added a `VariantField` type carrying parsed attrs and a resolved
+key, which made `rename`/`rename_all`/`skip`/`default` work. But it left the
+variant path as a **separate implementation** beside the named-struct one, so
+only the attributes someone thought to port were fixed. Two were not, and
+were still broken afterwards:
+
+  - `skip_if_none` in a struct variant emitted the field anyway:
+    `{"Rec":{"a":1,"note":null,"b":2}}`. `write_variant_fields` checked
+    `attrs.skip` but never `attrs.skip_if_none`.
+  - `deny_unknown_fields = false` on an enum was ignored inside variants:
+    `{"Rec":{"a":1,"zzz":9}}` returned `UnknownField`. `struct_variant_read`
+    hardcoded a rejecting fallback arm.
+
+The second stage did what this entry originally asked: both shapes now build
+`FieldPlan` and are consumed by one `ObjectWriter`/`ObjectReader` pair, with
+the only real difference — `self.field` vs a match binding — captured in an
+`Access` enum. Neither remaining bug was patched directly; both stopped
+reproducing because there is now one implementation instead of two agreeing
+by hand. That is the difference between fixing the instances and fixing the
+class, and it is why the §6 note insisted on the shared type rather than a
+second attribute-parsing call.
+
 ### 3.7 S1 — `deny_unknown_fields = false` fails on escaped keys inside skipped values
 
 `Lexer::skip_object_body` (`lexer.rs` ~1040) uses `object_first_key` /
@@ -672,6 +695,20 @@ Not defects, but they bear on how safely the fixes above can be made.
   (ident, key expression, acquire expression, finalize expression) built once
   and consumed by *both* the named-struct and struct-variant code paths — that
   single change fixes §3.6 and prevents it recurring.
+  — *Landed 2026-09* (1 902 lines by then; `lib.rs` is now **101** — the two
+  proc-macro entry points and the empty-tuple rejection tests). Modules:
+  `attrs.rs`, `field_plan.rs`, `naming.rs` (`Naming::key_expr`/`key_arm_head`),
+  `acquire.rs` (`Acquire::expr`), `generics.rs`, `shape.rs` (`VShape::classify`),
+  `from_json/{mod,object,enums}.rs`, `to_json/{mod,object,enums}.rs`. Every
+  free function became a method on the type that owns it.
+  The `FieldPlan` prediction held exactly: building it for both shapes and
+  feeding one `ObjectReader`/`ObjectWriter` fixed two *unreported* §3.6
+  instances (`skip_if_none`, `deny_unknown_fields`) with no targeted change.
+  A third duplication surfaced while merging the writers — comma placement
+  existed in three forms (`to_json_named`'s `StaticFirst`, `write_variant_
+  fields`' `__first`, and an open-coded variant inside the internal-mode arm)
+  — now one `Comma` enum, with internal mode passing `already_emitted = true`
+  rather than hand-writing its leading comma.
 
 ## 7. Recommended action plan
 
@@ -699,7 +736,10 @@ alloc`, default, `--features derive`, `--all-features`; tests + clippy
 7. `Lexer::parse_u64_value`; use it in `impl_int!` and `acquire_expr`. (§3.3)
 8. Pass `rename_all` into internal/adjacent enum parse. (§3.4)
 9. Escape (or compile-time-validate) variant tags. (§3.5)
-10. `FieldPlan` shared by named structs and struct variants. (§3.6)
+10. ~~`FieldPlan` shared by named structs and struct variants.~~ **Done** —
+    both shapes build one `FieldPlan` and share `ObjectReader`/`ObjectWriter`;
+    fixed two further §3.6 instances (`skip_if_none`, `deny_unknown_fields`)
+    that the first, per-attribute fix had left. (§3.6, §6)
 11. `skip_object_body` via `_lex` key methods. (§3.7)
 12. Structural methods on `JsonWrite`; derive emits them; pretty sink
     overrides them. (§3.8)

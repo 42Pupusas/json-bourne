@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `alloc`-gated.
 
 ### Tests
+- `bourne-derive/src/lib.rs` shrank from 1 902 to 101 lines, split into
+  `attrs`, `field_plan`, `naming`, `acquire`, `generics`, `shape`, and
+  the `from_json` / `to_json` codegen modules; every free function is now
+  a method on the type that owns it. Generated output is unchanged for
+  every case that already worked (audit 6).
 - `lib.rs` shrank from 3 751 to 1 461 lines: its ~2 300 lines of inline
   `#[cfg(test)]` modules moved to nine `src/tests/*.rs` modules (those
   reaching crate internals) and three `tests/` integration files
@@ -65,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trailing fraction/exponent after full-length literals.
 
 ### Fixed
+- derive: `#[bourne(skip_if_none)]` inside an enum struct variant emitted
+  the field anyway (`{"Rec":{"a":1,"note":null,"b":2}}`), and
+  `#[bourne(deny_unknown_fields = false)]` on an enum was ignored inside
+  its variants, so an unknown key still returned `UnknownField`. Both
+  worked correctly on plain named structs. These were the last two
+  instances of audit 3.6: variant fields and struct fields had separate
+  codegen paths, and the earlier 3.6 fix had only ported the attributes
+  it enumerated. Both shapes now build one `FieldPlan` consumed by a
+  shared object reader/writer, so the two paths cannot disagree again
+  (audit 3.6/6).
 - docs: the README and rustdoc feature tables still said `f64`/`f32`
   round-trips need `alloc` after the float serializer was un-gated;
   `to_fmt` is documented as the allocation-free float path and ships in
