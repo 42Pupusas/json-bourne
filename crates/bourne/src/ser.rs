@@ -1436,10 +1436,12 @@ mod alloc_impls {
             if w.write_float_f64_hinted(*self)? {
                 return Ok(());
             }
-            // Non-finite: the hinted write emitted nothing, so surface
-            // the failure through the sink's own non-finite channel
-            // (every in-crate sink rejects NaN with a typed error).
-            w.write_float_f64(Self::NAN)
+            // Non-finite: the hinted write emitted nothing. Hand the
+            // sink the actual value — its documented contract is to
+            // reject non-finite input through `Self::Error` — rather
+            // than a fabricated `NaN` a tolerant sink would happily
+            // serialize (audit 3.14).
+            w.write_float_f64(*self)
         }
     }
 
@@ -1455,7 +1457,8 @@ mod alloc_impls {
             if w.write_float_f64_hinted(widened)? {
                 return Ok(());
             }
-            w.write_float_f64(f64::NAN)
+            // See the `f64` impl: the real value, not a placeholder.
+            w.write_float_f64(widened)
         }
     }
 

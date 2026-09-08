@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read. Keys inside skipped objects are now consumed as raw byte spans —
   still shape-validated, never decoded — so `InvalidEscape` surfaces only
   for keys and strings the caller actually receives.
+- The `f64`/`f32` non-finite error path delivered its failure by writing a
+  fabricated `NaN` through the sink. In-crate sinks reject NaN, so the error
+  surfaced — but a custom sink whose `write_float_f64` tolerates NaN would
+  have silently serialized placeholder bytes. The writer now hands the sink
+  the actual value, so its documented reject-non-finite contract is what
+  produces the error (audit 3.14).
 - Map keys typed `&str` reported escape-bearing keys as `InvalidEscape`,
   accusing the document of a malformed escape when the escape is valid and
   the real limitation is that a borrow-only key type cannot hold a decoded

@@ -3113,6 +3113,69 @@ mod unsafe_boundary_tests {
         assert!(out.contains("\n\t"), "got: {out:?}");
     }
 
+    /// Audit 3.14: a custom sink whose `write_float_f64` tolerates NaN
+    /// must never receive a fabricated `NaN` from the `f64`/`f32`
+    /// `write_json` error paths — it receives the actual value, which
+    /// it may serialize (this sink does), but never a placeholder.
+    struct NaNTolerantSink {
+        out: String,
+        saw_bytes: bool,
+    }
+
+    impl JsonWrite for NaNTolerantSink {
+        type Error = crate::Error;
+
+        fn write_byte(&mut self, b: u8) -> Result<(), Self::Error> {
+            self.out.push(b as char);
+            Ok(())
+        }
+
+        fn write_str_raw(&mut self, s: &str) -> Result<(), Self::Error> {
+            self.out.push_str(s);
+            Ok(())
+        }
+
+        fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
+            if f.is_nan() {
+                // Tolerant: record the sentinel so the test can tell a
+                // fabricated NaN from an honest copy of the input.
+                self.saw_bytes = true;
+                self.out.push_str("nan-sentinel");
+                return Ok(());
+            }
+            if f.is_infinite() {
+                // The in-tree formatter asserts finiteness; render the
+                // infinity directly to observe what arrived.
+                self.out.push_str(if f > 0.0 { "inf" } else { "-inf" });
+                return Ok(());
+            }
+            crate::float::format_finite(f, &mut self.out);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn non_finite_error_delivers_actual_value_not_fabricated_nan() {
+        let mut sink = NaNTolerantSink {
+            out: String::new(),
+            saw_bytes: false,
+        };
+        // -inf, not NaN: a fabricated placeholder would surface as the
+        // `nan-sentinel` bytes; the honest path hands over -inf.
+        let f = f64::NEG_INFINITY;
+        f.write_json(&mut sink).unwrap();
+        assert!(!sink.saw_bytes, "fabricated NaN reached the sink");
+        assert_eq!(sink.out, "-inf");
+
+        // NaN itself round-trips through the tolerant sink as NaN.
+        let mut sink = NaNTolerantSink {
+            out: String::new(),
+            saw_bytes: false,
+        };
+        f64::NAN.write_json(&mut sink).unwrap();
+        assert!(sink.saw_bytes);
+    }
+
     /// `PrettyStringSink::write_float_f64` — covers the pretty-sink
     /// float arm (existing tests use the simple-byte and string paths).
     #[test]
