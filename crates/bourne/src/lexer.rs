@@ -78,28 +78,35 @@ pub(crate) enum Frame {
 
 /// Fixed-capacity nesting stack. Avoids `alloc` for the parser itself.
 ///
-/// Capacity is fixed at compile time by `Lexer`'s `MAX_DEPTH` parameter,
-/// so the inline array sized to it is also the depth bound.
+/// One bit per frame, packed into a `u128`: `MAX_DEPTH` must not exceed
+/// 128 (asserted in [`Self::new`]). A set bit is an Object frame; a clear
+/// bit is Array. `push` writes the bit either way — a popped or truncated
+/// frame leaves its bit stale, so an Array push must clear it or the next
+/// `top`/`pop` would resurrect the old frame kind.
 #[derive(Debug)]
 #[allow(clippy::redundant_pub_crate)]
 pub(crate) struct Stack<const MAX_DEPTH: usize> {
-    frames: [Frame; MAX_DEPTH],
+    bits: u128,
     len: usize,
 }
 
 impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
     pub(crate) const fn new() -> Self {
-        Self {
-            frames: [Frame::Array; MAX_DEPTH],
-            len: 0,
-        }
+        assert!(
+            MAX_DEPTH <= 128,
+            "Stack's bitset representation caps nesting depth at 128"
+        );
+        Self { bits: 0, len: 0 }
     }
 
     pub(crate) const fn push(&mut self, frame: Frame) -> Result<(), ()> {
         if self.len >= MAX_DEPTH {
             return Err(());
         }
-        self.frames[self.len] = frame;
+        match frame {
+            Frame::Object => self.bits |= 1 << self.len,
+            Frame::Array => self.bits &= !(1 << self.len),
+        }
         self.len += 1;
         Ok(())
     }
@@ -109,7 +116,7 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
             None
         } else {
             self.len -= 1;
-            Some(self.frames[self.len])
+            Some(self.frame_at(self.len))
         }
     }
 
@@ -117,7 +124,15 @@ impl<const MAX_DEPTH: usize> Stack<MAX_DEPTH> {
         if self.len == 0 {
             None
         } else {
-            Some(self.frames[self.len - 1])
+            Some(self.frame_at(self.len - 1))
+        }
+    }
+
+    const fn frame_at(&self, idx: usize) -> Frame {
+        if (self.bits >> idx) & 1 == 1 {
+            Frame::Object
+        } else {
+            Frame::Array
         }
     }
 

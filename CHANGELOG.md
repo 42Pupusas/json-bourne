@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- The parse nesting stack packs one frame into a single bit (`u128`), so
+  constructing a lexer clears 24 bytes instead of 136 and the struct is
+  register-friendly. Nesting depth is now capped at 128 for *all* custom
+  `MAX_DEPTH` parameterizations — `Stack::new` asserts this at compile
+  time for non-default choices (the default is 128), a breaking change
+  for anyone who raised it past 128 (audit 4.4.4).
+
 ### Tests
 - Fused integer paths (`parse_i64_value` / `parse_u64_value` /
   `parse_i128_value`) now have direct lexer-level tests: 1–19 digit
