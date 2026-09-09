@@ -1445,7 +1445,15 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     /// ABI baseline; the cfg gate at the call site enforces this.
     #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
     #[target_feature(enable = "sse2")]
-    #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    // `unused_unsafe`: newer toolchains made these register-only intrinsics
+    // safe; the explicit blocks stay for the 1.85 MSRV, where they are not
+    // redundant (implicit unsafe in `unsafe fn` bodies ended at edition 2024).
+    #[allow(
+        unsafe_code,
+        unused_unsafe,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
     // the dispatch wrapper inlines it away; coverage can't attribute the body.
     #[allow(unknown_lints, crappy)]
     unsafe fn scan_ascii_string_run_sse2(&mut self) {
@@ -1461,22 +1469,32 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         // Splat constants. The `as i8` casts wrap by design — SSE2 byte
         // compares are always signed at the silicon level; we want the bit
         // patterns for `"`, `\`, and 0x20 regardless of sign interpretation.
-        let quote = _mm_set1_epi8(b'"' as i8);
-        let backslash = _mm_set1_epi8(b'\\' as i8);
-        // `cmplt_epi8(b, 0x20)` flags both `b<0x20` (controls) AND `b>=0x80`
-        // (high-bit bytes interpreted as negative i8). One compare, two stops.
-        let lt_threshold = _mm_set1_epi8(0x20_i8);
+        // SAFETY: splatting immediates into registers; no memory access.
+        let (quote, backslash, lt_threshold) = unsafe {
+            (
+                _mm_set1_epi8(b'"' as i8),
+                _mm_set1_epi8(b'\\' as i8),
+                _mm_set1_epi8(0x20_i8),
+            )
+        };
 
         while i + 16 <= end {
             // SAFETY: `i + 16 <= end` checked above; the pointer + 16 bytes
             // lie inside `bytes`. `_mm_loadu_si128` accepts unaligned addresses.
             let chunk = unsafe { _mm_loadu_si128(bytes.as_ptr().add(i).cast()) };
-            let m_quote = _mm_cmpeq_epi8(chunk, quote);
-            let m_back = _mm_cmpeq_epi8(chunk, backslash);
-            let m_ctrl_or_hi = _mm_cmplt_epi8(chunk, lt_threshold);
-            let mask = _mm_or_si128(_mm_or_si128(m_quote, m_back), m_ctrl_or_hi);
+            // SAFETY: pure register operations on `chunk`; no memory access.
+            // `cmplt_epi8(b, 0x20)` flags both `b<0x20` (controls) AND
+            // `b>=0x80` (high-bit bytes read as negative i8). One compare, two
+            // stop categories.
+            let mask = unsafe {
+                let m_quote = _mm_cmpeq_epi8(chunk, quote);
+                let m_back = _mm_cmpeq_epi8(chunk, backslash);
+                let m_ctrl_or_hi = _mm_cmplt_epi8(chunk, lt_threshold);
+                _mm_or_si128(_mm_or_si128(m_quote, m_back), m_ctrl_or_hi)
+            };
+            // SAFETY: `mask` is a register value; movemask reads it, not memory.
             // movemask returns i32 in [0, 0xFFFF]; cast to u32 is lossless.
-            let bits = _mm_movemask_epi8(mask) as u32;
+            let bits = unsafe { _mm_movemask_epi8(mask) as u32 };
             if bits != 0 {
                 i += bits.trailing_zeros() as usize;
                 self.offset = i;
@@ -1560,7 +1578,8 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 mod object_key_tests {
     use super::*;
 
-    use alloc::vec::Vec;
+    use crate::alloc::borrow::ToOwned;
+    use alloc::{string::String, vec, vec::Vec};
 
     /// Walk the keys of `input` with the borrowed-first trio, recording
     /// (`key`, `value_tail`) pairs. The tail is a `parse_i64` read when the

@@ -135,3 +135,144 @@ fn compact_output_is_byte_identical() {
         r#"{"id":1,"name":"bourne","tags":["json"],"owner":{"login":"ada","forks":3}}"#,
     );
 }
+
+// ---------------------------------------------------------------------------
+// Audit R1 regression matrix: renamed and conditional (skip_if_none) fields
+// go through the escaping key path, whose separator was gated on the sink's
+// fused flag. Pretty sinks set that flag false, so their members silently
+// lost commas. Compact output is pinned above; these pin pretty output and
+// round-trip every attribute × shape × tagging-mode combination.
+
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+struct Renamed {
+    a: u32,
+    #[bourne(rename = "second")]
+    b: u32,
+}
+
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+struct Conditional {
+    a: u32,
+    #[bourne(skip_if_none)]
+    b: Option<u32>,
+}
+
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(rename_all = "camelCase")]
+struct CamelConditional {
+    alpha: u32,
+    #[bourne(skip_if_none)]
+    beta_skip: Option<u32>,
+    omega: u32,
+}
+
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(tag = "t", content = "c")]
+enum AdjacentStruct {
+    Body {
+        a: u32,
+        #[bourne(rename = "B")]
+        b: u32,
+    },
+}
+
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(tag = "t")]
+enum InternalStruct {
+    Point {
+        x: u32,
+        #[bourne(skip_if_none)]
+        y: Option<u32>,
+    },
+}
+
+#[derive(Debug, PartialEq, FromJson, ToJson)]
+#[bourne(untagged)]
+enum UntaggedVariant {
+    Left(Renamed),
+    Right(Conditional),
+}
+
+#[test]
+fn renamed_field_pretty_output_is_valid_and_round_trips() {
+    let v = Renamed { a: 1, b: 2 };
+    let s = to_string_pretty(&v).unwrap();
+    assert_eq!(s, "{\n  \"a\": 1,\n  \"second\": 2\n}");
+    assert_eq!(to_string(&v).unwrap(), r#"{"a":1,"second":2}"#);
+    let back: Renamed = parse_str(&s).unwrap();
+    assert_eq!(back, v);
+}
+
+#[test]
+fn conditional_field_pretty_output_is_valid_and_round_trips() {
+    let some = Conditional { a: 1, b: Some(2) };
+    let s = to_string_pretty(&some).unwrap();
+    assert_eq!(s, "{\n  \"a\": 1,\n  \"b\": 2\n}");
+    let back: Conditional = parse_str(&s).unwrap();
+    assert_eq!(back, some);
+
+    let none = Conditional { a: 1, b: None };
+    let s = to_string_pretty(&none).unwrap();
+    assert_eq!(s, "{\n  \"a\": 1\n}");
+    let back: Conditional = parse_str(&s).unwrap();
+    assert_eq!(back, none);
+}
+
+#[test]
+fn conditional_middle_and_trailing_members_each_get_a_separator() {
+    let some = CamelConditional {
+        alpha: 1,
+        beta_skip: Some(2),
+        omega: 3,
+    };
+    let s = to_string_pretty(&some).unwrap();
+    assert_eq!(
+        s,
+        "{\n  \"alpha\": 1,\n  \"betaSkip\": 2,\n  \"omega\": 3\n}"
+    );
+    let none = CamelConditional {
+        alpha: 1,
+        beta_skip: None,
+        omega: 3,
+    };
+    let s = to_string_pretty(&none).unwrap();
+    assert_eq!(s, "{\n  \"alpha\": 1,\n  \"omega\": 3\n}");
+    let back: CamelConditional = parse_str(&s).unwrap();
+    assert_eq!(back, none);
+}
+
+#[test]
+fn adjacent_struct_variant_with_renamed_fields_pretty_round_trips() {
+    let v = AdjacentStruct::Body { a: 1, b: 2 };
+    let s = to_string_pretty(&v).unwrap();
+    assert_eq!(
+        s,
+        "{\n  \"t\": \"Body\",\n  \"c\": {\n    \"a\": 1,\n    \"B\": 2\n  }\n}"
+    );
+    let back: AdjacentStruct = parse_str(&s).unwrap();
+    assert_eq!(back, v);
+}
+
+#[test]
+fn internal_struct_variant_with_conditional_fields_pretty_round_trips() {
+    let v = InternalStruct::Point { x: 3, y: Some(4) };
+    let s = to_string_pretty(&v).unwrap();
+    assert_eq!(s, "{\n  \"t\": \"Point\",\n  \"x\": 3,\n  \"y\": 4\n}");
+    let back: InternalStruct = parse_str(&s).unwrap();
+    assert_eq!(back, v);
+
+    let v = InternalStruct::Point { x: 3, y: None };
+    let s = to_string_pretty(&v).unwrap();
+    assert_eq!(s, "{\n  \"t\": \"Point\",\n  \"x\": 3\n}");
+    let back: InternalStruct = parse_str(&s).unwrap();
+    assert_eq!(back, v);
+}
+
+#[test]
+fn untagged_variant_pretty_round_trips() {
+    let v = UntaggedVariant::Left(Renamed { a: 5, b: 6 });
+    let s = to_string_pretty(&v).unwrap();
+    assert_eq!(s, "{\n  \"a\": 5,\n  \"second\": 6\n}");
+    let back: UntaggedVariant = parse_str(&s).unwrap();
+    assert_eq!(back, v);
+}

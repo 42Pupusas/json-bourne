@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Reproduce .github/workflows/ci.yml locally: `scripts/ci.sh [job]`
-# (test | msrv | clippy | fmt | crap | miri | fuzz | all). No args runs
-# everything except miri and fuzz, which need a nightly toolchain installed,
+# (test | no_std | msrv | clippy | fmt | crap | miri | fuzz | all). No args runs
+# everything except no_std, which needs the bare-metal targets installed
+# (`rustup target add thumbv7em-none-eabihf aarch64-unknown-none`),
+# miri and fuzz, which need a nightly toolchain installed,
 # and crap, which needs cargo-crappy (`cargo install cargo-crappy --locked`).
 set -euo pipefail
 
@@ -20,7 +22,17 @@ test_suite() {
 
 run_test() {
   test_suite
-  for target in thumbv7em-none-eabihf aarch64-unknown-none; do
+}
+
+run_no_std() {
+  # Bare-metal builds need their target installed (`rustup target add …`).
+  # With no arguments this loops both targets (local use); the workflow's
+  # no_std job passes its matrix target, which is the only one installed.
+  local targets=("$@")
+  if [ ${#targets[@]} -eq 0 ]; then
+    targets=(thumbv7em-none-eabihf aarch64-unknown-none)
+  fi
+  for target in "${targets[@]}"; do
     cargo build -p json-bourne --no-default-features --target "$target"
     cargo build -p json-bourne --no-default-features --features alloc --target "$target"
   done
@@ -62,6 +74,7 @@ run_fuzz() {
 
 case "${1:-all}" in
   test)   run_test ;;
+  no_std) shift; run_no_std "$@" ;;
   msrv)   run_msrv ;;
   clippy) run_clippy ;;
   fmt)    run_fmt ;;
@@ -69,5 +82,5 @@ case "${1:-all}" in
   miri)   run_miri ;;
   fuzz)   run_fuzz ;;
   all)    run_test; run_msrv; run_clippy; run_fmt; run_crap ;;
-  *) echo "usage: scripts/ci.sh [test|msrv|clippy|fmt|crap|miri|fuzz|all]" >&2; exit 2 ;;
+  *) echo "usage: scripts/ci.sh [test|no_std [target…]|msrv|clippy|fmt|crap|miri|fuzz|all]" >&2; exit 2 ;;
 esac

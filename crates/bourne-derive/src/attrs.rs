@@ -126,15 +126,35 @@ impl ContainerAttrs {
         }
     }
 
-    pub(crate) fn enum_mode(&self) -> EnumMode {
+    /// Which tagging scheme an enum uses, validating the combination:
+    /// an adjacent enum whose tag and content name the same member emits
+    /// that key twice on write and rejects its own output on read, and
+    /// `content` without `tag` has no defined wire shape.
+    pub(crate) fn enum_mode(&self) -> syn::Result<EnumMode> {
         if self.untagged {
-            EnumMode::Untagged
-        } else if let (Some(t), Some(c)) = (&self.tag, &self.content) {
-            EnumMode::Adjacent(t.clone(), c.clone())
-        } else if let Some(t) = &self.tag {
-            EnumMode::Internal(t.clone())
-        } else {
-            EnumMode::External
+            if self.tag.is_some() || self.content.is_some() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "`untagged` cannot be combined with `tag` or `content`",
+                ));
+            }
+            return Ok(EnumMode::Untagged);
+        }
+        match (&self.tag, &self.content) {
+            (Some(t), Some(c)) if t == c => Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!(
+                    "`tag = \"{t}\"` and `content = \"{t}\"` name the same member; \
+                     the writer emits that key twice and the reader rejects it",
+                ),
+            )),
+            (Some(t), Some(c)) => Ok(EnumMode::Adjacent(t.clone(), c.clone())),
+            (Some(t), None) => Ok(EnumMode::Internal(t.clone())),
+            (None, Some(_)) => Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`content` requires a matching `tag`",
+            )),
+            (None, None) => Ok(EnumMode::External),
         }
     }
 }

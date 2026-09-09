@@ -136,14 +136,15 @@ impl ObjectWriter {
         quote! { #(#stmts)* }
     }
 
-    /// The separator emitted before a member whose key is written
-    /// through the escaping path (so the comma cannot be fused into the
-    /// key literal).
+    /// The separator before a member whose key cannot be fused into a
+    /// literal (renamed, conditional, or following a conditional).
+    /// Comma emission is structural: every sink renders it, `__FUSED`
+    /// only decides how the following key+colon travel.
     fn runtime_comma(comma: Comma) -> TokenStream {
         match comma {
             Comma::Never => quote! {},
-            Comma::Always => quote! { if __FUSED { __w.separator()?; } },
-            Comma::Runtime => quote! { if !__first && __FUSED { __w.separator()?; } },
+            Comma::Always => quote! { __w.separator()?; },
+            Comma::Runtime => quote! { if !__first { __w.separator()?; } },
         }
     }
 

@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **derive: pretty serialization of renamed and conditional fields emitted
+  invalid JSON** — missing separators between object members. The
+  runtime-separator codegen gated the comma on the sink's
+  `FUSES_STRUCTURAL_BYTES` flag, which pretty sinks set false, so the
+  comma was dropped along with the fusion: `to_string_pretty` returned
+  `Ok` with `{\n  "a": 1"second": 2\n}` for a struct using `rename` or
+  `skip_if_none`. Separator emission is a structural event on every
+  sink; only the key+colon representation may fuse. Affected renamed
+  fields, `skip_if_none` fields, members following a skipped one, enum
+  struct variants under internal/adjacent tagging, and `rename_all`
+  combinations (release audit R1).
+- derive: contradictory enum configuration is now rejected at compile
+  time instead of producing output the reader rejects: `tag` and
+  `content` naming the same member, `content` without `tag`, and
+  `untagged` combined with `tag`/`content` (release audit R3).
+- tests/build: the self dev-dependency no longer re-enables default
+  features, so `cargo test --no-default-features` now runs what it
+  claims: alloc-dependent integration tests are declared via
+  `required-features`, and `derive` implies `alloc` (generated readers
+  walk keys through the alloc-gated `KeyCow` API) (release audit R4).
+- lexer: the SSE2 string scanner's register-only intrinsic calls are
+  now inside explicit `unsafe` blocks, silencing the nine E0133
+  warnings under the 1.85 MSRV (edition-2024 `unsafe fn` bodies do not
+  grant implicit unsafe context) while remaining warning-clean on
+  current toolchains via `unused_unsafe` (release audit R7).
+
+### Changed
+
+- CI: the host test matrix no longer builds bare-metal targets it never
+  installs. Cross-target builds moved entirely into the `no_std` job
+  (which installs its matrix target) and the shared script accepts the
+  target as an argument. Windows runs the script under an explicit bash
+  shell (release audit R2).
+- docs: the Duration/SystemTime adapters document binary64 rounding
+  honestly instead of promising nanosecond preservation at all
+  magnitudes; the serializer module header no longer describes the
+  float formatter as a future ryu port; the 2026-09 audit's float
+  branch-miss attribution percentages carry a correction note
+  (release audits R5/R8).
+
 ### Changed
 
 - **Breaking:** `Lexer::new` / `Lexer::try_new` and `Parser::new` /

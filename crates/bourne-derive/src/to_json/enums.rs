@@ -21,7 +21,7 @@ impl EnumWriter {
         variants: &Variants,
         container: &ContainerAttrs,
     ) -> syn::Result<TokenStream> {
-        let mode = container.enum_mode();
+        let mode = container.enum_mode()?;
         let mut arms = Vec::new();
         for v in variants {
             let attrs = VariantAttrs::parse(&v.attrs)?;

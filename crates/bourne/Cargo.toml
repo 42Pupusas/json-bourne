@@ -13,9 +13,12 @@ default = ["std"]
 std = ["alloc"]
 alloc = []
 # Provides `#[derive(FromJson, ToJson)]`, re-exported from this crate.
-# Pulls in the proc-macro stack (syn/quote/proc-macro2) at build time;
-# the generated code itself stays no_std.
-derive = ["dep:bourne-derive"]
+# Pulls in the proc-macro stack (syn/quote/proc-macro2) at build time.
+# Implies `alloc`: the generated readers walk object keys through the
+# alloc-gated `object_*_key_str`/`KeyCow` API, so a derive impl cannot
+# compile without it — declaring the dependency here turns a confusing
+# missing-method error into an ordinary feature-unification fact.
+derive = ["alloc", "dep:bourne-derive"]
 
 [dependencies]
 bourne-derive = { path = "../bourne-derive", version = "=0.2.2", optional = true }
@@ -24,7 +27,31 @@ bourne-derive = { path = "../bourne-derive", version = "=0.2.2", optional = true
 proptest = "1"
 # Self-dep with `derive` on so tests, benches, and doctests can use
 # `#[derive(FromJson, ToJson)]` even though it is off by default.
-json-bourne = { path = ".", features = ["derive"] }
+# `default-features = false` matters: with defaults on, feature unification
+# would re-enable `std` in the very `--no-default-features` runs the CI
+# matrix exists to prove, masking real no_std breakage in tests.
+json-bourne = { path = ".", default-features = false, features = ["derive"] }
+
+# Integration tests that exercise alloc-gated APIs (`String`/`Vec` impls,
+# `to_string*`, `KeyCow`, the `char` reader) must declare that dependency.
+# Without `required-features` they compile in reduced-feature runs and
+# fail there — or worse, pass only because another dependency unified the
+# feature back in.
+[[test]]
+name = "char_escape_length"
+required-features = ["alloc"]
+
+[[test]]
+name = "escaped_renames"
+required-features = ["alloc"]
+
+[[test]]
+name = "pretty_derive"
+required-features = ["alloc"]
+
+[[test]]
+name = "variant_field_attrs"
+required-features = ["alloc"]
 
 [lints]
 workspace = true

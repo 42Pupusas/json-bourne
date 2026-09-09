@@ -99,4 +99,45 @@ mod empty_tuple_rejection_tests {
         derive("struct T(u8, u16);").unwrap();
         derive("enum E { V(u8, u16), U }").unwrap();
     }
+
+    #[test]
+    fn identical_tag_and_content_names_are_rejected() {
+        let src = "#[bourne(tag = \"kind\", content = \"kind\")] enum E { V(u8) }";
+        let err = derive(src).unwrap_err();
+        assert!(
+            err.to_string().contains("name the same member"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn content_without_tag_is_rejected() {
+        let src = "#[bourne(content = \"data\")] enum E { V(u8) }";
+        let err = derive(src).unwrap_err();
+        assert!(
+            err.to_string().contains("requires a matching `tag`"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn untagged_cannot_be_combined_with_tag_or_content() {
+        for src in [
+            "#[bourne(untagged, tag = \"t\")] enum E { V }",
+            "#[bourne(untagged, content = \"c\")] enum E { V(u8) }",
+        ] {
+            let err = derive(src).unwrap_err();
+            assert!(
+                err.to_string().contains("cannot be combined"),
+                "{src}: unexpected error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_tag_content_combinations_still_derive() {
+        derive("#[bourne(tag = \"t\")] enum E { V { a: u8 } }").unwrap();
+        derive("#[bourne(tag = \"t\", content = \"c\")] enum E { V(u8) }").unwrap();
+        derive("#[bourne(untagged)] enum E { A(u8), B } ").unwrap();
+    }
 }

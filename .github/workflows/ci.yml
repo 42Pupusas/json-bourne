@@ -26,6 +26,7 @@ jobs:
       # features; the workspace pins those behind explicit feature lists in
       # ci.yml instead (see scripts/ci.sh, which runs this exact list).
       - run: scripts/ci.sh test
+        shell: bash
 
   msrv:
     name: MSRV (1.85)
@@ -53,9 +54,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # json-bourne is no_std-first: the streaming lexer/parser is no_std
       # always; alloc-gated impls need `--features alloc`. Verify both
-      # build cleanly against bare-metal targets.
-      - run: cargo build -p json-bourne --no-default-features --target ${{ matrix.target }}
-      - run: cargo build -p json-bourne --no-default-features --features alloc --target ${{ matrix.target }}
+      # build cleanly against bare-metal targets. The matrix installs each
+      # job's target, and the script is invoked with exactly that target —
+      # no job references a target nobody installed.
+      - run: scripts/ci.sh no_std ${{ matrix.target }}
+        shell: bash
 
   clippy:
     name: clippy

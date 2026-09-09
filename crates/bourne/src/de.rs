@@ -701,8 +701,14 @@ mod alloc_impls {
     // -----------------------------------------------------------------
 
     /// Parse a `Duration` from JSON `Number` (seconds, possibly fractional).
-    /// Negative inputs and non-finite values are rejected. Subsecond
-    /// precision is preserved to nanosecond resolution.
+    /// Negative inputs and non-finite values are rejected.
+    ///
+    /// Precision: the literal is decoded through `f64`, so values beyond
+    /// binary64's ~15–17 significant digits (or beyond ±2⁵³ seconds,
+    /// where the 1-ulp spacing exceeds a nanosecond) arrive already
+    /// rounded. Sub-nanosecond digits in the source are not recoverable
+    /// downstream of the f64 step; treat the result as microsecond-class
+    /// for very large magnitudes.
     ///
     /// Implementation note: pre-validates the input to a finite,
     /// non-negative value within `Duration`'s u64-seconds range, then
@@ -762,8 +768,11 @@ mod alloc_impls {
     /// pre-epoch timestamps, which the `SystemTime` arithmetic model
     /// supports.
     ///
-    /// Subsecond precision is preserved to nanosecond resolution via
-    /// `Duration::from_secs_f64`.
+    /// Precision: decoded through `f64` like the `Duration` adapter, so
+    /// every source digit beyond binary64's precision is rounded at
+    /// parse time; nanosecond preservation is not guaranteed for
+    /// magnitudes where the 1-ulp spacing exceeds a nanosecond (beyond
+    /// ±2⁵³ seconds).
     #[cfg(feature = "std")]
     impl<'input> FromJson<'input> for std::time::SystemTime {
         #[allow(clippy::cast_precision_loss)]

@@ -11,9 +11,11 @@
 //! ([`ErrorKind::NonFiniteFloat`]). The sink trait exposes per-primitive
 //! writers so impls can bypass formatting entirely.
 //!
-//! Float impls are not included here — they live in a follow-up that ports
-//! the ryu shortest-round-trip algorithm. Non-float primitives, composites,
-//! and the std/alloc adapters are all in scope.
+//! Floats are written by the in-tree `float` module: the teju-jagua
+//! shortest-round-trip algorithm (`format_finite_to_ptr`; unlike Grisu3
+//! it always succeeds, no fallback). The `FmtWriteSink` path instead
+//! routes floats through `core::fmt`'s Display (Grisu3/Dragon4 inside
+//! the compiler). Non-finite floats are a typed error on every sink.
 
 use crate::escape::write_escaped;
 #[cfg(feature = "alloc")]
@@ -1692,7 +1694,9 @@ mod alloc_impls {
 
     /// Encode `SystemTime` as fractional seconds since `UNIX_EPOCH`.
     /// Times before the epoch serialize as negative numbers; the
-    /// parse side accepts the same shape.
+    /// parse side accepts the same shape. Precision: `as_secs_f64`
+    /// rounds to binary64, so nanoseconds are not preserved for
+    /// magnitudes where the 1-ulp spacing exceeds a nanosecond.
     #[cfg(feature = "std")]
     impl ToJson for std::time::SystemTime {
         #[inline]
@@ -1711,6 +1715,8 @@ mod alloc_impls {
     /// `from_secs_f64` adapter. Negative durations are unrepresentable
     /// (`Duration` is unsigned), and the float impl already rejects
     /// non-finite output, so this never errors for valid inputs.
+    /// Precision: `as_secs_f64` rounds to binary64; sub-nanosecond
+    /// digits beyond that are not preserved.
     #[cfg(feature = "std")]
     impl ToJson for std::time::Duration {
         #[inline]

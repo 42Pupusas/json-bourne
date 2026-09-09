@@ -21,7 +21,7 @@ impl EnumReader {
         variants: &Variants,
         container: &ContainerAttrs,
     ) -> syn::Result<TokenStream> {
-        match container.enum_mode() {
+        match container.enum_mode()? {
             EnumMode::External => Self::external(name, variants, container),
             EnumMode::Internal(tag) => Self::internal(name, variants, container, &tag),
             EnumMode::Adjacent(tag, content) => {

@@ -38,6 +38,7 @@
 //! Parse a struct with `#[derive(FromJson)]`:
 //!
 //! ```
+//! # #![cfg(feature = "derive")]
 //! use json_bourne::{FromJson, parse_str};
 //!
 //! #[derive(Debug, PartialEq, FromJson)]
@@ -54,6 +55,7 @@
 //! Serialize back out with `#[derive(ToJson)]`:
 //!
 //! ```
+//! # #![cfg(feature = "alloc")]
 //! use json_bourne::{ToJson, to_string};
 //!
 //! #[derive(ToJson)]
@@ -150,6 +152,7 @@ pub use ser::{JsonWrite, ToJson};
 /// re-exported here so you only ever depend on and import `json_bourne`.
 ///
 /// ```
+/// # #![cfg(feature = "derive")]
 /// use json_bourne::{FromJson, ToJson, parse_str, to_string};
 ///
 /// #[derive(FromJson, ToJson)]
