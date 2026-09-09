@@ -81,9 +81,9 @@ jobs:
       - run: cargo fmt --all -- --check
 
   crap:
-    # CRAP gate (audit F4): cargo-crappy instruments the suite itself and
-    # scores complexity × miss-coverage × idiom penalties. Threshold 21;
-    # bench fixtures excluded. `#[allow(unknown_lints, crappy)]` on a
+    # CRAP gate (audit F4): cargo-crappy drives cargo-llvm-cov internally
+    # and scores complexity × miss-coverage × idiom penalties. Threshold
+    # 21; bench fixtures excluded. `#[allow(unknown_lints, crappy)]` on a
     # function documents a suppression at the source.
     name: crap
     runs-on: ubuntu-latest

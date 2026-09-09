@@ -40,10 +40,10 @@ run_fmt() {
 }
 
 run_crap() {
-  # cargo-crappy instruments the test suite itself — no external LCOV
-  # plumbing. Threshold 21 carries over from the original .cargo-crap.toml
-  # intent; benches are fixtures, not library code (the exclusion that
-  # config also carried, via this tool's flags).
+  # cargo-crappy drives cargo-llvm-cov internally (instruments the suite,
+  # produces the coverage data itself). Threshold 21 is the original
+  # .cargo-crap.toml intent; benches are fixtures, not library code (the
+  # exclusion that config also carried, via this tool's flags).
   cargo crappy --threshold 21 --exclude-path benches/ --exclude-fn BigUint::add_u64
 }
 
