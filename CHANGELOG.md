@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **derive: an escaped object key was rejected when it appeared first** —
+  the generated key walk read the first key with a borrowing call whose
+  `InvalidEscape` propagated, while every *subsequent* key got the
+  decode retry, so identical JSON parsed or failed depending on key
+  order: `{"user-id":1,"x\ny":2}` parsed and `{"x\ny":2,"user-id":1}`
+  did not. Because output follows declaration order, a struct whose
+  escape-bearing field was declared first emitted JSON it could not read
+  back, and a sole escaped field never parsed at all. Every key now
+  takes one acquire-then-retry path regardless of position. Affected all
+  derived object readers, including enum struct variants and every
+  tagging mode; `HashMap`/`BTreeMap` were never affected (release audit
+  A1).
+- **derive: an out-of-range `f32` field silently became `±inf`** — the
+  fast path used a bare `as` cast, so a derived `f32` field accepted
+  `1e300` as `inf` while `FromJson for f32` documents and performs the
+  opposite. The derived path now applies the same finite check, so both
+  report `NumberOutOfRange`; the value it used to produce was one the
+  serializer would then refuse to emit (release audit A2).
 - **derive: pretty serialization of renamed and conditional fields emitted
   invalid JSON** — missing separators between object members. The
   runtime-separator codegen gated the comma on the sink's
@@ -37,6 +55,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- tests: the derived escaped-key round-trip is now pinned by a property
+  test over key permutations plus unit tests covering an escaped key in
+  first, middle, last and sole position, malformed escapes in first
+  position, and the duplicate/unknown-key interactions. The `derived`
+  fuzz target now asserts that a successful `to_string` re-parses to an
+  equal value instead of discarding the result — audit A1 was a
+  wrong-`Err` bug, invisible to a no-panic-only target. Fixes a vacuous
+  test that was named for a unicode escape but parsed `{"id":7}`
+  (release audit A1).
+- docs: corrected three stale comments in `ser.rs` — `ByteSink` claimed
+  callers convert via `from_utf8_unchecked` when `to_string` uses the
+  checked conversion and reports `InvalidUtf8`, and the float module
+  described a Grisu3 formatter with a libstd fallback and a
+  bench-selected ryu path, none of which exist (the in-tree formatter is
+  teju-jagua, which always succeeds) (release audit A4).
 - CI: the host test matrix no longer builds bare-metal targets it never
   installs. Cross-target builds moved entirely into the `no_std` job
   (which installs its matrix target) and the shared script accepts the

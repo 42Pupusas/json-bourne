@@ -7,7 +7,16 @@ performance. `akita/` is excluded. **No implementation, test, manifest,
 or workflow changes were made for this audit.** External reproduction
 code lives in `/tmp/bourne-audit-2`.
 
-## Release decision: HOLD
+## Status
+
+**A1, A2 and A4 are fixed; the coverage gaps they exposed are closed.**
+A3 remains open and needs a decision before the cut. See "Remediation"
+at the end for what changed and how it was verified.
+
+The findings below are written as they were found, so the reasoning
+stays auditable against the pre-fix revision `b9077cd`.
+
+## Release decision (at time of audit): HOLD
 
 Two defects reject valid JSON that the crate itself produces. Both are
 in derive-generated readers, both are invisible to the current suite
@@ -276,3 +285,75 @@ boundaries; `1e309` overflow rejection; `-0.0` sign preservation;
 duplicate-key rejection on both derive and map paths; the `format_finite_to_ptr`
 bounds arithmetic (worst case 26 ≤ 32 bytes); and the SSE2 signed-compare
 argument that makes the string-path `from_utf8_unchecked` sound.
+
+---
+
+## Remediation
+
+### A1 — fixed
+
+`key_walk` now runs one loop in which every key, first included, is
+acquired by the borrowing call and retried through `object_key_cow` on
+`InvalidEscape`. Position no longer decides anything. The rewrite also
+removed the duplicated match arms the old two-site structure required.
+No library change was needed: the lexer's rewind contract already
+supported this, as its own `first_key_escape_rejects_then_decodes` test
+showed.
+
+Verified: the two new property/round-trip tests fail on the pre-fix
+codegen with exactly the reported `InvalidEscape at byte 3` and pass
+after; escaped keys parse in first, middle, last and sole position and
+in any permutation; `to_string` output re-parses for plain structs and
+internally-tagged enums; malformed escapes (`\q`, truncated `\u`, lone
+surrogate) in first position are still rejected, as are duplicate and
+unknown escaped keys, so the retry did not become permissive.
+
+### A2 — fixed
+
+The derived `f32` arm applies the same finite check as `FromJson for
+f32` rather than a bare `as` cast. A test asserts the two paths agree
+on `1e40`, `-1e40` and `1e300`, and that `f32::MAX`, underflow to zero
+and ordinary values still parse.
+
+### A3 — open, needs a decision
+
+Unchanged: `skip_if_none` behind a type alias for `Option` is still
+silently ignored. A proc macro cannot resolve aliases, so the choice is
+between documenting the limitation and rejecting the attribute on a
+non-syntactic `Option` — the latter is breaking, which is why it should
+be settled before the cut rather than after.
+
+### A4 — fixed
+
+The `ByteSink` and float-module comments now describe what the code
+does. Auditing them turned up a third stale comment the original pass
+missed: the float module claimed a Grisu3 formatter with a libstd
+fallback, while the crate uses teju-jagua, which always succeeds and
+has no fallback. A test named `fmt_sink_handles_floats_with_grisu3` was
+renamed to match.
+
+### Coverage gaps — closed
+
+All three are addressed: a derived escaped-key round-trip property over
+key permutations, unit tests for every escaped-key position including
+first, and a `derived` fuzz target that now asserts a successful
+`to_string` re-parses to an equal value. The vacuous unicode-escape test
+now contains an actual escape.
+
+### Verification of the fixes
+
+Workspace suite green in default, `--all-features`, bare `no-default-features`
+and `alloc,derive`; clippy `-D warnings` clean; fmt clean; MSRV 1.85
+green; Miri 110/110 with no UB (the `teju_gen` table emitter is excluded
+— it writes a file, which Miri's isolation blocks, and it is unrelated
+to these changes); `derived` and `typed` fuzz targets 20k runs each with
+no crash and rising coverage; `cargo graph --report` unchanged (same two
+known back-edges); cargo-crappy 385 functions clean.
+
+The `compare` bench was re-run because A1's fix rewrote a hot path:
+derived-vs-`serde_json` is 1.92× (1.86× before), with the whole run
+including `serde_json` and the non-derive path drifting by a similar
+margin — machine noise, not a regression. The uniform walk costs nothing
+measurable.
+
+P1 and P2 remain open as scheduled optimization work.

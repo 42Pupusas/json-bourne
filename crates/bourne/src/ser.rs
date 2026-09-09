@@ -304,10 +304,8 @@ impl JsonWrite for StringSink<'_> {
         write_escaped(self, s)
     }
 
-    /// Production float path. Currently dispatches to the `write!`-based
-    /// formatter — see the `float` module below for the alternate ryu
-    /// path and the bench that picks between them. Both reject non-finite
-    /// inputs with `ErrorKind::NonFiniteFloat`.
+    /// Production float path, via the `float` module below. Rejects
+    /// non-finite inputs with `ErrorKind::NonFiniteFloat`.
     #[inline]
     fn write_float_f64(&mut self, f: f64) -> Result<(), Self::Error> {
         float::format_f64_write(f, self.out)
@@ -320,9 +318,11 @@ impl JsonWrite for StringSink<'_> {
 
 /// `JsonWrite` sink that appends to a `Vec<u8>`.
 ///
-/// Bypasses `String`'s UTF-8 invariant maintenance — every byte
-/// written is known-valid by construction, so the caller can convert
-/// to `String` via `from_utf8_unchecked` after serialization completes.
+/// Bypasses `String`'s UTF-8 invariant maintenance during the write.
+/// The bytes this sink emits are valid UTF-8 by construction, but
+/// `to_string` still converts with the checked `String::from_utf8` and
+/// reports `ErrorKind::InvalidUtf8` on failure — nothing here relies on
+/// an unchecked conversion.
 #[cfg(feature = "alloc")]
 #[derive(Debug)]
 pub struct ByteSink<'a> {
@@ -707,10 +707,9 @@ fn format_i128(n: i128, buf: &mut [u8; 40]) -> &str {
 // ---------------------------------------------------------------------------
 // Float formatting.
 //
-// `format_f64_write` dispatches to the in-tree Grisu3 formatter
-// (`crate::float::format_finite`), which falls back to libstd's
-// `Display for f64` on the ~0.5% of inputs where Grisu3 cannot prove
-// its output is the shortest round-trip representation.
+// `format_f64_write` dispatches to the in-tree teju-jagua formatter
+// (`crate::float::format_finite`), which always produces the shortest
+// round-trip representation — there is no fallback path.
 //
 // The bench in `bourne-bench/floats` pins this entry point by name.
 // ---------------------------------------------------------------------------
@@ -726,7 +725,7 @@ pub mod float {
     use alloc::string::String;
 
     /// Production float formatter. Delegates correctness to the
-    /// in-tree Grisu3 implementation (`crate::float`). Non-finite
+    /// in-tree teju-jagua implementation (`crate::float`). Non-finite
     /// inputs are rejected before any digit work happens; position is
     /// `START` because serializer errors don't have an input byte to
     /// point at — symmetric with how the parse side reports "byte

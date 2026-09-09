@@ -16,7 +16,7 @@ fn fmt_sink_matches_to_string_for_struct() {
 }
 
 #[test]
-fn fmt_sink_handles_floats_with_grisu3() {
+fn fmt_sink_handles_floats_with_teju() {
     let canonical = to_string(&1.5_f64).unwrap();
     let mut out = String::new();
     to_fmt(&1.5_f64, &mut out).unwrap();

@@ -376,6 +376,51 @@ mod tests {
         assert!(v.is_finite());
     }
 
+    /// Audit A2: the derive's `f32` fast path used a bare `as` cast, so a
+    /// field accepted `1e40` as `inf` while the impl above rejected it.
+    /// The two paths must agree on range, and on what still parses.
+    #[test]
+    fn derived_f32_field_rejects_overflow_like_the_impl() {
+        #[derive(Debug, PartialEq, json_bourne::FromJson)]
+        struct Narrow {
+            v: f32,
+        }
+
+        for lit in ["1e40", "-1e40", "1e300"] {
+            let field = parse_str::<Narrow>(&format!(r#"{{"v":{lit}}}"#));
+            let direct = parse_str::<f32>(lit);
+            assert_eq!(
+                field.map(|n| n.v).map_err(|e| e.kind),
+                direct.map_err(|e| e.kind),
+                "derived and impl disagree on {lit}",
+            );
+            assert_eq!(
+                parse_str::<Narrow>(&format!(r#"{{"v":{lit}}}"#))
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::NumberOutOfRange,
+            );
+        }
+
+        // In-range values, including underflow to zero, still parse.
+        // Compared by bits: these are exact-representation assertions.
+        assert_eq!(
+            parse_str::<Narrow>(r#"{"v":3.4028235e38}"#)
+                .unwrap()
+                .v
+                .to_bits(),
+            f32::MAX.to_bits(),
+        );
+        assert_eq!(
+            parse_str::<Narrow>(r#"{"v":1e-300}"#).unwrap().v.to_bits(),
+            0.0_f32.to_bits(),
+        );
+        assert_eq!(
+            parse_str::<Narrow>(r#"{"v":-0.5}"#).unwrap().v.to_bits(),
+            (-0.5_f32).to_bits(),
+        );
+    }
+
     #[test]
     fn f64_rejects_overflow_to_infinity() {
         let r = parse_str::<f64>("1e400");

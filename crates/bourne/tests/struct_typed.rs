@@ -177,15 +177,101 @@ fn struct_dispatch_handles_escaped_key() {
     );
 }
 
+/// Audit A1: the first key took a `?` that skipped the decode retry every
+/// later key got, so an escape-bearing key parsed in second position and
+/// failed in first. Key order must not decide whether valid JSON parses.
+#[test]
+fn struct_dispatch_handles_escaped_first_key() {
+    let j = r#"{"x\ny":2,"user-id":1}"#;
+    let r: EscKey = parse_str(j).unwrap();
+    assert_eq!(
+        r,
+        EscKey {
+            user_id: 1,
+            x_newline_y: 2
+        }
+    );
+}
+
+#[test]
+fn struct_dispatch_handles_sole_escaped_key() {
+    #[derive(Debug, PartialEq, FromJson)]
+    struct SoleEsc {
+        #[bourne(rename = "a\"b")]
+        a_quote_b: u32,
+    }
+    let r: SoleEsc = parse_str(r#"{"a\"b":5}"#).unwrap();
+    assert_eq!(r, SoleEsc { a_quote_b: 5 });
+}
+
 #[test]
 fn struct_dispatch_handles_unicode_escape_in_key() {
     #[derive(Debug, PartialEq, FromJson)]
-    struct PlainId {
-        id: u32,
+    struct Accented {
+        #[bourne(rename = "k\u{00e9}3")]
+        k_e_3: u32,
+        plain: u32,
     }
-    let j = r#"{"id":7}"#;
-    let r: PlainId = parse_str(j).unwrap();
-    assert_eq!(r, PlainId { id: 7 });
+    let r: Accented = parse_str(r#"{"k\u00e93":7,"plain":8}"#).unwrap();
+    assert_eq!(r, Accented { k_e_3: 7, plain: 8 });
+}
+
+/// Every position in one type: escaped first, plain middle, escaped last.
+#[test]
+fn struct_dispatch_handles_escaped_keys_in_every_position() {
+    #[derive(Debug, PartialEq, FromJson)]
+    struct ThreeEsc {
+        #[bourne(rename = "k\t1")]
+        one: u32,
+        plain: u32,
+        #[bourne(rename = "k\u{00e9}3")]
+        three: u32,
+    }
+    let expected = ThreeEsc {
+        one: 1,
+        plain: 2,
+        three: 3,
+    };
+    let forward: ThreeEsc = parse_str(r#"{"k\t1":1,"plain":2,"k\u00e93":3}"#).unwrap();
+    assert_eq!(forward, expected);
+    let reordered: ThreeEsc = parse_str(r#"{"k\u00e93":3,"k\t1":1,"plain":2}"#).unwrap();
+    assert_eq!(reordered, expected);
+}
+
+/// The retry decodes rather than borrows, but must not become permissive:
+/// a malformed escape in the *first* key is still an error.
+#[test]
+fn struct_dispatch_rejects_malformed_escape_in_first_key() {
+    #[derive(Debug, PartialEq, FromJson)]
+    struct SoleEsc {
+        #[bourne(rename = "a\"b")]
+        a_quote_b: u32,
+    }
+    for j in [r#"{"a\qb":5}"#, r#"{"a\u00":5}"#, r#"{"a\ud800b":5}"#] {
+        assert!(parse_str::<SoleEsc>(j).is_err(), "accepted {j}");
+    }
+}
+
+#[test]
+fn struct_dispatch_rejects_duplicate_escaped_first_key() {
+    #[derive(Debug, PartialEq, FromJson)]
+    struct SoleEsc {
+        #[bourne(rename = "a\"b")]
+        a_quote_b: u32,
+    }
+    let err = parse_str::<SoleEsc>(r#"{"a\"b":1,"a\"b":2}"#).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DuplicateKey);
+}
+
+#[test]
+fn struct_dispatch_skips_unknown_escaped_first_key() {
+    #[derive(Debug, PartialEq, FromJson)]
+    #[bourne(deny_unknown_fields = false)]
+    struct Lenient {
+        keep: u32,
+    }
+    let r: Lenient = parse_str(r#"{"z\nz":5,"keep":9}"#).unwrap();
+    assert_eq!(r, Lenient { keep: 9 });
 }
 
 // -----------------------------------------------------------------

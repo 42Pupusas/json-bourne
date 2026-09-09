@@ -25,7 +25,7 @@ impl Acquire {
             "i64" => quote! { __lex.parse_i64_value()? },
             "u64" => quote! { __lex.parse_u64_value()? },
             "f64" => quote! { __lex.parse_f64_value()? },
-            "f32" => quote! { __lex.parse_f64_value()? as f32 },
+            "f32" => Self::float_narrow(),
             "i8" => Self::int_narrow("i8"),
             "i16" => Self::int_narrow("i16"),
             "i32" => Self::int_narrow("i32"),
@@ -46,6 +46,27 @@ impl Acquire {
             _ => quote! {
                 <#ty as ::json_bourne::FromJson<'_>>::from_lex(__lex)?
             },
+        }
+    }
+
+    /// `f32` is the one lossy narrowing: a bare `as` cast saturates an
+    /// out-of-range double to `±inf` instead of erroring, which is what
+    /// `FromJson for f32` documents rejecting. Mirror that impl so the
+    /// derived and generic paths agree (audit A2). Finite-but-imprecise
+    /// values still round as a normal cast.
+    fn float_narrow() -> TokenStream {
+        quote! {
+            {
+                let __narrowed = __lex.parse_f64_value()? as f32;
+                if __narrowed.is_finite() {
+                    __narrowed
+                } else {
+                    return ::core::result::Result::Err(::json_bourne::Error::new(
+                        ::json_bourne::ErrorKind::NumberOutOfRange,
+                        __lex.position(),
+                    ));
+                }
+            }
         }
     }
 

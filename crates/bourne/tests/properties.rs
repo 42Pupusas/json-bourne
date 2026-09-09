@@ -41,11 +41,11 @@ proptest! {
 
     /// Stronger property: every finite f64 that survives `json_bourne::to_string`
     /// must parse back bit-identically. This exercises the in-tree
-    /// Grisu3 path *and* its libstd fallback — the failure mode it
-    /// catches is "Grisu3 emitted shorter-than-shortest output that
-    /// rounds wrong on parse-back". The previous property went through
-    /// `f64::to_string` (libstd's ryu/dragon4), which would mask any
-    /// Grisu3 regression.
+    /// teju-jagua formatter — the failure mode it catches is "teju
+    /// emitted shorter-than-shortest output that rounds wrong on
+    /// parse-back". The previous property went through `f64::to_string`
+    /// (libstd's ryu/dragon4), which would mask any regression in our
+    /// own formatter.
     #[test]
     fn bourne_serialized_finite_f64_round_trips(
         x in proptest::num::f64::NORMAL | proptest::num::f64::POSITIVE | proptest::num::f64::NEGATIVE | proptest::num::f64::ZERO,
@@ -117,6 +117,84 @@ proptest! {
         let back: BTreeMap<String, u64> = parse_str(&json).expect("bourne map output parses back");
         prop_assert_eq!(back.get(&k), Some(&v), "round-trip failed via {:?}", json);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Derive-side escaped-key round-trip (audit A1).
+//
+// The map-key property above covers the `BTreeMap` path, which was never
+// broken. The derive path had its own key walk, where the first key
+// skipped the decode retry — so bourne's own output failed to re-parse
+// whenever the escape-bearing field came first. A derived key is fixed at
+// expansion time, so instead of generating the key we generate the
+// *document order*: whichever field leads must parse the same.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, PartialEq, json_bourne::FromJson, json_bourne::ToJson)]
+struct EscapedKeys {
+    #[bourne(rename = "q\"uote")]
+    quote: u64,
+    #[bourne(rename = "nl\nline")]
+    newline: u64,
+    plain: u64,
+    #[bourne(rename = "caf\u{00e9}")]
+    accent: u64,
+}
+
+impl EscapedKeys {
+    const KEYS: [&'static str; 4] = ["q\"uote", "nl\nline", "plain", "caf\u{00e9}"];
+
+    fn from_order(order: &[usize; 4]) -> (Self, String) {
+        let values = [11_u64, 22, 33, 44];
+        let mut json = String::from("{");
+        for (n, &idx) in order.iter().enumerate() {
+            if n > 0 {
+                json.push(',');
+            }
+            json.push_str(&to_string(&Self::KEYS[idx]).expect("key serializes"));
+            json.push(':');
+            json.push_str(&values[idx].to_string());
+        }
+        json.push('}');
+        let expected = Self {
+            quote: values[0],
+            newline: values[1],
+            plain: values[2],
+            accent: values[3],
+        };
+        (expected, json)
+    }
+}
+
+proptest! {
+    /// Any permutation of the same object's keys must parse identically —
+    /// position must never decide whether an escaped key is accepted.
+    #[test]
+    fn derived_escaped_keys_parse_in_any_order(
+        order in Just([0_usize, 1, 2, 3]).prop_shuffle(),
+    ) {
+        let order: [usize; 4] = order.as_slice().try_into().expect("shuffle preserves length");
+        let (expected, json) = EscapedKeys::from_order(&order);
+        let parsed: EscapedKeys = parse_str(&json)
+            .unwrap_or_else(|e| panic!("derived reader rejected {json:?}: {e}"));
+        prop_assert_eq!(parsed, expected, "round-trip failed via {:?}", json);
+    }
+}
+
+/// The property's fixed point: bourne's own serializer output for a type
+/// whose escape-bearing field is declared *first* must re-parse.
+#[test]
+fn derived_escaped_key_output_reparses() {
+    let original = EscapedKeys {
+        quote: 1,
+        newline: 2,
+        plain: 3,
+        accent: 4,
+    };
+    let json = to_string(&original).expect("serializing cannot fail");
+    let back: EscapedKeys = parse_str(&json)
+        .unwrap_or_else(|e| panic!("bourne emitted JSON it cannot read back: {json:?}: {e}"));
+    assert_eq!(back, original);
 }
 
 // ---------------------------------------------------------------------------

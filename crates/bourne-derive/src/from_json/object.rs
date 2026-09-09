@@ -132,45 +132,41 @@ impl ObjectReader {
     /// acquisition. Escape-free keys come back as `KeyCow::Borrowed` straight
     /// from the borrowing read (`object_first_key_str` /
     /// `object_next_key_str`); an escape-bearing key rejects with
-    /// `InvalidEscape` and the cursor rewound, which the advance loop turns
-    /// into a decoding retry via `object_key_cow`. Equivalent to the `_lex` +
-    /// `key_to_cow` sequence for every input, without the span round-trip on
-    /// the common path (audit 4.3.2).
+    /// `InvalidEscape` and the cursor rewound to the key's opening quote,
+    /// which this turns into a decoding retry via `object_key_cow`. Every
+    /// key takes the same acquire-then-retry path regardless of position,
+    /// so escapes are accepted wherever they appear (audit A1); the borrow
+    /// avoids the span round-trip on the common path (audit 4.3.2).
     pub(crate) fn key_walk(arms: &[TokenStream], unknown_arm: &TokenStream) -> TokenStream {
         quote! {
-            let mut __maybe_key = __lex.object_first_key_str()?;
-            '__bourne_walk: loop {
-                let __key_cow: ::json_bourne::KeyCow<'_> = match __maybe_key {
-                    ::core::option::Option::Some(__k) => {
-                        ::json_bourne::KeyCow::Borrowed(__k)
-                    }
-                    ::core::option::Option::None => break,
-                };
-                let __key: &str = __key_cow.as_ref();
-                match __key {
-                    #(#arms)*
-                    #unknown_arm
-                }
-                loop {
-                    match __lex.object_next_key_str() {
-                        ::core::result::Result::Ok(__k) => {
-                            __maybe_key = __k;
-                            continue '__bourne_walk;
+            let mut __bourne_first_key = true;
+            loop {
+                let __key_cow: ::json_bourne::KeyCow<'_> = {
+                    let __borrowed = if __bourne_first_key {
+                        __lex.object_first_key_str()
+                    } else {
+                        __lex.object_next_key_str()
+                    };
+                    __bourne_first_key = false;
+                    match __borrowed {
+                        ::core::result::Result::Ok(::core::option::Option::Some(__k)) => {
+                            ::json_bourne::KeyCow::Borrowed(__k)
                         }
+                        ::core::result::Result::Ok(::core::option::Option::None) => break,
                         ::core::result::Result::Err(__e)
                             if __e.kind == ::json_bourne::ErrorKind::InvalidEscape =>
                         {
-                            let __decoded = __lex.object_key_cow()?;
-                            let __key: &str = __decoded.as_ref();
-                            match __key {
-                                #(#arms)*
-                                #unknown_arm
-                            }
+                            __lex.object_key_cow()?
                         }
                         ::core::result::Result::Err(__e) => {
                             return ::core::result::Result::Err(__e);
                         }
                     }
+                };
+                let __key: &str = __key_cow.as_ref();
+                match __key {
+                    #(#arms)*
+                    #unknown_arm
                 }
             }
         }
