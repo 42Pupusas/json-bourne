@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Reproduce .github/workflows/ci.yml locally: `scripts/ci.sh [job]`
-# (test | msrv | clippy | fmt | miri | fuzz | all). No args runs everything
-# except miri and fuzz, which need a nightly toolchain installed.
+# (test | msrv | clippy | fmt | crap | miri | fuzz | all). No args runs
+# everything except miri and fuzz, which need a nightly toolchain installed,
+# and crap, which needs cargo-llvm-cov + cargo-crap and the llvm-tools-preview
+# component (`cargo install cargo-llvm-cov cargo-crap --locked`).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -38,6 +40,13 @@ run_fmt() {
   cargo fmt --all -- --check
 }
 
+run_crap() {
+  # Threshold / exclusions / allows live in .cargo-crap.toml (audit F4:
+  # the config only counts once something runs it).
+  cargo llvm-cov --workspace --lcov --output-path target/lcov.info
+  cargo crap --workspace --lcov target/lcov.info --fail-above
+}
+
 run_miri() {
   MIRIFLAGS="-Zmiri-disable-isolation" RUSTFLAGS="--cfg bourne_no_simd" \
     cargo +nightly miri test -p json-bourne --lib
@@ -56,8 +65,9 @@ case "${1:-all}" in
   msrv)   run_msrv ;;
   clippy) run_clippy ;;
   fmt)    run_fmt ;;
+  crap)   run_crap ;;
   miri)   run_miri ;;
   fuzz)   run_fuzz ;;
-  all)    run_test; run_msrv; run_clippy; run_fmt ;;
-  *) echo "usage: scripts/ci.sh [test|msrv|clippy|fmt|miri|fuzz|all]" >&2; exit 2 ;;
+  all)    run_test; run_msrv; run_clippy; run_fmt; run_crap ;;
+  *) echo "usage: scripts/ci.sh [test|msrv|clippy|fmt|crap|miri|fuzz|all]" >&2; exit 2 ;;
 esac

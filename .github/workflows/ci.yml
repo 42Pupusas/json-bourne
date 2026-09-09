@@ -80,6 +80,21 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  crap:
+    # CRAP gate (audit F4): coverage + complexity over the workspace,
+    # threshold/exclusions/allowances in .cargo-crap.toml. Fails when any
+    # function exceeds the configured score (21) uncovered.
+    name: crap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-llvm-cov cargo-crap --locked
+      - run: scripts/ci.sh crap
+
   miri:
     name: miri
     runs-on: ubuntu-latest
