@@ -3,9 +3,11 @@
 //! `tests/api_smoke.rs` (audit 2026-09 F2).
 
 mod escape_decode;
+mod event_api;
 mod float_fast_path;
 mod float_uncentred;
 mod integer_paths;
+mod reserve_window;
 mod sink_adapter;
 mod sink_direct;
 mod stack_frames;

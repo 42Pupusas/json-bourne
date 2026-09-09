@@ -1446,6 +1446,8 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
     #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
     #[target_feature(enable = "sse2")]
     #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    // the dispatch wrapper inlines it away; coverage can't attribute the body.
+    #[allow(unknown_lints, crappy)]
     unsafe fn scan_ascii_string_run_sse2(&mut self) {
         use core::arch::x86_64::{
             _mm_cmpeq_epi8, _mm_cmplt_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_or_si128,

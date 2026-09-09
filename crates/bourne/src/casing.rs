@@ -70,6 +70,8 @@ impl Casing {
     /// An unrecognized value is a const-eval panic naming the accepted
     /// set, so a typo in `#[bourne(rename_all = "…")]` fails the build
     /// with a clear message rather than silently doing nothing.
+    // const-evaluated at compile time; runtime coverage never sees it.
+    #[allow(unknown_lints, crappy)]
     #[must_use]
     pub const fn from_name(name: &str) -> Self {
         // `const fn` can't match string literals, so compare byte slices.
@@ -106,6 +108,11 @@ impl Casing {
     ///
     /// # Panics
     /// Const-eval panic if the result exceeds [`CAP`] bytes.
+    // CC 21 is intrinsic to the const single-pass state machine (boundary
+    // detection + per-case transform interleaved); 100% covered. Splitting
+    // it scatters the walk for no behavioural gain — accepted by design,
+    // same rationale as `Parser::next_event`.
+    #[allow(unknown_lints, crappy)]
     #[must_use]
     pub const fn convert(self, src: &str) -> Renamed {
         let s = src.as_bytes();

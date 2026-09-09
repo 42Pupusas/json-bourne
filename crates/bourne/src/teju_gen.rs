@@ -8,6 +8,9 @@
 //! Reference: Cassio Neri, "Teju Jagua" (Apache-2.0).
 
 #![allow(dead_code)]
+// test-only generator: scored by cargo-crappy because the tool skips
+// inline `#[cfg(test)]` mods but not cfg-gated `mod` declarations.
+#![allow(unknown_lints, crappy)]
 
 /// Low 64 bits of a u128 — the canonical limb-extraction operation in this
 /// bigint code. Masking before `try_into` makes the truncation explicit and

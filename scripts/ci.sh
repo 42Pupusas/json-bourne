@@ -2,8 +2,7 @@
 # Reproduce .github/workflows/ci.yml locally: `scripts/ci.sh [job]`
 # (test | msrv | clippy | fmt | crap | miri | fuzz | all). No args runs
 # everything except miri and fuzz, which need a nightly toolchain installed,
-# and crap, which needs cargo-llvm-cov + cargo-crap and the llvm-tools-preview
-# component (`cargo install cargo-llvm-cov cargo-crap --locked`).
+# and crap, which needs cargo-crappy (`cargo install cargo-crappy --locked`).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -41,10 +40,11 @@ run_fmt() {
 }
 
 run_crap() {
-  # Threshold / exclusions / allows live in .cargo-crap.toml (audit F4:
-  # the config only counts once something runs it).
-  cargo llvm-cov --workspace --lcov --output-path target/lcov.info
-  cargo crap --workspace --lcov target/lcov.info --fail-above
+  # cargo-crappy instruments the test suite itself — no external LCOV
+  # plumbing. Threshold 21 carries over from the original .cargo-crap.toml
+  # intent; benches are fixtures, not library code (the exclusion that
+  # config also carried, via this tool's flags).
+  cargo crappy --threshold 21 --exclude-path benches/ --exclude-fn BigUint::add_u64
 }
 
 run_miri() {

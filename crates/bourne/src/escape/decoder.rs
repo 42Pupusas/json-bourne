@@ -222,6 +222,8 @@ impl EscapeDecoder {
     /// `unsafe` by signature, not by memory-safety).
     #[cfg(all(target_arch = "x86_64", not(bourne_no_simd)))]
     #[allow(unsafe_code, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    // the dispatch wrapper inlines it away; coverage can't attribute the body.
+    #[allow(unknown_lints, crappy)]
     #[inline]
     fn find_backslash_sse2(bytes: &[u8]) -> Option<usize> {
         use core::arch::x86_64::{
