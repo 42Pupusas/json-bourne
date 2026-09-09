@@ -137,6 +137,14 @@ mod serde_json {
 // 7 050 branches vs serde_json's 843 (8.4×) while retiring 48 % more
 // instructions at higher IPC. The cost lives in the data-dependent shape
 // selection in `write_f64_to_ptr`.
+//
+// Updated 2026-09-09 (probe attribution on the `profile` binary's
+// `to_json_floats_same_10k` / `to_json_floats_four_10k` workloads):
+// misprediction decay is confirmed (~94× fewer misses for the predictable
+// variants) but the shape selection owns only ~17% of the misses — ~83%
+// sit inside teju's internal branches, ~0% in the digit loop, and a
+// branchless `mantissa_digit_count` measured 26% *slower*. Full table in
+// AUDIT-2026-09 §4.3 addendum.
 // ---------------------------------------------------------------------------
 
 mod bourne_write_same {

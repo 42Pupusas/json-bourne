@@ -287,6 +287,28 @@ fn run_to_json_floats(data: &[f64], iters: u64) {
     }
 }
 
+// Mirrors `benches/floats.rs::bourne_write_same`: one repeated value —
+// every data-dependent branch inside the formatter should predict
+// perfectly. Isolates per-item constant cost from prediction decay.
+fn float_same_vec(n: usize) -> Vec<f64> {
+    vec![12345.6789_f64; n]
+}
+
+// Mirrors `benches/floats.rs::bourne_write_four`: 4 distinct magnitudes
+// cycling — multi-magnitude but periodic, so history-based predictors can
+// learn it. The cliff discriminator: if mixed-array branch-misses far
+// exceed these, prediction decay under variance is the cliff's lever.
+#[allow(clippy::cast_precision_loss)]
+fn float_four_vec(n: usize) -> Vec<f64> {
+    let vals = [
+        1.234_567_890_123_456_f64,
+        9876.54321e-3,
+        0.000_123_456_789,
+        1.5e15,
+    ];
+    (0..n).map(|i| vals[i % 4]).collect()
+}
+
 // Head-to-head counterpart of `run_to_json_floats`. Same input, same call
 // shape (`to_string(&Vec<f64>)`) but via `serde_json` instead of `bourne`.
 // Produces a flamegraph we can diff against bourne's `to_json_floats_10k`
@@ -321,6 +343,8 @@ const fn workloads() -> &'static [&'static str] {
         "to_json_metric",
         "to_json_int_struct",
         "to_json_floats_10k",
+        "to_json_floats_same_10k",
+        "to_json_floats_four_10k",
         "serde_to_json_floats_10k",
     ]
 }
@@ -413,6 +437,16 @@ fn run(name: &str) {
             // Divan measured ~720 µs/iter, so ~7k iters ≈ 5s.
             let data = float_ser_vec(10_000);
             run_to_json_floats(&data, 7_000);
+        }
+        "to_json_floats_same_10k" => {
+            // Mirrors `benches/floats.rs::bourne_write_same::bench(10_000)`.
+            let data = float_same_vec(10_000);
+            run_to_json_floats(&data, 10_000);
+        }
+        "to_json_floats_four_10k" => {
+            // Mirrors `benches/floats.rs::bourne_write_four::bench(10_000)`.
+            let data = float_four_vec(10_000);
+            run_to_json_floats(&data, 12_000);
         }
         "serde_to_json_floats_10k" => {
             // Mirrors `benches/floats.rs::serde_json::bench(10_000)`.
