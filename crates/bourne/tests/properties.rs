@@ -5,8 +5,10 @@
 
 #![cfg(feature = "std")]
 
-use json_bourne::Parser;
-use json_bourne::{parse_str, to_string};
+use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
+
+use json_bourne::{ErrorKind, Parser, parse_str, to_string};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +57,131 @@ proptest! {
             "round-trip failed via {:?} for f={:e} (bits=0x{:016x})",
             s, x, x.to_bits(),
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// String round-trip properties (audit 2026-09 F5.1).
+//
+// Escape handling is where the last two live bugs lived (the variant
+// `skip_if_none` divergence and the `char` scratch overflow), so this is
+// the property the audit asked for by name. The synthesised-JSON
+// generator below deliberately restricts strings to simple ASCII — it
+// keeps shrink tractable — so these properties are the ones actually
+// leaning on the harder cases.
+// ---------------------------------------------------------------------------
+
+/// Strings drawn from every escape-relevant character class: the quote
+/// and backslash fast paths, C0 controls (`\u00XX` output), DEL, 2- and
+/// 3-byte non-ASCII scalars, and 4-byte non-BMP scalars.
+fn arb_escape_string() -> impl Strategy<Value = String> {
+    proptest::collection::vec(
+        prop_oneof![
+            1 => Just('"'),
+            1 => Just('\\'),
+            1 => Just('\u{7f}'),
+            2 => proptest::char::range('\u{0}', '\u{1f}'),
+            2 => proptest::char::range('\u{80}', '\u{7ff}'),
+            2 => proptest::char::range('\u{800}', '\u{ffff}'),
+            2 => proptest::char::range('\u{10000}', '\u{10ffff}'),
+            6 => proptest::char::any(),
+        ],
+        0..32,
+    )
+    .prop_map(|chars| chars.into_iter().collect())
+}
+
+proptest! {
+    /// bourne's serializer output for any `&str` must parse back to the
+    /// bit-exact string — via the borrowed path when there is nothing to
+    /// decode and the escape-decoding path otherwise. Going through
+    /// `to_string` (not `format!("{:?}")`) keeps the serializer itself
+    /// under test.
+    #[test]
+    fn bourne_serialized_str_round_trips(s in arb_escape_string()) {
+        let json = to_string(&s).expect("serializing a &str cannot fail");
+        let parsed: Cow<'_, str> = parse_str(&json).expect("bourne string output parses back");
+        prop_assert_eq!(&*parsed, s.as_str(), "round-trip failed via {:?}", json);
+    }
+
+    /// The same escape machinery reached through the map-key path: a key
+    /// that required escapes must survive object parsing and re-key the
+    /// value correctly.
+    #[test]
+    fn bourne_serialized_map_key_round_trips(
+        k in arb_escape_string(),
+        v in any::<u64>(),
+    ) {
+        let m: BTreeMap<String, u64> = std::iter::once((k.clone(), v)).collect();
+        let json = to_string(&m).expect("serializing a BTreeMap cannot fail");
+        let back: BTreeMap<String, u64> = parse_str(&json).expect("bourne map output parses back");
+        prop_assert_eq!(back.get(&k), Some(&v), "round-trip failed via {:?}", json);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wide-integer properties (audit 2026-09 F5.2). The table tests pin the
+// i64/u64 boundaries exhaustively; these do the same job for i128/u128,
+// whose fused paths are separate code.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn i128_round_trips(
+        x in prop_oneof![
+            1 => Just(i128::MIN),
+            1 => Just(i128::MAX),
+            1 => Just(i128::from(i64::MIN) - 1),
+            1 => Just(i128::from(i64::MAX) + 1),
+            6 => any::<i128>(),
+        ],
+    ) {
+        let s = to_string(&x).expect("serializing an i128 cannot fail");
+        let parsed: i128 = parse_str(&s).expect("formatted i128 must parse");
+        prop_assert_eq!(parsed, x);
+    }
+
+    #[test]
+    fn u128_round_trips(
+        x in prop_oneof![
+            1 => Just(u128::MAX),
+            1 => Just(u128::from(u64::MAX) + 1),
+            6 => any::<u128>(),
+        ],
+    ) {
+        let s = to_string(&x).expect("serializing a u128 cannot fail");
+        let parsed: u128 = parse_str(&s).expect("formatted u128 must parse");
+        prop_assert_eq!(parsed, x);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Map duplicate-key property (audit 2026-09 F5.3). Map FromJson impls own
+// their own duplicate detection (the DupMap path), separate from the
+// derive's; any synthesised object with a repeated key must be a
+// DuplicateKey error rather than a silent last-wins overwrite, in both
+// map flavours.
+// ---------------------------------------------------------------------------
+
+proptest! {
+    #[test]
+    fn map_duplicate_keys_error(
+        key in "[a-zA-Z]{1,6}",
+        a in any::<u64>(),
+        b in any::<u64>(),
+    ) {
+        // Equal values would make a silent overwrite indistinguishable
+        // from correct rejection, so keep them apart.
+        prop_assume!(a != b);
+        let json = format!(r#"{{"{key}":{a},"{key}":{b}}}"#);
+
+        let err = parse_str::<BTreeMap<String, u64>>(&json)
+            .expect_err("duplicate key must error in BTreeMap");
+        prop_assert_eq!(err.kind, ErrorKind::DuplicateKey);
+
+        let err = parse_str::<HashMap<String, u64>>(&json)
+            .expect_err("duplicate key must error in HashMap");
+        prop_assert_eq!(err.kind, ErrorKind::DuplicateKey);
     }
 }
 
