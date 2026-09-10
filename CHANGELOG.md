@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **derive: an `Option` field spelled through a type alias was required,
+  and `skip_if_none` on it did nothing** — the shape test was syntactic,
+  so `type MaybeName = Option<String>` read as a plain required field.
+  The reader raised `MissingField` for valid JSON that omitted the key,
+  and the writer emitted `"name":null` instead of honouring
+  `skip_if_none`. The pair was self-consistent — the explicit null the
+  writer produced was one the reader accepted — so it round-tripped
+  against itself while rejecting input from any producer that omits the
+  key. The shape is now decided by the type checker at the concrete call
+  site, via an inherent impl that outranks a blanket trait impl, so an
+  alias behaves exactly like the type it names. A fully generic field
+  (`field: T`) still behaves as non-`Option`, since inherent impls are
+  not selectable in a generic context; `Option<T>` is detected (release
+  audit A3).
 - **derive: an escaped object key was rejected when it appeared first** —
   the generated key walk read the first key with a borrowing call whose
   `InvalidEscape` propagated, while every *subsequent* key got the

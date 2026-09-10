@@ -66,10 +66,17 @@ impl ObjectWriter {
 
             if f.is_conditional() {
                 let key = &f.key;
-                let scrutinee = f.option_scrutinee();
+                let is_none = f.is_none_test();
                 let lead = Self::runtime_comma(comma);
+                // Writing the whole `Option` is equivalent to writing its
+                // inner value: `ToJson for Option<T>` delegates to `T` for
+                // `Some`, and the `None` case never reaches here. That
+                // avoids an `if let Some(..)` pattern, which would fail to
+                // compile when `skip_if_none` sits on a non-`Option`
+                // field; such a field reports `false` here and keeps the
+                // documented "meaningless attribute is ignored" behavior.
                 stmts.push(quote! {
-                    if let ::core::option::Option::Some(ref __v) = #scrutinee {
+                    if !#is_none {
                         #lead
                         if __FUSED {
                             __w.write_escaped_str(#key)?;
@@ -77,7 +84,7 @@ impl ObjectWriter {
                         } else {
                             __w.object_key(#key)?;
                         }
-                        ::json_bourne::ToJson::write_json(__v, __w)?;
+                        ::json_bourne::ToJson::write_json(#value, __w)?;
                         __first = false;
                     }
                 });

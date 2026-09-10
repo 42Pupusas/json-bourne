@@ -122,6 +122,7 @@ mod escape;
 mod event;
 mod float;
 mod lexer;
+mod option_shape;
 mod parser;
 mod ser;
 #[cfg(all(test, feature = "std"))]
@@ -135,6 +136,11 @@ pub use de::{KeyCow, MapKey, key_to_cow};
 pub use error::{Error, ErrorKind, LineColumn, Position};
 pub use event::{Event, JsonNum, JsonStr, MAX_INPUT_LEN};
 pub use lexer::{Checkpoint, DEFAULT_MAX_DEPTH, Lexer, ValueKind};
+#[doc(hidden)]
+pub use option_shape::{
+    OptionShape as __OptionShape, OptionShapeFallback as __OptionShapeFallback,
+    OptionSlot as __OptionSlot, OptionSlotFallback as __OptionSlotFallback,
+};
 pub use parser::Parser;
 #[cfg(feature = "alloc")]
 pub use ser::{

@@ -8,19 +8,6 @@ use syn::{Ident, Type};
 pub(crate) struct Naming;
 
 impl Naming {
-    /// Is this type spelled `Option<...>`? Textual on the last path
-    /// segment. A type alias (`type Maybe<T> = Option<T>`) therefore
-    /// reads as required — the same limitation serde's derive has, so
-    /// behavioral compatibility wins over deeper type resolution.
-    pub(crate) fn is_option(ty: &Type) -> bool {
-        if let Type::Path(tp) = ty {
-            if let Some(seg) = tp.path.segments.last() {
-                return seg.ident == "Option";
-            }
-        }
-        false
-    }
-
     /// Whether `ty` is exactly `str` — a last path segment named `str`
     /// with no further qualification.
     pub(crate) fn is_bare_str(ty: &Type) -> bool {

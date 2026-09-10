@@ -135,6 +135,12 @@ The same syntactic assumption governs the `finalize` default for missing
 `Option` fields, so an aliased `Option` also becomes *required* rather
 than defaulting to `None`. Worth confirming as part of the same fix.
 
+**Both paragraphs above were wrong, and the second understated the
+severity.** See the A3 resolution below: the reader half rejects valid
+JSON, which is the same class of defect as A1 rather than a cosmetic
+output difference; and the premise that expansion-time detection is
+impossible does not survive contact with the type checker.
+
 ### A4 (Low) — two stale doc comments describe code that no longer exists
 
 Neither affects behavior; both mislead a reader auditing the `unsafe`.
@@ -242,9 +248,10 @@ defects by construction.
 2. **Fix A2** by routing the derived `f32` arm through the same finite
    check as `FromJson for f32`, and add a test asserting the two paths
    agree on `1e300`.
-3. **Decide A3 before cutting**, since rejecting `skip_if_none` on a
-   non-syntactic `Option` is breaking. Document the alias limitation at
-   minimum; confirm the matching `finalize`/required-field behavior.
+3. ~~**Decide A3 before cutting**~~ — no decision was needed. Probing
+   showed the reader half rejects valid JSON (A1's class, not cosmetic)
+   and that the type checker resolves aliases at the concrete call site,
+   so neither documenting nor breaking was necessary. Fixed.
 4. **Close the coverage gaps** — a derived escaped-key round-trip
    property, a first-position escaped-key test, and a `derived` fuzz
    target that asserts successful serialization re-parses. Fix the
@@ -263,8 +270,9 @@ defects by construction.
 Acceptance for the cut: bourne's own serializer output re-parses for
 every supported attribute shape including escaped keys in any position;
 derived and library readers agree on numeric range rejection; a green
-Actions run on the release revision; and explicit sign-off on A3 and any
-remaining limitation.
+Actions run on the release revision; and explicit sign-off on any
+remaining limitation — for A3, that generic `field: T` behaves as
+non-`Option`, which is documented in `option_shape.rs`.
 
 ## Verification performed for this audit
 
@@ -315,13 +323,61 @@ f32` rather than a bare `as` cast. A test asserts the two paths agree
 on `1e40`, `-1e40` and `1e300`, and that `f32::MAX`, underflow to zero
 and ordinary values still parse.
 
-### A3 — open, needs a decision
+### A3 — fixed, and the finding was understated
 
-Unchanged: `skip_if_none` behind a type alias for `Option` is still
-silently ignored. A proc macro cannot resolve aliases, so the choice is
-between documenting the limitation and rejecting the attribute on a
-non-syntactic `Option` — the latter is breaking, which is why it should
-be settled before the cut rather than after.
+Probing before implementing corrected the finding twice.
+
+**The severity was wrong.** `is_option` gates two decisions, and the
+original write-up only examined the writer. The reader's `finalize`
+branches on it too, so an aliased `Option` whose key is *absent* is a
+hard `MissingField` error:
+
+```text
+struct S { name: MaybeName }   // type MaybeName = Option<String>;
+
+{"name":"x"}   -> Ok
+{}             -> Err(MissingField)   // valid JSON, rejected
+```
+
+That is A1's class of defect — valid input refused — not a cosmetic
+`"name":null`. It went unnoticed because the type still round-trips
+against *itself*: the writer emits the explicit null that the reader
+then accepts. Against any other producer, which simply omits the key,
+it fails.
+
+**The premise was wrong.** "A proc macro cannot resolve aliases" is
+true and irrelevant: the macro does not need to, because the type
+checker already has. Rust prefers an inherent method over a trait
+method, so an inherent impl on an `Option`-shaped wrapper wins whenever
+the field really is an `Option`, however spelled, and a blanket trait
+impl catches everything else. This is specialization that works on
+stable, resolved at the concrete call site the derive expands to. A
+standalone probe confirmed 19/19 cases before any crate code changed,
+including both alias forms and `Option<T>` with `T` a type parameter.
+
+So the release decision the finding asked for — document the limitation,
+or break the API by rejecting the attribute — was a false choice. There
+was a third option that is neither.
+
+The fix is `crates/bourne/src/option_shape.rs` (`OptionShape` for the
+writer's skip decision, `OptionSlot` for the reader's absent-key rule),
+with `Naming::is_option` and `FieldPlan::option_scrutinee` deleted: the
+syntactic test is gone from the derive entirely rather than left as a
+second, disagreeing implementation.
+
+One genuine limit remains, documented in the module: a fully generic
+field (`field: T` where `T` is a type parameter) takes the fallback and
+behaves as non-`Option`, since inherent impls are not selectable in a
+generic context. `Option<T>` *is* detected, because the outer
+constructor is concrete — which is the case that occurs in practice.
+
+Verified: 21 tests in `tests/option_aliases.rs` covering both directions
+for direct `Option`, plain aliases, generic aliases, `Option<T>`,
+non-`Option` fields, renamed fields, and enum variants (external and
+internally tagged). Against the pre-fix codegen, 11 of them fail with
+exactly the reported signatures — `"name":null` on the writer,
+`MissingField` on the reader — and the 10 that pass are the control
+cases that were never broken.
 
 ### A4 — fixed
 

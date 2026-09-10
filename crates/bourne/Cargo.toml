@@ -53,5 +53,9 @@ required-features = ["alloc"]
 name = "variant_field_attrs"
 required-features = ["alloc"]
 
+[[test]]
+name = "option_aliases"
+required-features = ["alloc"]
+
 [lints]
 workspace = true

@@ -118,18 +118,6 @@ impl<'a> FieldPlan<'a> {
         }
     }
 
-    /// Pattern for matching `Some(inner)` out of an `Option` field, and
-    /// the identifier the inner value is bound to.
-    pub(crate) fn option_scrutinee(&self) -> TokenStream {
-        match &self.access {
-            Access::SelfField => {
-                let ident = self.ident;
-                quote! { self.#ident }
-            }
-            Access::Binding(bind) => quote! { *#bind },
-        }
-    }
-
     /// The destructuring pattern entry `name: __fN`, for variants only.
     pub(crate) fn pattern_entry(&self) -> Option<TokenStream> {
         match &self.access {
@@ -141,10 +129,25 @@ impl<'a> FieldPlan<'a> {
         }
     }
 
-    /// Is this field written conditionally (`skip_if_none` on an
-    /// `Option`)? A `skip_if_none` on a non-`Option` field is meaningless
-    /// and is treated as unconditional, matching the named-struct path.
+    /// Is this field written conditionally (`skip_if_none` requested)?
+    /// Whether the type is actually an `Option` is decided at compile
+    /// time by the type checker, not here: a syntactic test would read
+    /// `type MaybeName = Option<String>` as non-`Option` (audit A3).
+    /// `skip_if_none` on a genuinely non-`Option` field costs one
+    /// always-false branch that the optimizer folds away.
     pub(crate) fn is_conditional(&self) -> bool {
-        self.attrs.skip_if_none && Naming::is_option(self.ty)
+        self.attrs.skip_if_none
+    }
+
+    /// Runtime test for "this `Option` field holds `None`", resolved by
+    /// inherent-over-trait method preference so type aliases are seen
+    /// through. Always `false` for non-`Option` fields.
+    pub(crate) fn is_none_test(&self) -> TokenStream {
+        let value = self.value_ref();
+        quote! {{
+            #[allow(unused_imports)]
+            use ::json_bourne::__OptionShapeFallback as _;
+            ::json_bourne::__OptionShape(#value).bourne_is_none()
+        }}
     }
 }

@@ -113,18 +113,25 @@ impl ObjectReader {
     /// Turn the collected `Option<T>` slot into the field's final value:
     /// `default` falls back to `Default`, an `Option` field defaults to
     /// `None`, anything else is required.
+    ///
+    /// Whether the field is an `Option` is decided by the type checker
+    /// rather than by inspecting tokens: a syntactic test reads `type
+    /// MaybeName = Option<String>` as required and rejects valid JSON
+    /// that omits the key (audit A3).
     fn finalize(name: &Ident, f: &FieldPlan<'_>) -> TokenStream {
         if f.attrs.default {
             quote! { #name.unwrap_or_else(::core::default::Default::default) }
-        } else if Naming::is_option(f.ty) {
-            quote! { #name.unwrap_or(::core::option::Option::None) }
         } else {
-            quote! {
-                #name.ok_or_else(|| ::json_bourne::Error::new(
-                    ::json_bourne::ErrorKind::MissingField,
-                    __lex.position(),
-                ))?
-            }
+            quote! {{
+                #[allow(unused_imports)]
+                use ::json_bourne::__OptionSlotFallback as _;
+                ::json_bourne::__OptionSlot(#name)
+                    .bourne_or_absent()
+                    .ok_or_else(|| ::json_bourne::Error::new(
+                        ::json_bourne::ErrorKind::MissingField,
+                        __lex.position(),
+                    ))?
+            }}
         }
     }
 
