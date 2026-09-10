@@ -10,6 +10,8 @@ Scope: `json-bourne`, `bourne-derive`, release configuration, existing tests and
 | R1 pretty separators | High | **Fixed.** `runtime_comma` no longer gates on `__FUSED`; separator emission is structural on every sink. 6 regression tests added to `tests/pretty_derive.rs` (rename/conditional × present/absent × first/middle/trailing × adjacent/internal/untagged), exact-output + round-trip pinned. External reproductions now pass; compact output pinned byte-identical. Workspace suite green; `derived` fuzz 10k runs clean. |
 | R3 contradictory derive config | Medium | **Fixed.** `enum_mode` validates: identical tag/content rejected, `content` without `tag` rejected, `untagged`+`tag`/`content` rejected, each with a targeted message. 5 derive unit tests added; valid combinations still derive. |
 | R2 CI target mismatch | High | **Fixed (script verified).** Host matrix runs host suites only; bare-metal builds live in the `no_std` job, which passes its matrix target to `scripts/ci.sh no_std <target>`. Windows step gets an explicit bash shell. Verified locally: both targets installed, all four bare-metal builds pass, host `test` recipe passes end-to-end. The workflow file itself needs one green Actions run to close. **See R9 — that run had never happened, and could not have.** |
+| R11 `scripts/ci.sh` not executable in git | High | **Fixed.** Committed `100644`, so every runner checked out a non-executable script and the four jobs that shell out (`test`, `msrv`, `no_std`, `crap`) died at step 1 with exit 126 on Ubuntu, macOS and Windows at once. `git update-index --chmod=+x` (content hash unchanged), and the call sites now run `bash scripts/ci.sh …` so the mode bit cannot break them again. The jobs invoking `cargo` directly — `clippy`, `fmt`, `miri`, `fuzz-smoke` — were never affected, which is why miri was green on the failing run. |
+| R10 clippy job floats on `@stable` | Medium | **Fixed.** First real run failed on two `missing_const_for_fn` hits in `lexer.rs` (both pre-existing, from `37307fb`): the runner resolved `@stable` to 1.98, local clippy was 1.97, and 1.98 extended the lint to `&mut self` receivers. Both are now `const fn` — stable since 1.83, so MSRV 1.85 is unaffected. Root cause is the job: the workspace runs `nursery` + `pedantic` at `-D warnings`, groups that grow every six weeks, so a floating toolchain breaks builds that changed nothing. Installing beta (1.99) proved three more (`assert_is_empty`) were already queued. Clippy is now pinned to 1.85-era-style explicit `1.98` and bumped deliberately; a new advisory `clippy-next` job runs beta with `continue-on-error`. Verified clean on 1.97, 1.98 and beta 1.99. |
 | R9 CI trigger names a branch that does not exist | High | **Fixed.** `on:` filtered `push`/`pull_request` to `branches: [main]`, but this repository has no `main` — `mera` is the trunk and the only ref on the remote. No job in this workflow had ever executed, on any commit. Trigger repointed at `mera`, plus `workflow_dispatch` for manual runs. This invalidated the "verified on runners" half of R2 and F7 for the whole remediation pass; every such claim rested on local reproduction alone. |
 | R4 feature masking | Medium | **Fixed.** Self dev-dependency is `default-features = false`; `derive` now implies `alloc` (generated readers need the alloc-gated key API — a documented fact, previously implicit); alloc-dependent integration tests declared via `required-features`; five alloc-API doctests gated. All four combos now run their claimed feature set and pass. |
 | R5 float attribution | Medium | **Corrected.** Dated correction note added to `AUDIT-2026-09.md` §4.3; §4.4 recommendation no longer cites the retracted percentages. |
@@ -18,6 +20,27 @@ Scope: `json-bourne`, `bourne-derive`, release configuration, existing tests and
 | R6 version/registry | Medium | **Open.** Version still `0.2.2`; breaking changes in Unreleased imply a minor bump. Changelog entries for this remediation pass added under Unreleased. Publish-order and packaged-consumer checks remain. |
 
 Remaining verification gaps (unchanged from the original pass): typed/`stream` sustained fuzz campaigns beyond smoke, full configured Miri with default isolation on `tests::*`, dependency advisory checking, and registry-consumer validation of final archives.
+
+### First green CI run
+
+After R9, R10 and R11, the workflow reaches its jobs for the first time in
+the repository's history. Everything that has reported is green, including
+the legs that had never executed anywhere: the macOS and Windows `test`
+matrix, both bare-metal `no_std` targets, and the `crap` gate with its
+`cargo install cargo-crappy` step. `miri` is still running at the time of
+writing; its green on the previous run carries over untouched, since it
+invokes `cargo` directly and neither the mode-bit nor the `const fn`
+change affects what it exercises. R2's "needs one green Actions run to
+close" is satisfied for every job except that one.
+
+The three CI defects share a shape worth recording: in each case the
+artifact was correct and locally verified, while the mechanism that
+invokes it on a runner was broken — a trigger naming a nonexistent
+branch, a linter version that was never the runner's, a script the runner
+could not execute. `scripts/ci.sh` reproduces the *jobs* but never the
+*plumbing*, so local verification is structurally blind to all three. Any
+future claim of the form "CI covers this" should be read as a claim about
+plumbing that only a real run can support.
 
 ---
 
