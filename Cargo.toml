@@ -4,10 +4,10 @@ members = ["crates/bourne", "crates/bourne-derive", "benches/bourne-bench"]
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
-license = "MIT"
-repository = "https://github.com/illuminodes/bourne"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/42Pupusas/json-bourne"
 rust-version = "1.85"
 
 [workspace.lints.rust]

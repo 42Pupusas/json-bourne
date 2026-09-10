@@ -63,7 +63,7 @@ const U128_FAST_DIGITS: u32 = 38;
 /// otherwise drive recursive consumers into stack overflow.
 /// [`Lexer::new`](crate::Lexer::new) and [`Parser::new`](crate::Parser::new)
 /// build with this limit; parameterize with [`Lexer::with_depth`] /
-/// [`Parser::with_depth`] to override it.
+/// [`crate::Parser::with_depth`] to override it.
 pub const DEFAULT_MAX_DEPTH: usize = 128;
 
 /// `u64::MAX` has 20 decimal digits: up to 19, `acc * 10 + d` cannot
@@ -240,7 +240,7 @@ impl<'input> Lexer<'input> {
 }
 
 impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
-    /// Construct a lexer over `input` with a custom [`MAX_DEPTH`].
+    /// Construct a lexer over `input` with a custom `MAX_DEPTH`.
     ///
     /// The depth is also the size of the inline nesting stack, so the
     /// choice stays visible at the call site; [`Lexer::new`] is the
@@ -563,7 +563,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
 
     /// Parse a JSON integer directly into `u64`, fusing lex and conversion.
     ///
-    /// Same shape as [`parse_i64_value`] but unsigned: a leading `-` is
+    /// Same shape as [`Self::parse_i64_value`] but unsigned: a leading `-` is
     /// rejected outright (including `-0` — JSON has one zero and `u64`
     /// cannot represent its negation), and the full `u64` range up to
     /// `18446744073709551615` is accepted. Without this fused unsigned

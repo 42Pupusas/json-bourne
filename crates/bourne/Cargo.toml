@@ -21,7 +21,7 @@ alloc = []
 derive = ["alloc", "dep:bourne-derive"]
 
 [dependencies]
-bourne-derive = { path = "../bourne-derive", version = "=0.2.2", optional = true }
+bourne-derive = { path = "../bourne-derive", version = "=0.3.0", optional = true }
 
 [dev-dependencies]
 proptest = "1"

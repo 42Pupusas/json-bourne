@@ -80,7 +80,7 @@ impl<'input> Parser<'input> {
 }
 
 impl<'input, const MAX_DEPTH: usize> Parser<'input, MAX_DEPTH> {
-    /// Construct a parser over `input` with a custom [`MAX_DEPTH`].
+    /// Construct a parser over `input` with a custom `MAX_DEPTH`.
     ///
     /// The depth is also the size of the inline nesting stack, so the
     /// choice stays visible at the call site; [`Parser::new`] is the

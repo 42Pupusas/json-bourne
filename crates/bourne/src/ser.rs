@@ -86,7 +86,7 @@ pub trait JsonWrite {
     ///
     /// Default: open-quote, shared escape walk, close-quote, through
     /// [`Self::write_byte`]/[`Self::write_str_raw`]. One implementation
-    /// ([`crate::escape`]) serves every sink; char-oriented `write_byte`
+    /// (`crate::escape`) serves every sink; char-oriented `write_byte`
     /// sinks cannot mangle non-ASCII because multi-byte runs only ever
     /// cross [`Self::write_str_raw`] (audit 3.9). Sinks with a faster
     /// native path override this.
@@ -298,7 +298,7 @@ impl JsonWrite for StringSink<'_> {
         Error::new(ErrorKind::InvalidUtf8, Position::START)
     }
 
-    /// Single shared escape walk ([`crate::escape`]); this sink keeps
+    /// Single shared escape walk (`crate::escape`); this sink keeps
     /// the default quotes-via-`write_byte` shape.
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
         write_escaped(self, s)
@@ -396,7 +396,7 @@ impl JsonWrite for ByteSink<'_> {
         Ok(())
     }
 
-    /// Single shared escape walk ([`crate::escape`]); byte-slice copies
+    /// Single shared escape walk (`crate::escape`); byte-slice copies
     /// instead of `&str` through the custom `write_str_raw`.
     fn write_escaped_str(&mut self, s: &str) -> Result<(), Self::Error> {
         write_escaped(self, s)

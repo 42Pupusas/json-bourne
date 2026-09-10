@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-10
+
 ### Performance
 
 - **non-ASCII strings parse ~27% faster** — `consume_utf8_multibyte` now
@@ -483,7 +485,9 @@ Initial public release.
   (`crates/bourne/tests/zero_alloc.rs`) pinning the zero-allocation
   guarantees.
 
-[Unreleased]: https://github.com/illuminodes/bourne/compare/v0.2.1...HEAD
-[0.2.1]: https://github.com/illuminodes/bourne/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/illuminodes/bourne/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/illuminodes/bourne/releases/tag/v0.1.0
+[Unreleased]: https://github.com/42Pupusas/json-bourne/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/42Pupusas/json-bourne/compare/v0.2.2...v0.3.0
+[0.2.2]: https://github.com/42Pupusas/json-bourne/compare/v0.2.1...v0.2.2
+[0.2.1]: https://github.com/42Pupusas/json-bourne/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/42Pupusas/json-bourne/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/42Pupusas/json-bourne/releases/tag/v0.1.0
