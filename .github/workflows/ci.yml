@@ -64,16 +64,36 @@ jobs:
         shell: bash
 
   clippy:
-    name: clippy
+    name: clippy (1.98 pinned)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned, not `stable`. The workspace turns on clippy's `nursery` and
+      # `pedantic` groups at `-D warnings`, and both gain lints every six
+      # weeks, so a floating toolchain fails this job on commits that did
+      # not touch the code. Bump deliberately; `clippy-next` below gives
+      # advance warning of what a bump will cost.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: "1.98"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       # Tight on the published crates; benches/profiling crates carry
       # cast/precision-loss warnings that are inherent to bench code.
+      - run: cargo clippy -p json-bourne -p bourne-derive --all-targets --all-features -- -D warnings
+
+  clippy-next:
+    # Advance warning of lints arriving in the next stable, without letting
+    # them break the build. Advisory only.
+    name: clippy (beta, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@beta
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
       - run: cargo clippy -p json-bourne -p bourne-derive --all-targets --all-features -- -D warnings
 
   fmt:

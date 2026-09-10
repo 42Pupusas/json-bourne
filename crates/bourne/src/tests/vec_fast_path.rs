@@ -35,7 +35,7 @@ fn vec_duration_fast_path() {
 
     // Empty — early return.
     let v: Vec<Duration> = parse_str("[]").expect("empty");
-    assert!(v.is_empty());
+    assert_eq!(v, Vec::<Duration>::new());
 
     // Single — first push.
     let v: Vec<Duration> = parse_str("[1.5]").expect("single");
@@ -57,7 +57,7 @@ fn vec_duration_fast_path() {
 #[test]
 fn vec_i64_fast_path() {
     let v: Vec<i64> = parse_str("[]").expect("empty");
-    assert!(v.is_empty());
+    assert_eq!(v, Vec::<i64>::new());
 
     let v: Vec<i64> = parse_str("[42]").expect("single");
     assert_eq!(v, [42]);
@@ -74,7 +74,7 @@ fn vec_i64_fast_path() {
 #[test]
 fn vec_u128_fast_path() {
     let v: Vec<u128> = parse_str("[]").expect("empty");
-    assert!(v.is_empty());
+    assert_eq!(v, Vec::<u128>::new());
 
     let v: Vec<u128> = parse_str("[0,170141183460469231731687303715884105727]").expect("many");
     assert_eq!(v, [0u128, i128::MAX as u128]);

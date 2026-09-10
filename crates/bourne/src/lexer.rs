@@ -1568,7 +1568,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         }
     }
 
-    fn scan_digit_run(&mut self) {
+    const fn scan_digit_run(&mut self) {
         let bytes = self.input;
         let mut i = self.offset;
         let end = bytes.len();
@@ -1582,7 +1582,7 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         self.offset = i;
     }
 
-    pub(crate) fn skip_whitespace(&mut self) {
+    pub(crate) const fn skip_whitespace(&mut self) {
         let bytes = self.input;
         let mut i = self.offset;
         let end = bytes.len();
