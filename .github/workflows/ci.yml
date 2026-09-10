@@ -1,10 +1,13 @@
 name: CI
 
+# `mera` is this repository's trunk; there is no `main`. The trigger must
+# name a branch that exists or no job ever runs.
 on:
   push:
-    branches: [main]
+    branches: [mera]
   pull_request:
-    branches: [main]
+    branches: [mera]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
