@@ -179,6 +179,9 @@ Bourne leads on 14 of 15 head-to-head cases:
 | `mixed_length_strings` typed borrowed | 37.03 µs | 131.5 µs | **3.55×** |
 | `unicode_strings_1000` typed borrowed | 60.35 µs | 54.10 µs | **0.90×** |
 
+(The `unicode_strings` row is the pre-fix measurement; see the P1
+resolution below — it now runs at **1.21×**.)
+
 ### P1 (Medium) — unicode-dense strings are the one measured loss
 
 `unicode_strings_1000_typed_borrowed` is the only benchmark where bourne
@@ -200,6 +203,48 @@ byte is routed to the validating scalar path). Any change must keep that
 property. Worth scheduling as a focused optimization with the existing
 `unicode_strings` bench as the gate, not as release-blocking work.
 
+#### P1 — fixed, and the diagnosis needed correcting
+
+The finding blamed "vector-loop entry costs for very short ASCII runs",
+which implied the SIMD scanner was the problem. `perf record` on the
+`vec_borrowed_unicode_10k` workload says otherwise:
+
+| symbol | cycles |
+|---|---|
+| `consume_utf8_multibyte` | **52.5%** |
+| `parse_str_value` | 44.7% |
+| everything else | 2.8% |
+
+IPC was 5.0 with a 0.001% branch-miss rate — no stalls, no
+misprediction, just too many instructions retired. And a control build
+with `--cfg bourne_no_simd` ran *worse* (1.47× serde vs 1.19×), so the
+SSE2 scanner was earning its keep even on this corpus. The cost was the
+round trip: each character returned to the string loop, which re-entered
+the scanner — splatting three compare constants — for a run often only
+one character long.
+
+The fix consumes a *run* of multi-byte characters per call and walks the
+cursor in a local instead of through `peek`/`bump`. Both halves matter;
+the local-cursor change alone moved the ratio only 1.19× → 1.15×.
+
+| `unicode_strings_1000_typed_borrowed` | vs serde, same run |
+|---|---|
+| before | 52.50 µs — **1.19× slower** |
+| after | **38.25 µs** — **0.83×, i.e. 1.21× faster** |
+
+That is a 27% improvement on the target workload, and it inverts the
+finding: **bourne now leads on all 15 head-to-head cases.** The typed
+borrow (38.25 µs) is now faster than bourne's own streaming drain of the
+same corpus (42.29 µs). No ASCII-path regression — `mixed_length_strings`
+typed borrowed still runs 3.87× serde_json.
+
+Every byte is still bounds-checked and range-validated individually, so
+the `from_utf8_unchecked` invariant and error positions are unchanged;
+four new tests in `api_smoke.rs` pin the run boundaries (quote, ASCII,
+escape, control byte, invalid continuation) and one asserts the error
+position lands on the offending byte. Verified under Miri (118/118),
+`--cfg bourne_no_simd`, and 30k fuzz runs.
+
 ### P2 (Low) — `vec_string` gains least, and the reason is worth confirming
 
 `vec_string` (owned `String` elements) is bourne's narrowest win:
@@ -209,6 +254,37 @@ paths is much larger than the allocation cost alone would suggest. The
 `profile` binary already has a `vec_string_10k` workload for exactly this
 question; a flamegraph would confirm whether the cost is allocation,
 the escape-decode copy, or both before any work is attempted.
+
+#### P2 — investigated, no change recommended
+
+The profile answers the question the finding posed: it is allocation,
+and it is irreducible. Counters for the same parse work, owned versus
+borrowed:
+
+| | borrowed `&str` | owned `String` |
+|---|---|---|
+| cycles | 11.9 G | 40.9 G |
+| instructions | 62.8 G | 181.1 G |
+| IPC | 5.3 | 4.4 |
+
+The owned path burns 3.4× the cycles for identical parsing, and IPC stays
+high — it is not stalling, it is executing allocator code. `perf record`
+agrees: `String::from_lex`, `read_string_inner` and `vec_from_lex`
+together account for ~33%, while `malloc`, `cfree`, `try_allocate_in` and
+libc internals take most of the rest.
+
+The decode path has no fat left to trim. `decode_owned` allocates once at
+exact capacity (the raw byte length is a valid upper bound because no
+escape decodes to more bytes than it occupies), so there are no growth
+reallocations; `read_string_no_validate` already avoids a redundant
+validation pass; and the escape-free case is a single sized copy.
+
+The premise that "the gap is larger than allocation alone would suggest"
+does not survive measurement — 10 000 heap allocations and frees is
+simply what the workload costs. Bourne still wins the head-to-head
+(546.8 µs vs 629.4 µs). Callers who want the difference should use
+`&str` or `Cow<str>`, which the crate already documents as the default
+choice for string fields. **Closed: measured, no code change.**
 
 ---
 
@@ -259,9 +335,11 @@ defects by construction.
 5. **Correct the A4 comments** in the same pass; the `ByteSink` one
    describes an invariant the code does not maintain, which is the kind
    of comment that gets trusted during a future refactor.
-6. **Schedule P1** as a focused optimization gated on the existing
-   `unicode_strings` bench, and settle P2 with a flamegraph from the
-   `profile` binary's `vec_string_10k` workload before writing code.
+6. ~~**Schedule P1** … and settle P2 with a flamegraph~~ — both done.
+   P1 fixed (27% faster on the target workload; bourne now leads all 15
+   head-to-head cases). P2 measured and closed with no code change: the
+   cost is irreducible allocation, and the decode path is already
+   single-allocation at exact capacity.
 7. **After the fixes land**, re-run the full battery (workspace suite in
    every feature combo, clippy, fmt, MSRV, bare-metal, Miri, all three
    fuzz targets, `cargo graph --report`, cargo-crappy) and push to CI for

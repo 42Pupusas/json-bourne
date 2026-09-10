@@ -1508,27 +1508,64 @@ impl<'input, const MAX_DEPTH: usize> Lexer<'input, MAX_DEPTH> {
         self.scan_ascii_string_run_scalar();
     }
 
+    /// Validate a run of multi-byte UTF-8 sequences and advance past it.
+    ///
+    /// Two things keep this off the caller's critical path on non-ASCII text
+    /// (audit P1). The cursor is walked in a local rather than through
+    /// `peek`/`bump`, so it stays in a register for the whole run; and
+    /// consecutive multi-byte characters are consumed here instead of
+    /// returning to the string loop after each one. That return costs an
+    /// outer dispatch plus an entry into the SSE2 ASCII scanner — which
+    /// splats its three compare constants before doing any work — for a run
+    /// that is often a single character. Scripts like CJK and emoji arrive in
+    /// long non-ASCII runs, so the loop pays for itself there and costs one
+    /// extra byte test on isolated accents.
+    ///
+    /// Every byte is still bounds-checked individually and validated against
+    /// the RFC 3629 ranges, so the reported error position stays on the first
+    /// offending byte and `parse_str_value`'s `from_utf8_unchecked` keeps its
+    /// invariant.
     #[inline]
     fn consume_utf8_multibyte(&mut self) -> Result<(), Error> {
-        let leading = self
-            .peek()
-            .ok_or_else(|| self.err(ErrorKind::InvalidUtf8))?;
+        let bytes = self.input;
+        let mut i = self.offset;
 
-        let (extra, second_lo, second_hi) =
-            utf8_leading_byte_info(leading).ok_or_else(|| self.err(ErrorKind::InvalidUtf8))?;
-        self.bump();
+        loop {
+            let Some(&leading) = bytes.get(i) else {
+                self.offset = i;
+                return Err(self.err(ErrorKind::InvalidUtf8));
+            };
+            let Some((extra, second_lo, second_hi)) = utf8_leading_byte_info(leading) else {
+                self.offset = i;
+                return Err(self.err(ErrorKind::InvalidUtf8));
+            };
+            i += 1;
 
-        match self.peek() {
-            Some(b) if b >= second_lo && b <= second_hi => self.bump(),
-            _ => return Err(self.err(ErrorKind::InvalidUtf8)),
-        }
-        for _ in 1..extra {
-            match self.peek() {
-                Some(0x80..=0xBF) => self.bump(),
-                _ => return Err(self.err(ErrorKind::InvalidUtf8)),
+            match bytes.get(i) {
+                Some(&b) if b >= second_lo && b <= second_hi => i += 1,
+                _ => {
+                    self.offset = i;
+                    return Err(self.err(ErrorKind::InvalidUtf8));
+                }
+            }
+            for _ in 1..extra {
+                match bytes.get(i) {
+                    Some(&(0x80..=0xBF)) => i += 1,
+                    _ => {
+                        self.offset = i;
+                        return Err(self.err(ErrorKind::InvalidUtf8));
+                    }
+                }
+            }
+
+            // Only a further multi-byte lead continues the run; anything else
+            // (including the closing quote, an escape, or a control byte) is
+            // the string loop's business.
+            if !matches!(bytes.get(i), Some(0x80..)) {
+                self.offset = i;
+                return Ok(());
             }
         }
-        Ok(())
     }
 
     fn scan_digit_run(&mut self) {

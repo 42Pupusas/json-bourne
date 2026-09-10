@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- **non-ASCII strings parse ~27% faster** — `consume_utf8_multibyte` now
+  validates a whole run of multi-byte characters per call and walks the
+  cursor in a local instead of through `peek`/`bump`. Previously each
+  character returned to the string loop, which re-entered the SSE2 ASCII
+  scanner — splatting its three compare constants — for a run that was
+  often one character long; `perf` put 52% of cycles in that function.
+  On the `unicode_strings_1000` typed-borrowed benchmark this moves
+  bourne from 1.19× *slower* than serde_json to 1.21× faster (52.50 µs →
+  38.25 µs), which was the last workload where bourne trailed. Every byte
+  is still bounds-checked and range-validated individually, so error
+  positions and the borrowed-`&str` UTF-8 invariant are unchanged
+  (release audit P1).
+
 ### Fixed
 
 - **derive: an `Option` field spelled through a type alias was required,

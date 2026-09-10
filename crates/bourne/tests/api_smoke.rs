@@ -743,6 +743,59 @@ mod tests {
         }
     }
 
+    // `consume_utf8_multibyte` consumes a *run* of multi-byte characters
+    // rather than returning to the string loop after each one (audit P1),
+    // so the transitions out of that run each need covering: to the
+    // closing quote, to ASCII, to an escape, and to an invalid byte.
+    #[test]
+    fn utf8_multibyte_runs_of_every_width() {
+        let cases: &[&str] = &[
+            "\"ααα\"",                  // 2-byte run
+            "\"你好世界今天天气很好\"", // 3-byte run
+            "\"🦀💯🚀🌍\"",             // 4-byte run
+            "\"é你🦀é\"",               // mixed widths, no ASCII between
+            "\"你a好b世c\"",            // multibyte alternating with ASCII
+            "\"ascii tail 你好\"",      // run at the very end of the string
+            "\"你好 ascii tail\"",      // run at the very start
+        ];
+        for input in cases {
+            let v: &str = parse_str(input).unwrap();
+            assert_eq!(v, &input[1..input.len() - 1], "input: {input}");
+        }
+    }
+
+    #[test]
+    fn utf8_run_followed_by_escape_still_decodes() {
+        let v: alloc::string::String = parse_str("\"你好\\n世界\"").unwrap();
+        assert_eq!(v, "你好\n世界");
+    }
+
+    #[test]
+    fn utf8_run_stops_at_control_byte() {
+        let mut bytes = "\"你好".as_bytes().to_vec();
+        bytes.push(0x0A); // raw newline: illegal unescaped in a JSON string
+        bytes.push(b'"');
+        assert_eq!(
+            parse::<&str>(&bytes).unwrap_err().kind,
+            ErrorKind::ControlCharInString
+        );
+    }
+
+    #[test]
+    fn invalid_byte_after_valid_run_reports_that_position() {
+        // Three valid 3-byte characters, then a bad continuation byte. The
+        // run loop must report the error at the offending byte, not at the
+        // start of the run or at end-of-input.
+        let mut bytes = "\"你好世".as_bytes().to_vec();
+        let bad_at = bytes.len();
+        bytes.push(0xE1);
+        bytes.push(0x00); // not a continuation byte
+        bytes.push(b'"');
+        let err = parse::<&str>(&bytes).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidUtf8);
+        assert_eq!(err.position.offset as usize, bad_at + 1);
+    }
+
     // -----------------------------------------------------------------
     // Coverage: write_escape_byte — all control bytes
     // -----------------------------------------------------------------
