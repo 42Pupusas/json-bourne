@@ -28,7 +28,11 @@ jobs:
       # `--all-features` turns on both of bourne-bench's allocator-installing
       # features; the workspace pins those behind explicit feature lists in
       # ci.yml instead (see scripts/ci.sh, which runs this exact list).
-      - run: scripts/ci.sh test
+      # Invoked via `bash <script>` rather than as a bare path: that runs
+      # regardless of the file's mode bit, which git tracks and which is
+      # easy to lose (a 100644 checkout fails with exit 126, "Permission
+      # denied", on every runner at once).
+      - run: bash scripts/ci.sh test
         shell: bash
 
   msrv:
@@ -40,7 +44,8 @@ jobs:
         with:
           toolchain: "1.85"
       - uses: Swatinem/rust-cache@v2
-      - run: scripts/ci.sh msrv
+      - run: bash scripts/ci.sh msrv
+        shell: bash
 
   no_std:
     name: no_std build (${{ matrix.target }})
@@ -60,7 +65,7 @@ jobs:
       # build cleanly against bare-metal targets. The matrix installs each
       # job's target, and the script is invoked with exactly that target —
       # no job references a target nobody installed.
-      - run: scripts/ci.sh no_std ${{ matrix.target }}
+      - run: bash scripts/ci.sh no_std ${{ matrix.target }}
         shell: bash
 
   clippy:
@@ -120,7 +125,8 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-crappy --locked
-      - run: scripts/ci.sh crap
+      - run: bash scripts/ci.sh crap
+        shell: bash
 
   miri:
     name: miri
